@@ -45,7 +45,7 @@ const config = {
           sidebarPath: require.resolve('./sidebars.js'),
           // Remove this to remove the "edit this page" links.
           editUrl:
-            'https://github.com/suse-edge/docusaurus-test/tree/main/docs/',
+            'https://github.com/suse-edge/docusaurus-test/tree/main/',
         },
         theme: {
           customCss: require.resolve('./src/css/custom.css'),
@@ -87,8 +87,8 @@ const config = {
             title: 'Docs',
             items: [
               {
-                label: 'Tutorial',
-                to: '/docs/intro',
+                label: 'Hello',
+                to: '/docs/hello',
               },
             ],
           },
