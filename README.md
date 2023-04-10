@@ -1,5 +1,5 @@
-# Website
+# SUSE Edge documentation website
 
-This website is built using [Docusaurus 2](https://docusaurus.io/), a modern static website generator.
+Available at [https://suse-edge.github.io/docusaurus-test/](https://suse-edge.github.io/docusaurus-test/)
 
-
+Built using [Docusaurus 2](https://docusaurus.io/)

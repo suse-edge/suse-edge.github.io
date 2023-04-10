@@ -1,7 +1,11 @@
 ---
-title: Markdown page example
+title: SUSE Edge index
 ---
 
-# Markdown page example
+# Welcome
 
-You don't need React to write simple standalone pages.
+This is the main index of the [SUSE Edge](https://github.com/suse-edge) documentation site.
+
+## Content
+
+* [Hello](docs/hello)
