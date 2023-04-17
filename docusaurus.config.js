@@ -42,7 +42,9 @@ const config = {
       /** @type {import('@docusaurus/preset-classic').Options} */
       ({
         docs: {
+          routeBasePath: '/', // Serve the docs at the site's root
           sidebarPath: require.resolve('./sidebars.js'),
+          include: ['**/*.md', '**/*.mdx'],
           // Remove this to remove the "edit this page" links.
           editUrl:
             'https://github.com/suse-edge/docusaurus-test/tree/main/',
@@ -68,8 +70,8 @@ const config = {
         },
         items: [
           {
-            type: 'docSidebar',
-            sidebarId: 'tutorialSidebar',
+            type: 'doc',
+            docId: 'index',
             position: 'left',
             label: 'Documentation',
           },
@@ -87,8 +89,8 @@ const config = {
             title: 'Docs',
             items: [
               {
-                label: 'Hello',
-                to: '/docs/hello',
+                label: 'SUSE Edge',
+                to: '/',
               },
             ],
           },
@@ -102,7 +104,7 @@ const config = {
             ],
           },
         ],
-        copyright: `Copyright © ${new Date().getFullYear()} SUSE Edge team. Built with Docusaurus.`,
+        copyright: `Copyright © ${new Date().getFullYear()} SUSE Edge team. All Rights Reserved. Built with Docusaurus.`,
       },
       prism: {
         theme: lightCodeTheme,
