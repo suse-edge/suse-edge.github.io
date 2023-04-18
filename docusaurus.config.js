@@ -57,6 +57,14 @@ const config = {
     ],
   ],
 
+  plugins: [
+    [require.resolve('docusaurus-lunr-search'),
+        {
+            indexBaseUrl: true
+        }
+    ]
+  ],
+
   themeConfig:
     /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
     ({
