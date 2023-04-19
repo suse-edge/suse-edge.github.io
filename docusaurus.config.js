@@ -7,14 +7,14 @@ const darkCodeTheme = require('prism-react-renderer/themes/dracula');
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: 'SUSE Edge',
-  tagline: 'All things related to the SUSE Edge team',
+  tagline: 'All things related to the SUSE Edge team docs',
   favicon: 'img/favicon.ico',
 
   // Set the production url of your site here
   url: 'https://suse-edge.github.io',
   // Set the /<baseUrl>/ pathname under which your site is served
   // For GitHub pages deployment, it is often '/<projectName>/'
-  baseUrl: '/docusaurus-test/',
+  baseUrl: '/docs/',
 
   // GitHub Pages adds a trailing slash to Docusaurus URLs by default.
   trailingSlash: false,
@@ -22,7 +22,7 @@ const config = {
   // GitHub pages deployment config.
   // If you aren't using GitHub pages, you don't need these.
   organizationName: 'suse-edge', // Usually your GitHub org/user name.
-  projectName: 'docusaurus-test', // Usually your repo name.
+  projectName: 'docs', // Usually your repo name.
   deploymentBranch: 'gh-pages', 
 
   onBrokenLinks: 'throw',
@@ -47,7 +47,7 @@ const config = {
           include: ['**/*.md', '**/*.mdx'],
           // Remove this to remove the "edit this page" links.
           editUrl:
-            'https://github.com/suse-edge/docusaurus-test/tree/main/',
+            'https://github.com/suse-edge/docs/tree/main/',
         },
         theme: {
           customCss: require.resolve('./src/css/custom.css'),
@@ -84,7 +84,7 @@ const config = {
             label: 'Documentation',
           },
           {
-            href: 'https://github.com/suse-edge/docusaurus-test',
+            href: 'https://github.com/suse-edge/',
             label: 'GitHub',
             position: 'right',
           },
