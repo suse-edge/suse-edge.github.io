@@ -1,6 +1,6 @@
 # SUSE Edge documentation website
 
-Available at [https://suse-edge.github.io/docusaurus-test/](https://suse-edge.github.io/docusaurus-test/)
+Available at [https://suse-edge.github.io/docs/](https://suse-edge.github.io/docs/)
 
 Built using [Docusaurus 2](https://docusaurus.io/)
 
