@@ -123,7 +123,7 @@ The rest of the nodes will be installed after kube-vip as the server URL for the
 
 ### Kube-vip installation
 
-The official [kube-vip](https://kube-vip.io/docs/usage/k3s/) documentation explains the steps in more detail, but essentially it means creating the required resource files for kube-vip to run (RBAC and a DaemonSet) and leveraging [K3s auto-deploy](https://docs.k3s.io/installation/packaged-components#auto-deploying-manifests-addons) feature (aka. any manifest stored in a particular folder of the host `/var/lib/rancher/k3s/server/manifests` will be automatically deployed at the K3s service startup or when the file changes) kube-vip will be executed.
+The official [kube-vip](https://kube-vip.io/docs/usage/k3s/) documentation explains the steps in more detail, but essentially it means creating the required resource files for kube-vip to run (RBAC and a DaemonSet) and leveraging [K3s auto-deploy](https://docs.k3s.io/installation/packaged-components#auto-deploying-manifests-addons) feature (aka. any manifest stored in a particular folder of the host `/var/lib/rancher/k3s/server/manifests` will be automatically deployed at the K3s service startup or when the file changes via something similar to `kubectl apply -f`) kube-vip will be executed.
 
 **NOTE:** In this case, the `--services` flag for kube-vip won't be used.
 
@@ -240,8 +240,6 @@ spec:
         operator: Exists
 EOF
 ```
-
-**NOTE:** For the avid reader, creating the manifests in the first node only doesn't warranty full HA as if the node is wiped and the rest of the nodes rebooted, there won't be kube-vip after the reboot. This needs to be investigated further.
 
 ### K3s installation - Control-plane nodes
 
