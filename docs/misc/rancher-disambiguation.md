@@ -1,3 +1,8 @@
+---
+sidebar_position: 2
+title: Rancher portfolio disambiguation
+---
+
 # Rancher portfolio disambiguation
 
 [Rancher](https://www.rancher.com/) ecosystem host a few projects under its umbrella. For newcomers it may be not easy to have a clear picture on the different products and projects. This is a humble attempt to clarify it.
