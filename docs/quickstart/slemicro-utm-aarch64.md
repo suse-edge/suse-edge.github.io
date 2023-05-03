@@ -1,4 +1,5 @@
 ---
+sidebar_position: 1
 title: SLE Micro on OSX on Apple Silicon (UTM)
 ---
 

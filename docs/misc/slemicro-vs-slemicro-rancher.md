@@ -1,7 +1,7 @@
 ---
+sidebar_position: 1
 title: SLE Micro vs SLE Micro for Rancher
 ---
-
 
 ## SLE Micro  
 SLE Micro is a minimal operating system that is specifically designed for use in 

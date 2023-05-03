@@ -1,4 +1,5 @@
 ---
+sidebar_position: 3
 title: Elemental on OSX on Apple Silicon (UTM)
 ---
 
