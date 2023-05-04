@@ -41,6 +41,9 @@ RKE2 combines the best-of-both-worlds from the 1.x version of RKE (hereafter ref
 From K3s, it inherits the usability, ease-of-operations, and deployment model.
 From RKE1, it inherits close alignment with upstream Kubernetes. In places K3s has diverged from upstream Kubernetes in order to optimize for edge deployments, but RKE1 and RKE2 can stay closely aligned with upstream.
 
+### RKE2 using Air-gap install
+[air-gap install](https://docs.rke2.io/install/airgap) is an RKE2 Installation where all package dependencies are installed using two different methods. Using the tarball release 'rke2-airgap-images' or by using a private registry and passing the parameter 'system-default-registry' during the installation to point directly to the private registry where images are located (as a mirror for docker.io)
+
 ### Rancher vs K3s vs RKE
 You don’t need Rancher to set up K3s or RKE1 or RKE2 on their own it just makes the whole process easier.
 Rancher runs as a Management Interface that can interact with running clusters and also provision new clusters - as well as manage authentication to the downstream clusters, and it can also do other things like interact with applications that kubernetes is orchestrating and provides monitoring tools
