@@ -1,6 +1,6 @@
 ---
 sidebar_position: 1
-title: SLE Micro on X86_86 on libvirt (KCLI)
+title: SLE Micro on X86_64 on libvirt (KCLI)
 ---
 
 # Intro
@@ -67,7 +67,7 @@ mv slemicro /var/lib/libvirt/images/
 
 ## Create the VM
 ```bash
-kcli create vm -i slemicro -P cloudinit=false -P iso=ignition-and-combustion.iso
+kcli create vm -i slemicro -P cloudinit=false -P memory=4096 -P numcpu=4 -P disks=['{"size": 20}']  -P iso=ignition-and-combustion.iso
 ```
 
 After a couple of seconds, the VM will boot up and will configure itself
