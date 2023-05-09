@@ -1,6 +1,6 @@
 ---
 sidebar_position: 1
-title: SLE Micro on X86_64 on libvirt (KCLI)
+title: SLE Micro on X86_64 on libvirt (virt-install)
 ---
 
 # Intro
@@ -11,34 +11,13 @@ This daemon runs on host servers and performs required management tasks for virt
 The libvirt client libraries and utilities connect to this daemon to issue tasks and collect information about the configuration and resources of the host system and guests.
 (see https://libvirt.org/manpages/libvirtd.html)
 
-## KCLI
-This tool is meant to ease interaction with the following virtualization providers:
-Libvirt/Vsphere/Kubevirt/Aws/Gcp/Ibmcloud/oVirt/Openstack/Packet
+## Virt-install
+`virt-install` is a command line tool for creating new KVM , Xen, or Linux container guests using the "libvirt" hypervisor management library. See the EXAMPLES section at the end of this document to quickly get started.
+`virt-install` tool supports both text based & graphical installations, using VNC or SDL graphics, or a text serial console. The guest can be configured to use one or more virtual disks, network interfaces, audio devices, physical USB or PCI devices, among others.
+The installation media can be held locally or remotely on NFS , HTTP , FTP servers. In the latter case `virt-install` will fetch the minimal files necessary to kick off the installation process, allowing the guest to fetch the rest of the OS distribution as needed. PXE booting, and importing an existing disk image (thus skipping the install phase) are also supported.
 
-You can:
-- Manage vms (create/delete/list/info/ssh/start/stop/console/serialconsole/webconsole/create or delete disk/create or delete nic/clone/snapshot)
-- Deploy them using profiles
-- Define more complex workflows using plans and products.
-
-Kubernetes clusters can also be deployed with the following type:
-
-Kubeadm/Openshift/OKD/Hypershift/Microshift/K3s/Kind
-
-To see more details about KCLI, please visit https://kcli.readthedocs.io/en/latest/index.html
-
-## KCLI Installation
-
-A generic script is provided for installation:
-```bash 
-curl https://raw.githubusercontent.com/karmab/kcli/main/install.sh | sudo bash
-```
-Maybe you need to create network pool and the storage pool the first time:
-```bash
-kcli create pool -p /var/lib/libvirt/images -n default
-``` 
-
-For more details, please visit https://kcli.readthedocs.io/en/latest/installation.html
-
+To see more details about virt-install options, please visit https://linux.die.net/man/1/virt-install
+To see more details about virt-manager and the graphical interface, please visit https://virt-manager.org/
 
 # Image-based process step by step
 
@@ -60,14 +39,9 @@ The base image SLE Micro with the customization based on ignition and combustion
 qemu-img convert -O qcow2 SLE-Micro.x86_64-5.4.0-Default-GM.raw slemicro
 ```
 
-## Move the image to libvirtd images folder
-```bash
-mv slemicro /var/lib/libvirt/images/
-```
-
 ## Create the VM
 ```bash
-kcli create vm -i slemicro -P cloudinit=false -P memory=4096 -P numcpu=4 -P disks=['{"size": 20}']  -P iso=ignition-and-combustion.iso
+virt-install --name MyVM --memory 4096 --vcpus 4 --disk ./slemicro --import --cdrom ./ignition-and-combustion.iso --network default --osinfo detect=on,name=sle-unknown
 ```
 
 After a couple of seconds, the VM will boot up and will configure itself
@@ -75,25 +49,31 @@ using the ignition and combustion scripts, including registering itself
 to SCC
 
 ```bash
-kcli list vm 
-+-------------------------+--------+-----------------+----------+-------+----------+
-|           Name          | Status |        Ip       |  Source  |  Plan | Profile  |
-+-------------------------+--------+-----------------+----------+-------+----------+
-| distracted-duncanmcleod |   up   | 192.168.122.233 | slemicro | kvirt | slemicro |
-+-------------------------+--------+-----------------+----------+-------+----------+
+virsh list
+ Id   Nombre          State
+----------------------------------
+ 14   MyVM          running
 ```
 
 ## Access to the vm
 
+You can access to the VM using virsh console:
 ```bash
-kcli ssh distracted-duncanmcleod
+virsh console MyVM
+
+Connected to domain MyVM
 ```
 or using ssh directly and the user set in the ignition file (in this case root)
 ```bash
-ssh root@192.168.122.233
+virsh domifaddr MyVM
+ Nombre     MAC address          Protocol     Address
+-------------------------------------------------------------------------------
+ vnet14     52:54:00:f0:be:e5    ipv4         192.168.122.221/24
+ 
+ssh root@192.168.122.221
 ```
 
 ## Delete the VM
 ```bash
-kcli delete vm distracted-duncanmcleod
+virsh destroy MyVM ; virsh undefine MyVM
 ```
