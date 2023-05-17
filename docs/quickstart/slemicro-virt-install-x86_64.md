@@ -32,23 +32,10 @@ Basically we will use the following documents as reference to create the image c
 
 If you are trying to download to a remote server, you can use scp to copy that file to the server.
 
-<details>
-  <summary>Click here for instructions to get the raw file to remote server</summary>
-  
-**NOTES:** 
- - Be sure **NOT** to unzip the file before transfering it to your server  
- - Make sure to replace the paths as necessary
-  
-### Transfering file to server:
-```
- scp -rp ~/PATH-TO-FILE/SLE-Micro.x86_64-5.4.0-Default-GM.raw.xz user@ip:~/PATH-TO-STORE-IN
-```
-</details>
-
 - Access to <https://scc.suse.com/> to generate a registration code
 - Butane, qemu-img and cdrtools installed (using zypper for example)
  ```bash
-  sudo zypper install butane qemu-tools xz
+  sudo zypper install butane qemu-tools xz mkisofs
  ```
 - Unzip the file
 
@@ -142,8 +129,7 @@ Combustion as explained before:
   parameter)
 
   ```
-  mkisofs -full-iso9660-filenames -o ignition-and-combustion.iso -V
-  ignition ${TMPDIR}
+  mkisofs -full-iso9660-filenames -o ignition-and-combustion.iso -V ignition ${TMPDIR}
   ```
 
 - **Optional:** Remove the temporary folder
