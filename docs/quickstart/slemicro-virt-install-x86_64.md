@@ -30,7 +30,7 @@ Basically we will use the following documents as reference to create the image c
  
 **NOTE:** You need to have a valid user on the SUSE site to be able to download the file.
 
-**If you are trying to download to a remote server, open this section for instructions:**
+If you are trying to download to a remote server, you can use scp to copy that file to the server.
 
 <details>
   <summary>Click here for instructions to get the raw file to remote server</summary>
@@ -158,7 +158,7 @@ virt-install --name MyVM --memory 4096 --vcpus 4 --disk ./slemicro --import --cd
 ```
 **NOTES:** 
  - Pass the -noautoconsole flag in case your console hangs on the installation, this will allow you to run other commands without CTRL-C interrupt
- - Pass the --debug flag if you run into issues
+ - Pass the `--debug` flag if you run into issues
  - If you run into an issue and you need to restart, or if you get an error saying that MyVM is already running, run this command:
 
 ```
