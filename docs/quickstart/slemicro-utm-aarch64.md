@@ -283,8 +283,7 @@ Combustion as explained before:
   parameter)
 
   ```
-  mkisofs -full-iso9660-filenames -o ignition-and-combustion.iso -V
-  ignition ${TMPDIR}
+  mkisofs -full-iso9660-filenames -o ignition-and-combustion.iso -V ignition ${TMPDIR}
   ```
 
 - **Optional:** Remove the temporary folder
