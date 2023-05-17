@@ -171,9 +171,9 @@ In this scenario, Ignition runs before Combustion.
   download the file.
 
 - Access to <https://scc.suse.com/> to generate a registration code
-- Butane, qemu-img and cdrtools installed (using brew for example)
+- Butane, qemu and cdrtools installed (using brew for example)
   ```
-  brew install butane cdrtools qemu-img
+  brew install butane cdrtools qemu
   ```
 
 - UTM installed (using brew for example)
