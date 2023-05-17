@@ -34,6 +34,7 @@ If you are trying to download to a remote server, you can use scp to copy that f
 
 - Access to <https://scc.suse.com/> to generate a registration code
 - Butane, qemu-img and cdrtools installed (using zypper for example)
+ 
  ```bash
   sudo zypper install butane qemu-tools xz mkisofs
  ```
@@ -88,7 +89,7 @@ Combustion as explained before:
     users: 
      - name: root 
        password_hash: "$y$j9T$/t4THH10B7esLiIVBROsE.$G1lyxfy/MoFVOrfXSnWAUq70Tf3mjfZBIe18koGOuXB" 
-  EOF 
+  EOF
   ```
 
 - Create a script combustion file as required. See the following
@@ -115,7 +116,7 @@ Combustion as explained before:
 
   # Leave a marker 
   echo "Configured with combustion" > /etc/issue.d/combustion 
-  EOF 
+  EOF
   ```
 
 - Convert the butane config to ignition
