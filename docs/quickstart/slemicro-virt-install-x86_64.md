@@ -35,8 +35,8 @@ Basically we will use the following documents as reference to create the image c
 <details>
   <summary>Click here for instructions to get the raw file to remote server</summary>
   
-**Note:** Be sure **NOT** to unzip the file before transfering it to your server  
- - After downloading, run this command to get your raw file to the server
+**NOTES:** 
+ - Be sure **NOT** to unzip the file before transfering it to your server  
  - Make sure to replace the paths as necessary
   
 ### Transfering file to server:
@@ -50,11 +50,16 @@ Basically we will use the following documents as reference to create the image c
  ```bash
   sudo zypper install butane qemu-tools xz
  ```
+- Unzip the file
+
+```bash
+  xz -d SLE-Micro.x86_64-5.4.0-Default-GM.raw.xz 
+```
 
 - Resize the image file. In this example, to 30G
 
 ```bash
- qemu-img resize -f raw ~/PATH-TO-FILE/SLE-Micro.x86_64-5.4.0-Default-GM.raw30G > /dev/null
+ qemu-img resize -f raw ~/PATH-TO-FILE/SLE-Micro.x86_64-5.4.0-Default-GM.raw 30G > /dev/null
 ```
  
 ## Convert the raw image to qcow2
