@@ -157,7 +157,7 @@ Combustion as explained before:
 virt-install --name MyVM --memory 4096 --vcpus 4 --disk ./slemicro --import --cdrom ./ignition-and-combustion.iso --network default --osinfo detect=on,name=sle-unknown
 ```
 **NOTES:** 
- - Pass the -noautoconsole flag in case your console hangs on the installation, this will allow you to run other commands without CTRL-C interrupt
+ - Pass the `-noautoconsole` flag in case your console hangs on the installation, this will allow you to run other commands without CTRL-C interrupt
  - Pass the `--debug` flag if you run into issues
  - If you run into an issue and you need to restart, or if you get an error saying that MyVM is already running, run this command:
 
