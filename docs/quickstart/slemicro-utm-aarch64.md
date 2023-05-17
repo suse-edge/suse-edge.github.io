@@ -197,8 +197,7 @@ In this scenario, Ignition runs before Combustion.
   hostname
 
   ```
-  cp ~/Downloads/SLE-Micro.aarch64-5.3.0-Default-GM.raw
-  ~/VMs/slemicro.raw
+  cp ~/Downloads/SLE-Micro.aarch64-5.3.0-Default-GM.raw ~/VMs/slemicro.raw
   ```
 
 - Resize the image file. In this example, to 30G
@@ -242,7 +241,7 @@ Combustion as explained before:
     users: 
      - name: root 
        password_hash: "$y$j9T$/t4THH10B7esLiIVBROsE.$G1lyxfy/MoFVOrfXSnWAUq70Tf3mjfZBIe18koGOuXB" 
-  EOF 
+  EOF
   ```
 
 - Create a script combustion file as required. See the following
@@ -269,7 +268,7 @@ Combustion as explained before:
 
   # Leave a marker 
   echo "Configured with combustion" > /etc/issue.d/combustion 
-  EOF 
+  EOF
   ```
 
 - Convert the butane config to ignition
