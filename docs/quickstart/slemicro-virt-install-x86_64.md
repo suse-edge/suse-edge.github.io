@@ -24,25 +24,142 @@ To see more details about virt-manager and the graphical interface, please visit
 We have to create the image based and prepare the image with ignition and combustion files.
 Basically we will use the following documents as reference to create the image changing the base SLEMicro image to be downloaded (**in this case will be SLE Micro x86_64**):
 
-- Prerequisites: https://suse-edge.github.io/quickstart/slemicro-utm-aarch64#prerequisites  (Remember to download the x86_64 image)
-- Image preparation: https://suse-edge.github.io/quickstart/slemicro-utm-aarch64#image-preparation
-- Ignition & Combustion files: https://suse-edge.github.io/quickstart/slemicro-utm-aarch64#ignition--combustion-files
+- Download the raw image file from the SUSE website at https://www.suse.com/download/sle-micro/
+    - Select AMD64/Intel 64 architecture
+    - Look for the raw file (I.e.- `SLE-Micro.x86_64-5.4.0-Default-GM.raw.xz`)
+ 
+**NOTE:** You need to have a valid user on the SUSE site to be able to download the file.
 
-After following the previous steps, at this point you should have a folder with the following files:
-- slemicro.raw (SLE-Micro.x86_64-5.4.0-Default-GM.raw)
-- ignition-and-combustion.iso
+**If you are trying to download to a remote server, open this section for instructions:**
 
-The base image SLE Micro with the customization based on ignition and combustion.
+<details>
+  <summary>Click here for instructions to get the raw file to remote server</summary>
+  
+**Note:** Be sure **NOT** to unzip the file before transfering it to your server  
+ - After downloading, run this command to get your raw file to the server
+ - Make sure to replace the paths as necessary
+  
+### Transfering file to server:
+```
+ scp -rp ~/PATH-TO-FILE/SLE-Micro.x86_64-5.4.0-Default-GM.raw.xz user@ip:~/PATH-TO-STORE-IN
+```
+</details>
 
+- Access to <https://scc.suse.com/> to generate a registration code
+- Butane, qemu-img and cdrtools installed (using zypper for example)
+ ```bash
+  sudo zypper install butane qemu-tools xz
+ ```
+
+- Resize the image file. In this example, to 30G
+
+```bash
+ qemu-img resize -f raw ~/PATH-TO-FILE/SLE-Micro.x86_64-5.4.0-Default-GM.raw30G > /dev/null
+```
+ 
 ## Convert the raw image to qcow2
 ```bash
 qemu-img convert -O qcow2 SLE-Micro.x86_64-5.4.0-Default-GM.raw slemicro
 ```
+## Ignition & Combustion files
+
+To automate the installation, we will leverage Butane, Ignition and
+Combustion as explained before:
+
+- Create a temporary folder to store the assets
+
+  ```
+  TMPDIR=$(mktemp -d)
+  ```
+- Create the required folders for ignition and combustion
+
+  ```
+  mkdir -p ${TMPDIR}/{combustion,ignition}
+  ```
+
+- Create a `config.fcc` butane config file as required. See the
+  following example to set a `root` password for the root user, and to
+  configure the hostname to be "slemicro"'
+
+  ```
+  cat << EOF > ${TMPDIR}/config.fcc 
+  variant: fcos 
+  version: 1.4.0 
+  storage: 
+    files: 
+      - path: /etc/hostname 
+        mode: 0644 
+        overwrite: true 
+        contents: 
+          inline: "slemicro" 
+  passwd: 
+    users: 
+     - name: root 
+       password_hash: "$y$j9T$/t4THH10B7esLiIVBROsE.$G1lyxfy/MoFVOrfXSnWAUq70Tf3mjfZBIe18koGOuXB" 
+  EOF 
+  ```
+
+- Create a script combustion file as required. See the following
+  example to register the SLE Micro instance to SUSE's SCC (use your
+  own email/regcode) and to create a `/etc/issue.d/combustion` file
+
+  ```
+  cat << EOF > ${TMPDIR}/combustion/script  
+  #!/bin/bash 
+  # combustion: network 
+
+  # Redirect output to the console 
+  exec > >(exec tee -a /dev/tty0) 2>&1
+
+  # Set hostname at combustion phase for SUSEConnect
+  hostname slemicro
+
+  # Registration 
+  if ! which SUSEConnect > /dev/null 2>&1; then 
+      zypper --non-interactive install suseconnect-ng 
+  fi 
+
+  SUSEConnect --email foobar@suse.com --url https://scc.suse.com --regcode YOURCODE 
+
+  # Leave a marker 
+  echo "Configured with combustion" > /etc/issue.d/combustion 
+  EOF 
+  ```
+
+- Convert the butane config to ignition
+
+  ```
+  butane -p -o ${TMPDIR}/ignition/config.ign ${TMPDIR}/config.fcc
+  ```
+
+- Create an ISO file. It is requried for both ignition and combustion
+  to work that the ISO is labeled as `ignition` (hence the -V
+  parameter)
+
+  ```
+  mkisofs -full-iso9660-filenames -o ignition-and-combustion.iso -V
+  ignition ${TMPDIR}
+  ```
+
+- **Optional:** Remove the temporary folder
+
+  ```
+  rm -Rf ${TMPDIR}
+  ```
 
 ## Create the VM
 ```bash
 virt-install --name MyVM --memory 4096 --vcpus 4 --disk ./slemicro --import --cdrom ./ignition-and-combustion.iso --network default --osinfo detect=on,name=sle-unknown
 ```
+**NOTES:** 
+ - Pass the -noautoconsole flag in case your console hangs on the installation, this will allow you to run other commands without CTRL-C intterupt
+ - Pass the --debug flag if you run into issues
+ - If you run into an issue and you need to restart, or if you get an error saying that MyVM is already running, run this command:
+
+```
+ virsh destroy MyVM ; virsh undefine MyVM
+```
+
 
 After a couple of seconds, the VM will boot up and will configure itself
 using the ignition and combustion scripts, including registering itself
