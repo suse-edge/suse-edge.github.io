@@ -259,9 +259,22 @@ After a while, the nodes will join the cluster successfully and an HA cluster wi
 
 The kubeconfig file that is generated as part of the installation has localhost as the Kubernetes API endpoint, so in order to use it from outside, it needs to be changed to the VIP as:
 
-```
+<Tabs>
+<TabItem value="mac" label="MacOS" default>
+
+```bash
 scp 192.168.205.10:/etc/rancher/k3s/k3s.yaml ~/.kube/config && sed -i '' 's/127.0.0.1/192.168.205.10/g' ~/.kube/config && chmod 600 ~/.kube/config
 ```
+
+</TabItem>
+<TabItem value="suse" label="SUSE">
+
+```bash
+scp 192.168.205.10:/etc/rancher/k3s/k3s.yaml ~/.kube/config && sed -i 's/127.0.0.1/192.168.205.10/g' ~/.kube/config && chmod 600 ~/.kube/config
+```
+
+</TabItem>
+</Tabs>
 
 ### K3s installation - adding agents
 
