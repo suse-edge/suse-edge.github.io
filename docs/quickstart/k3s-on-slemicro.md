@@ -222,8 +222,8 @@ spec:
           value: ${VIP}
         - name: prometheus_server
           value: :2112
-				- name: lb_enable
-					value: "true"
+        - name: lb_enable
+          value: "true"
         image: ghcr.io/kube-vip/kube-vip:v0.5.12
         imagePullPolicy: Always
         name: kube-vip
