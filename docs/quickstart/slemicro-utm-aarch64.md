@@ -227,7 +227,7 @@ Combustion as explained before:
   configure the hostname to be "slemicro"'
 
   ```
-  cat << EOF > ${TMPDIR}/config.fcc 
+  cat << 'EOF' > ${TMPDIR}/config.fcc 
   variant: fcos 
   version: 1.4.0 
   storage: 
