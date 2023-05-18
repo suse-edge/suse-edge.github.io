@@ -130,7 +130,7 @@ The official [kube-vip](https://kube-vip.io/docs/usage/k3s/) documentation expla
 
 ```
 export VIP=192.168.205.10
-cat <<- EOF > /var/lib/rancher/k3s/server/manifests
+cat <<- EOF > /var/lib/rancher/k3s/server/manifests/kube-vip.yaml
 apiVersion: v1
 kind: ServiceAccount
 metadata:
