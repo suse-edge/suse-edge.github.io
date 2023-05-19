@@ -124,13 +124,36 @@ The rest of the nodes will be installed after kube-vip as the server URL for the
 
 ### Kube-vip installation
 
-The official [kube-vip](https://kube-vip.io/docs/usage/k3s/) documentation explains the steps in more detail, but essentially it means creating the required resource files for kube-vip to run (RBAC and a DaemonSet) and leveraging [K3s auto-deploy](https://docs.k3s.io/installation/packaged-components#auto-deploying-manifests-addons) feature (aka. any manifest stored in a particular folder of the host `/var/lib/rancher/k3s/server/manifests` will be automatically deployed at the K3s service startup or when the file changes via something similar to `kubectl apply -f`) kube-vip will be executed.
+The official [kube-vip](https://kube-vip.io/docs/usage/k3s/) documentation explains the steps in more detail, but essentially it means creating the required resource files for kube-vip to run (RBAC and a DaemonSet).
+
+**IMPORTANT:** IPVS modules must be loaded in order for the [load balancer feature](https://kube-vip.io/docs/about/architecture/#control-plane-load-balancing) to work.
+This is achieved by creating the following file:
+
+```bash
+cat <<- EOF > /etc/modules-load.d/ipvs.conf
+ip_vs
+ip_vs_rr
+ip_vs_wrr
+ip_vs_sh
+nf_conntrack
+EOF
+```
+
+Configurations stored under `/etc/modules-load.d` will be automatically picked up and loaded on boot.
+Loading them for the first time, however, can be achieved without rebooting by executing:
+
+```bash
+for i in $(cat /etc/modules-load.d/ipvs.conf); do modprobe ${i}; done
+```
+
+The Kubernetes resources can be created by leveraging [K3s auto-deploy](https://docs.k3s.io/installation/packaged-components#auto-deploying-manifests-addons) feature 
+(aka. any manifest stored in a particular folder of the host `/var/lib/rancher/k3s/server/manifests` will be automatically deployed at the K3s service startup or when the file changes via something similar to `kubectl apply -f`).
 
 **NOTE:** In this case, the `--services` flag for kube-vip won't be used.
 
 ```
 export VIP=192.168.205.10
-cat <<- EOF > /var/lib/rancher/k3s/server/manifests
+cat <<- EOF > /var/lib/rancher/k3s/server/manifests/kube-vip.yaml
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -222,8 +245,8 @@ spec:
           value: ${VIP}
         - name: prometheus_server
           value: :2112
-				- name: lb_enable
-					value: "true"
+        - name: lb_enable
+          value: "true"
         image: ghcr.io/kube-vip/kube-vip:v0.5.12
         imagePullPolicy: Always
         name: kube-vip
@@ -259,9 +282,22 @@ After a while, the nodes will join the cluster successfully and an HA cluster wi
 
 The kubeconfig file that is generated as part of the installation has localhost as the Kubernetes API endpoint, so in order to use it from outside, it needs to be changed to the VIP as:
 
-```
+<Tabs>
+<TabItem value="mac" label="MacOS" default>
+
+```bash
 scp 192.168.205.10:/etc/rancher/k3s/k3s.yaml ~/.kube/config && sed -i '' 's/127.0.0.1/192.168.205.10/g' ~/.kube/config && chmod 600 ~/.kube/config
 ```
+
+</TabItem>
+<TabItem value="suse" label="SUSE">
+
+```bash
+scp 192.168.205.10:/etc/rancher/k3s/k3s.yaml ~/.kube/config && sed -i 's/127.0.0.1/192.168.205.10/g' ~/.kube/config && chmod 600 ~/.kube/config
+```
+
+</TabItem>
+</Tabs>
 
 ### K3s installation - adding agents
 
