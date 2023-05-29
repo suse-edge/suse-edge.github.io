@@ -4,7 +4,8 @@ title: SLE Micro vs SLE Micro for Rancher
 ---
 
 ## SLE Micro  
-SLE Micro is a minimal operating system that is specifically designed for use in 
+SLE Micro is a minimal, general-purpose operating system that is also
+well suited for use in 
 containerized environments. It is based on the concept of a transactional server, 
 where the entire operating system is treated as a single, immutable unit. This 
 means that any changes to the system are made through atomic transactions, which 
@@ -39,27 +40,39 @@ For more info and steps on how to use SLE micro you can check the
 
 ## SLE Micro for Rancher 
 
-SLE Micro for Rancher is a variant of SLE Micro that is specifically designed 
-to work with containerized workloads in a Rancher environment. 
-It is built around the Elemental platform, which provides additional features 
-and tools that make it easier to deploy and manage container workloads.
+SLE Micro for Rancher is a single-purpose variant of SLE Micro. It is specifically designed 
+to run Kubernetes and its containerized workloads in a Rancher environment. 
 
-One of the main differences between SLE Micro for Rancher and SLE Micro is 
-the preconfigured networking and storage options that come with it. 
-This simplifies the process of setting up a Rancher environment and ensures 
-that everything is configured correctly for container workloads.
+It is built around the [Elemental platform](https://elemental.docs.rancher.com), which provides
+the features and tools for declarative deployment and
+management of the operating system.
 
-SLE Micro for Rancher also includes integrated monitoring and logging capabilities, 
-which make it easier to monitor the health and performance of your container 
-workloads. This can help you identify and resolve issues quickly.
+There are a couple of fundamental differences between SLE Micro for
+Rancher and SLE Micro.
 
-Another difference is that it is not strictly a transactional server, 
-but it does include transactional features. For example, it uses the Btrfs 
-file system, which is also used in the SLE Micro and supports snapshots and 
-rollbacks, allowing you to easily revert to a previous system state if needed. 
+SLE Micro **for Rancher** is
+* declarative
+* image based
+* cloud native.
 
-Additionally, updates to the system are delivered through a transactional 
-update mechanism, which ensures that the system remains in a consistent state 
-throughout the update process. 
+Making it an ideal match to Kubernetes and Rancher.
 
-See more [here](https://documentation.suse.com/trd/kubernetes/html/kubernetes_ri_rancher-k3s-sles/id-introduction.html)
+SLE Micro is more traditional being
+* imperative
+* package based
+* transactional
+
+Being package-based, SLE Micro still needs package repositories for
+deployment and updates and additionally a registry for container
+workloads.
+
+
+SLE Micro for Rancher fits ideally into an existing cloud-native
+infrastructure as deployments and updates are served via a container
+registry.
+
+It is completely manageable from within Rancher, everything in the SLE
+Micro for Rancher stack is represented as a Kubernetes resource
+
+This all makes SLE Micro for Rancher ideally suited for running Kubernetes
+clusters on the edge.
