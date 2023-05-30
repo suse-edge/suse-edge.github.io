@@ -7,7 +7,7 @@ title: Feature Configuration
 
 SUSE ATIP is a platform designed for hosting modern, cloud native, Telco applications at scale from core to edge. 
 
-This is the home of ATIP Documentation.
+This section documents how to configuration telco specific features on ATIP deployed clusters
 
 ##  Real Time
 ##  Multus
@@ -16,6 +16,7 @@ This is the home of ATIP Documentation.
 ##  Huge Pages
 ##  CPU Pinning
 ##  NUMA Aware scheduling
+##  VRAN Acceleration (Intel ACC100)    
 ##  Metal LB (Beta)
 
 

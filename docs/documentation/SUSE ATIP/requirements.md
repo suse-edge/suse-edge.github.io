@@ -7,10 +7,13 @@ title: Pre-Requisites and Assumptions
 
 SUSE ATIP is a platform designed for hosting modern, cloud native, Telco applications at scale from core to edge. 
 
-This is the home of ATIP Documentation.
+This page will provide details of the expected requirements to deploy and use ATIP
 
 ##   Hardware
+Minimum hardware specs, support, validated designs, stack validation etc
 ##   Network
+Expected network setup, example setups
 ##   Services (DHCP, DNS, etc)
+External services required by ATIP, common options for DHCP, DNS, etc.
 
 
