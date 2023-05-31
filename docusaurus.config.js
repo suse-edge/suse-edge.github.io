@@ -45,6 +45,8 @@ const config = {
           routeBasePath: '/', // Serve the docs at the site's root
           sidebarPath: require.resolve('./sidebars.js'),
           include: ['**/*.md', '**/*.mdx'],
+          showLastUpdateAuthor: true,
+          showLastUpdateTime: true,
           // Remove this to remove the "edit this page" links.
           editUrl:
             'https://github.com/suse-edge/suse-edge.github.io/tree/main/',
