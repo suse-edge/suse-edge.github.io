@@ -1,6 +1,6 @@
 ---
 sidebar_position: 5
-title: Edge Site Installation
+title: "*Draft* Edge Site Installation"
 ---
 
 # SUSE Adaptive Telco Infrastructure Platform (ATIP)

@@ -1,6 +1,6 @@
 ---
 sidebar_position: 6
-title: Feature Configuration
+title: "*Draft* Feature Configuration"
 ---
 
 # SUSE Adaptive Telco Infrastructure Platform (ATIP)

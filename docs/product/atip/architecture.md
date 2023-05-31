@@ -1,6 +1,6 @@
 ---
 sidebar_position: 2
-title: Architecture and Concepts
+title: "*Draft* Architecture and Concepts"
 ---
 
 # SUSE Adaptive Telco Infrastructure Platform (ATIP)

@@ -1,6 +1,6 @@
 ---
 sidebar_position: 7
-title: Lifecycle Actions
+title: "*Draft* Lifecycle Actions"
 ---
 
 # SUSE Adaptive Telco Infrastructure Platform (ATIP)

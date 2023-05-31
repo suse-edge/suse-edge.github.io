@@ -1,6 +1,6 @@
 ---
 sidebar_position: 4
-title: Management Cluster Setup
+title: "*Draft* Management Cluster Setup"
 ---
 
 # SUSE Adaptive Telco Infrastructure Platform (ATIP)
