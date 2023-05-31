@@ -10,7 +10,7 @@ SUSE ATIP is a platform designed for hosting modern, cloud native, Telco applica
 This section covers the lifecycle management actions of deployed ATIP clusters 
 
 ##  Software lifecycles
-Roadmap, support lifecycle diagram etc
+Roadmap, support lifecycle diagram etc. Support combiantions.
 ##  Management Cluster upgrades
 Updating management cluster OS + RKE
 ##  Rancher Upgrades
