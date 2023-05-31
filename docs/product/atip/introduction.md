@@ -1,6 +1,6 @@
 ---
 sidebar_position: 1
-title: Introduction to ATIP Documentation
+title: Introduction
 ---
 
 # SUSE Adaptive Telco Infrastructure Platform (ATIP)

@@ -1,6 +1,6 @@
 ---
 sidebar_position: 3
-title: Pre-Requisites and Assumptions
+title: Prerequisites and Assumptions
 ---
 
 # SUSE Adaptive Telco Infrastructure Platform (ATIP)
