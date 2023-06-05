@@ -171,6 +171,7 @@ In this scenario, Ignition runs before Combustion.
   download the file.
 
 - Access to <https://scc.suse.com/> to generate a registration code
+
 - Butane, qemu and cdrtools installed (using brew for example)
   ```
   brew install butane cdrtools qemu
@@ -190,14 +191,14 @@ In this scenario, Ignition runs before Combustion.
 - Uncompress the SLE Micro image
 
   ```
-  xz -d ~/Downloads/SLE-Micro.aarch64-5.3.0-Default-GM.raw.xz
+  xz -d ~/Downloads/SLE-Micro.*-Default-GM.raw.xz
   ```
 
 - Move the file to a proper location and rename it to fit the VM
   hostname
 
   ```
-  cp ~/Downloads/SLE-Micro.aarch64-5.3.0-Default-GM.raw ~/VMs/slemicro.raw
+  cp ~/Downloads/SLE-Micro.*-Default-GM.raw ~/VMs/slemicro.raw
   ```
 
 - Resize the image file. In this example, to 30G
@@ -358,6 +359,8 @@ to SCC
 
 **NOTE:** In case the VM doesn't get network connectivity, try
 https://github.com/utmapp/UTM/discussions/3530#discussioncomment-5072113
+
+**NOTE:** Once the VM is running, you can access via SSH via its IP as `ssh root@<ip>`
 
 # ISO Process (TBD)
 - Download the ISO file
