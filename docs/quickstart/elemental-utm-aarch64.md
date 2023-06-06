@@ -189,6 +189,8 @@ This creates a `MachineRegistration` object which will provide a unique URL whic
 
 Elemental's support for Raspberry Pi is primarily for demonstration purposes at this point. Therefore the installation process is modelled similar to x86-64. You boot from a seed image (USB stick in this case) and install to a storage medium (SD-card for Raspberry Pi).
 
+**NOTE:** The steps below should to be ran in a linux machine (`SLE Micro` for example).
+
 First step is to download the `machineregistration` object that will instruct where to get the config for the node to be installed:
 
 ```
