@@ -18,7 +18,7 @@ const sidebars = {
     {
       "type": "category",
       "collapsible": true,
-      "collapsed": true,
+      "collapsed": false,
       "label": "Quickstarts",
       "items": [
         {
@@ -30,7 +30,7 @@ const sidebars = {
     {
       "type": "category",
       "collapsible": true,
-      "collapsed": true,
+      "collapsed": false,
       "label": "Miscellaneous",
       "items": [
         {
@@ -42,7 +42,7 @@ const sidebars = {
     {
       "type": "category",
       "collapsible": true,
-      "collapsed": true,
+      "collapsed": false,
       "label": "Developer How-To",
       "items": [
         {
@@ -54,13 +54,13 @@ const sidebars = {
     {
       "type": "category",
       "collapsible": true,
-      "collapsed": true,
+      "collapsed": false,
       "label": "Product Documentation",
       "items": [
         {
           "type": "category",
           "collapsible": true,
-          "collapsed": true,
+          "collapsed": false,
           "label": "*DRAFT* Adaptive Telco Infrastructure Platform",
           "items": [
             {
