@@ -6,8 +6,8 @@ const darkCodeTheme = require('prism-react-renderer/themes/dracula');
 
 /** @type {import('@docusaurus/types').Config} */
 const config = {
-  title: 'SUSE Edge',
-  tagline: 'SUSE Edge team public space',
+  title: 'SUSE Edge Team',
+  tagline: 'Engineering your next Edge Infrastructure',
   favicon: 'img/favicon.ico',
 
   // Set the production url of your site here
@@ -42,7 +42,7 @@ const config = {
       /** @type {import('@docusaurus/preset-classic').Options} */
       ({
         docs: {
-          routeBasePath: '/', // Serve the docs at the site's root
+          routeBasePath: '/docs', // Serve the docs at the site's root
           sidebarPath: require.resolve('./sidebars.js'),
           include: ['**/*.md', '**/*.mdx'],
           showLastUpdateAuthor: true,

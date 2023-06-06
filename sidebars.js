@@ -18,7 +18,7 @@ const sidebars = {
     {
       "type": "category",
       "collapsible": true,
-      "collapsed": false,
+      "collapsed": true,
       "label": "Quickstarts",
       "items": [
         {
@@ -30,7 +30,7 @@ const sidebars = {
     {
       "type": "category",
       "collapsible": true,
-      "collapsed": false,
+      "collapsed": true,
       "label": "Miscellaneous",
       "items": [
         {
@@ -42,7 +42,7 @@ const sidebars = {
     {
       "type": "category",
       "collapsible": true,
-      "collapsed": false,
+      "collapsed": true,
       "label": "Developer How-To",
       "items": [
         {
@@ -54,7 +54,7 @@ const sidebars = {
     {
       "type": "category",
       "collapsible": true,
-      "collapsed": false,
+      "collapsed": true,
       "label": "Product Documentation",
       "items": [
         {
