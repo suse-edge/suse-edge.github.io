@@ -105,6 +105,8 @@ Based on the [Elemental quickstart](https://elemental.docs.rancher.com/quickstar
 
 **NOTE:** It is out of the scope of this document to provide an explanation about the resources managed by Elemental, however the [official documentation](https://elemental.docs.rancher.com/machineregistration-reference) explains all those in good detail.
 
+**NOTE:** In order to deploy more than one elemental machine, be sure that `spec.config.elemental.registration.emulated-tpm-seed=-1` is set in your `MachineRegistration` so the seed used for the TPM emulation is randomized per machine. Otherwise, you will get the same TPM Hash for all deployed machines and only the last one to be registered will be valid. See the official docs for [tpm](http://elemental.docs.rancher.com/tpm) and [machineregistration](http://elemental.docs.rancher.com/machineregistration-reference/#configelementalregistration) for more information.
+
 ```
 cat <<- EOF | kubectl apply -f -
 apiVersion: elemental.cattle.io/v1beta1
@@ -171,6 +173,7 @@ spec:
         disable-boot-entry: true
       registration:
         emulate-tpm: true
+        emulated-tpm-seed: -1
   machineInventoryLabels:
     manufacturer: "${System Information/Manufacturer}"
     productName: "${System Information/Product Name}"
