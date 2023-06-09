@@ -60,7 +60,7 @@ const sidebars = {
         {
           "type": "category",
           "collapsible": true,
-          "collapsed": true,
+          "collapsed": false,
           "label": "*DRAFT* Adaptive Telco Infrastructure Platform",
           "items": [
             {

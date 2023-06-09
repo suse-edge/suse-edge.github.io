@@ -4,32 +4,20 @@ import styles from './styles.module.css';
 
 const FeatureList = [
   {
-    title: 'Easy to Use',
-    Svg: require('@site/static/img/undraw_docusaurus_mountain.svg').default,
+    title: 'Powered by Geekos',
+    Svg: require('@site/static/img/SUSE_Logo-vert_L_Green-pos_sRGB.svg').default,
     description: (
       <>
-        Docusaurus was designed from the ground up to be easily installed and
-        used to get your website up and running quickly.
+        SUSE is an industry stalwart with more than 30 years of contributing to the Open Source community. We are ready to take your workloads to the Edge and beyond.
       </>
     ),
   },
   {
-    title: 'Focus on What Matters',
+    title: 'Docusaurus',
     Svg: require('@site/static/img/undraw_docusaurus_tree.svg').default,
     description: (
       <>
-        Docusaurus lets you focus on your docs, and we&apos;ll do the chores. Go
-        ahead and move your docs into the <code>docs</code> directory.
-      </>
-    ),
-  },
-  {
-    title: 'Powered by React',
-    Svg: require('@site/static/img/undraw_docusaurus_react.svg').default,
-    description: (
-      <>
-        Extend or customize your website layout by reusing React. Docusaurus can
-        be extended while reusing the same header and footer.
+        We <b>shamelessly</b> use Docusaurus, an excellent open source project, to create our Documentation. The theme is very lightly tweaked to match our brand guidelines.
       </>
     ),
   },
@@ -37,7 +25,7 @@ const FeatureList = [
 
 function Feature({Svg, title, description}) {
   return (
-    <div className={clsx('col col--4')}>
+    <div className={clsx('col col--6')}>
       <div className="text--center">
         <Svg className={styles.featureSvg} role="img" />
       </div>
