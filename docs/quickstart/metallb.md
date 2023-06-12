@@ -319,5 +319,3 @@ curl http://hellok3s.${IP}.sslip.io
 </body>
 </html>
 ```
-
-Profit!
