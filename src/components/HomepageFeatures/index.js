@@ -13,11 +13,14 @@ const FeatureList = [
     ),
   },
   {
-    title: 'Docusaurus',
-    Svg: require('@site/static/img/undraw_docusaurus_tree.svg').default,
+    title: 'Helm Charts',
+    Svg: require('@site/static/img/helm-horizontal-color.svg').default,
     description: (
       <>
-        We <b>shamelessly</b> use Docusaurus, an excellent open source project, to create our Documentation. The theme is very lightly tweaked to match our brand guidelines.
+        We deliver some <a href="https://github.com/suse-edge/charts">Helm Charts</a> to deploy some components on top of K3s/RKE2, add the repo simply as:
+        <pre><code>
+        helm repo add suse-edge https://suse-edge.github.io/charts
+        </code></pre>
       </>
     ),
   },
