@@ -224,7 +224,6 @@ umount ${DEST}
 ```
 
 **NOTE:** The `rpi.raw` image has two partitions. `RPI_BOOT` contains the boot loader files and `COS_LIVE` the Elemental files, where the `livecd-cloud-config.yaml` file needs to be copied.
-The easiest way to run a K3s HA cluster is by installing a first node using the `--cluster-init` flag and then, start adding nodes.
 
 ### UTM VM
 
