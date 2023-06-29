@@ -1,0 +1,147 @@
+---
+sidebar_position: 4
+title: Running sushy-emulator as a container on SLES/openSUSE
+---
+
+# Requisites
+
+* SLES or openSUSE host
+* `qemu-ovmf-x86_64` if you want secure boot (It can be installed with [`zypper`](https://software.opensuse.org/package/qemu-ovmf-x86_64))
+
+# Preparation
+
+* Create the `/etc/sushy/` folder to store the configuration and certificates
+
+```
+mkdir -p /etc/sushy/
+cd /etc/sushy/
+```
+
+Ansible Redfish module [requires https](https://github.com/ansible-collections/community.general/blob/main/plugins/modules/redfish_command.py#L851C5-L851C13):
+
+```
+# Build root URI
+root_uri = "https://" + module.params['baseuri']
+```
+
+* Create the certificate and key (hint: this is not the best way to create them as it is passwordless and 10 years of expiration)
+
+```
+openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
+    -subj "/C=ES/ST=Madrid/L=Las Rozas/O=Foo/CN=sushy-emulator" \
+    -keyout sushy-emulator.key -out sushy-emulator.crt
+```
+
+* Create the config file for the sushy-emulator as:
+
+```
+cat << EOF > /etc/sushy/sushy-emulator.conf
+SUSHY_EMULATOR_LISTEN_IP = u'0.0.0.0'
+SUSHY_EMULATOR_LISTEN_PORT = 8443
+SUSHY_EMULATOR_SSL_CERT = u'/etc/sushy/sushy-emulator.crt'
+SUSHY_EMULATOR_SSL_KEY = u'/etc/sushy/sushy-emulator.key'
+SUSHY_EMULATOR_OS_CLOUD = None
+SUSHY_EMULATOR_LIBVIRT_URI = u'qemu:///system'
+SUSHY_EMULATOR_IGNORE_BOOT_DEVICE = True
+SUSHY_EMULATOR_BOOT_LOADER_MAP = {
+    u'UEFI': {
+        u'x86_64': u'/usr/share/qemu/ovmf-x86_64-ms-code.bin'
+    },
+    u'Legacy': {
+        u'x86_64': None
+    }
+}
+EOF
+```
+
+* Create the systemd unit file for the container to be executed properly (including the paths, files, etc.):
+
+```
+cat << 'EOF' > /etc/systemd/system/container-sushy-emulator.service
+[Unit]
+Description=Podman container-sushy-emulator.service
+
+[Service]
+Restart=on-failure
+ExecStartPre=/usr/bin/rm -f /%t/%n-pid /%t/%n-cid
+ExecStart=/usr/bin/podman run --conmon-pidfile /%t/%n-pid --cidfile /%t/%n-cid \
+  --name="sushy-emulator" \
+  --privileged -d --replace \
+  -v /etc/sushy:/etc/sushy:ro \
+  -v /var/run/libvirt:/var/run/libvirt \
+  -v /usr/share/qemu/ovmf-x86_64-ms-code.bin:/usr/share/qemu/ovmf-x86_64-ms-code.bin \
+  -v /etc/localtime:/etc/localtime:ro \
+  -e SUSHY_EMULATOR_CONFIG=/etc/sushy/sushy-emulator.conf \
+  -p 8443:8443 \
+  quay.io/metal3-io/sushy-tools:latest sushy-emulator
+
+ExecStop=/usr/bin/podman stop -t 10 sushy-emulator
+ExecStopPost=/usr/bin/sh -c "/usr/bin/podman rm -f `cat /%t/%n-cid`"
+KillMode=none
+Type=forking
+PIDFile=/%t/%n-pid
+
+[Install]
+WantedBy=default.target
+EOF
+```
+
+* Notify systemd for the new unit file, enable the service at boot and start it:
+
+```
+systemctl daemon-reload
+systemctl enable --now container-sushy-emulator
+```
+
+## Testing
+
+```
+curl https://localhost:8443/redfish/v1/Systems
+curl: (60) SSL certificate problem: self signed certificate
+More details here: https://curl.se/docs/sslcerts.html
+
+curl failed to verify the legitimacy of the server and therefore could not
+establish a secure connection to it. To learn more about this situation and
+how to fix it, please visit the web page mentioned above.
+```
+
+Ignoring the certificate:
+
+```
+curl https://localhost:8443/redfish/v1/Systems -k
+{
+    "@odata.type": "#ComputerSystemCollection.ComputerSystemCollection",
+    "Name": "Computer System Collection",
+    "Members@odata.count": 6,
+    "Members": [
+
+            {
+                "@odata.id": "/redfish/v1/Systems/1a3cc749-dd03-4f2b-a588-981c8fbf2911"
+            },
+
+            {
+                "@odata.id": "/redfish/v1/Systems/7201e8ab-28e3-4847-a68b-f008d8af21df"
+            },
+
+            {
+                "@odata.id": "/redfish/v1/Systems/eaa7c6b1-5195-4677-8473-e96114c88d02"
+            },
+
+            {
+                "@odata.id": "/redfish/v1/Systems/5940f178-aa88-4b12-8640-b3e87723d0dd"
+            },
+
+            {
+                "@odata.id": "/redfish/v1/Systems/57e13c2f-aabb-488d-a895-db8150d0bf34"
+            },
+
+            {
+                "@odata.id": "/redfish/v1/Systems/a2436047-7663-46d7-bd83-ea7b359cf237"
+            }
+
+    ],
+    "@odata.context": "/redfish/v1/$metadata#ComputerSystemCollection.ComputerSystemCollection",
+    "@odata.id": "/redfish/v1/Systems",
+    "@Redfish.Copyright": "Copyright 2014-2016 Distributed Management Task Force, Inc. (DMTF). For the full DMTF copyright policy, see http://www.dmtf.org/about/policies/copyright."
+}
+```
