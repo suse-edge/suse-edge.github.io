@@ -102,13 +102,15 @@ git clone --depth 1 https://github.com/k3s-io/k3s.git && cd k3s
 # The following command will add `nats` in the build tags which will enable the NATS built-in feature in K3s
 sed -i '' 's/TAGS="ctrd/TAGS="nats ctrd/g' scripts/build
 
-mkdir -p build/data && make download && make generate
-SKIP_VALIDATE=true make
+make local
 
 # Replace <node-ip> with the actual IP of the node where the K3s will be started
 export NODE_IP=<node-ip>
 sudo scp dist/artifacts/k3s-arm64 ${NODE_IP}:/usr/local/bin/k3s
 ```
+
+**NOTE:** Locally building K3s requires the buildx Docker CLI plugin.
+It can be [manually installed](https://github.com/docker/buildx#manual-download) if `$ make local` fails.
 
 #### Install NATS CLI
 
