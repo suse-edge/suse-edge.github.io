@@ -4,7 +4,7 @@ title: NATS on K3s
 ---
 
 # Intro
-[NATS](https://nats.io/) is a connective technology built for the ever-increasingly hyper-connected world. It is a single technology that enables applications to securely communicate across any combination of cloud vendors, on-premise, edge, web and mobile, and devices. NATS consists of a family of open-source products that are tightly integrated but can be deployed easily and independently. NATS is being used globally by thousands of companies, spanning use cases including microservices, edge computing, mobile, and IoT, and can be used to augment or replace traditional messaging.
+[NATS](https://nats.io/) is a connective technology built for the ever-increasingly hyper-connected world. It is a single technology that enables applications to securely communicate across any combination of cloud vendors, on-premise, edge, web and mobile devices. NATS consists of a family of open-source products that are tightly integrated but can be deployed easily and independently. NATS is being used globally by thousands of companies, spanning use cases including microservices, edge computing, mobile, and IoT, and can be used to augment or replace traditional messaging.
 
 ## Architecture
 NATS is an infrastructure that allows data exchange between applications in the form of messages.
@@ -57,7 +57,10 @@ EOF
 
 Now let's install NATS via helm:
 
-`helm install nats nats/nats --namespace nats --values values.yaml --create-namespace`
+```shell
+helm repo add nats https://nats-io.github.io/k8s/helm/charts/
+helm install nats nats/nats --namespace nats --values values.yaml --create-namespace
+```
 
 With the `values.yaml` file above, the following components will be in the `nats` namespace:
 
@@ -102,13 +105,15 @@ git clone --depth 1 https://github.com/k3s-io/k3s.git && cd k3s
 # The following command will add `nats` in the build tags which will enable the NATS built-in feature in K3s
 sed -i '' 's/TAGS="ctrd/TAGS="nats ctrd/g' scripts/build
 
-mkdir -p build/data && make download && make generate
-SKIP_VALIDATE=true make
+make local
 
 # Replace <node-ip> with the actual IP of the node where the K3s will be started
 export NODE_IP=<node-ip>
 sudo scp dist/artifacts/k3s-arm64 ${NODE_IP}:/usr/local/bin/k3s
 ```
+
+**NOTE:** Locally building K3s requires the buildx Docker CLI plugin.
+It can be [manually installed](https://github.com/docker/buildx#manual-download) if `$ make local` fails.
 
 #### Install NATS CLI
 
