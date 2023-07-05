@@ -57,7 +57,10 @@ EOF
 
 Now let's install NATS via helm:
 
-`helm install nats nats/nats --namespace nats --values values.yaml --create-namespace`
+```shell
+helm repo add nats https://nats-io.github.io/k8s/helm/charts/
+helm install nats nats/nats --namespace nats --values values.yaml --create-namespace
+```
 
 With the `values.yaml` file above, the following components will be in the `nats` namespace:
 
