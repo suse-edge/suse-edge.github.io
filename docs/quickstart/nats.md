@@ -4,7 +4,7 @@ title: NATS on K3s
 ---
 
 # Intro
-[NATS](https://nats.io/) is a connective technology built for the ever-increasingly hyper-connected world. It is a single technology that enables applications to securely communicate across any combination of cloud vendors, on-premise, edge, web and mobile, and devices. NATS consists of a family of open-source products that are tightly integrated but can be deployed easily and independently. NATS is being used globally by thousands of companies, spanning use cases including microservices, edge computing, mobile, and IoT, and can be used to augment or replace traditional messaging.
+[NATS](https://nats.io/) is a connective technology built for the ever-increasingly hyper-connected world. It is a single technology that enables applications to securely communicate across any combination of cloud vendors, on-premise, edge, web and mobile devices. NATS consists of a family of open-source products that are tightly integrated but can be deployed easily and independently. NATS is being used globally by thousands of companies, spanning use cases including microservices, edge computing, mobile, and IoT, and can be used to augment or replace traditional messaging.
 
 ## Architecture
 NATS is an infrastructure that allows data exchange between applications in the form of messages.
