@@ -171,6 +171,7 @@ In this scenario, Ignition runs before Combustion.
   download the file.
 
 - Access to <https://scc.suse.com/> to generate a registration code
+  - Search for `SUSE Linux Enterprise Micro` via the `Products` menu, select the arch/version then copy and manually activate the registration code
 
 - Butane, qemu and cdrtools installed (using brew for example)
   ```
