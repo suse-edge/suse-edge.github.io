@@ -16,7 +16,7 @@ In this case it will be a _subproject_ of the "home:foobar" project
 
 ## Enable container builds in the project config
 
-* Go to https://build.opensuse.org/project/show/home:foobar
+* Select "Your Home Project" (Left Nav menu)
 * Select the "Project Config" tab
 * Paste the following code:
 
