@@ -9,7 +9,7 @@ In this case it will be a _subproject_ of the "home:foobar" project
 
 * Go to https://build.opensuse.org/
 * Log in
-* Go to https://build.opensuse.org/project/show/home:foobar
+* Select "Your Home Project" (Left Nav menu)
 * Select the "Subprojects" tab
 * Press "Create Subproject" (In Left Nav menu);
 * Fill in the name (e.g. containers).
