@@ -17,6 +17,8 @@ In this case it will be a _subproject_ of the "home:foobar" project
 ## Enable container builds in the project config
 
 * Select "Your Home Project" (Left Nav menu)
+* Select the "Subprojects" tab
+* Select the subproject you have created (e.g. containers)
 * Select the "Project Config" tab
 * Paste the following code:
 
@@ -84,7 +86,7 @@ If everything went as it should, the container image will be hosted at the [open
 
 * Install `osc` via your favourite package manager (see https://en.opensuse.org/openSUSE:OSC)
 * Run `osc checkout home:foobar:containers`. It will ask your username/password and a method to store the password safely.
-* Cd into that folder `cd home\:foobar\:containers/mytoolbox/`
+* Navigate to the downloaded project `cd home\:foobar\:containers/mytoolbox/`
 * Edit the `Dockerfile` as you please
 * Run `osc commit` and put a proper commit message
 * The build will be automatically triggered
