@@ -93,6 +93,13 @@ systemctl daemon-reload
 systemctl enable --now container-sushy-emulator
 ```
 
+* Open the 8443/tcp port if required to be reachable from the outside world:
+
+```
+firewall-cmd --add-port=8443/tcp --zone=public --permanent
+firewall-cmd --add-port=8443/tcp --zone=public
+```
+
 ## Testing
 
 ```
