@@ -54,7 +54,10 @@ const config = {
         theme: {
           customCss: require.resolve('./src/css/custom.css'),
         },
-        blog: false,
+        blog: {
+          showReadingTime: true,
+          routeBasePath: '/blog'
+        },
       }),
     ],
   ],
@@ -84,6 +87,11 @@ const config = {
             docId: 'index',
             position: 'left',
             label: 'Documentation',
+          },
+          {
+            to: 'blog',
+            label: 'Blog',
+            position: 'left'
           },
           {
             href: 'https://github.com/suse-edge/',
