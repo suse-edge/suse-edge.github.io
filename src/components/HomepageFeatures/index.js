@@ -24,6 +24,15 @@ const FeatureList = [
       </>
     ),
   },
+  {
+    title: 'Blog posts',
+    Svg: require('@site/static/img/document.svg').default,
+    description: (
+      <>
+        See the latest <a href="blog/">Blog posts</a>.
+      </>
+    ),
+  },
 ];
 
 function Feature({Svg, title, description}) {
