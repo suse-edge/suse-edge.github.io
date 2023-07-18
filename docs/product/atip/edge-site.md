@@ -61,7 +61,7 @@ To do that, you should enable the option `Enable cluster scoped container regist
 
 ![edge_install_6.png](images/edge/edge_install_6.png)
 
-3. If you want to modify directly using a yaml file the private registry information, you could do it using the next yaml file (you could download it from the `View in YAML` button):
+3. If you want to modify directly using a yaml file the private registry information, you could do it using the next yaml file (you could download it from the `Edit as YAML` button):
 
 ![edge_install_7.png](images/edge/edge_install_7.png)
 
@@ -82,7 +82,7 @@ This is really useful if you need to tune the cpu cores management that you will
 
 Also, you could add some machine labels in order to match with the node labels that you will use in your workloads.
 
-3. If you want to modify directly the information regarding the kubelet, you could do it using the next yaml file (you could download it from the `View in YAML` button):
+3. If you want to modify directly the information regarding the kubelet, you could do it using the next yaml file (you could download it from the `Edit as YAML` button):
 
 ![edge_install_10.png](images/edge/edge_install_10.png)
 
