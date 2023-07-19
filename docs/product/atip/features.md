@@ -83,10 +83,10 @@ Processes running in interrupt mode in a general-purpose operating system are no
 
 In our case, if you have installed a real time image like SLE Micro RT, kernel real time is already installed and you don't need to install it again.
 
-You could check it looking for the kernel and see if contains the **rt** string at the end of the kernel info:
+You could check it looking for the kernel and see if contains the **`rt`** string at the end of the kernel info:
 
 ```
-$ uname -r
+uname -r
 5.14.21-150400.15.11-rt
 ```
 
@@ -98,11 +98,11 @@ $ uname -r
 The first thing is to create a profile for the cpu cores we want to isolate. In this case, we will isolate the cores 1-30 and 33-62. 
 
 ```
-$ echo "export tuned_params" >> /etc/grub.d/00_tuned
+echo "export tuned_params" >> /etc/grub.d/00_tuned
 
-$ echo "isolated_cores=1-30,33-62" >> /etc/tuned/cpu-partitioning-variables.conf
+echo "isolated_cores=1-30,33-62" >> /etc/tuned/cpu-partitioning-variables.conf
 
-$ tuned-adm profile cpu-partitioning
+tuned-adm profile cpu-partitioning
 Cannot talk to Tuned daemon via DBus. Is Tuned daemon running?
 Trying to (re)start tuned...
 Tuned (re)started, changes applied.
@@ -362,14 +362,14 @@ EOF
 After that you should see the pods running:
 
 ```
-$ kubectl get pods -n kube-system | grep sriov
+kubectl get pods -n kube-system | grep sriov
 kube-system       kube-sriov-device-plugin-amd64-twjfl                    1/1     Running   0          2m
 ```
 
 - Check the interfaces discovered and available in the nodes to be used by the pods:
 
 ```
-$ kubectl get $(kubectl get nodes -oname) -o jsonpath='{.status.allocatable}' | jq
+kubectl get $(kubectl get nodes -oname) -o jsonpath='{.status.allocatable}' | jq
 {
   "cpu": "64",
   "ephemeral-storage": "256196109726",
@@ -439,7 +439,7 @@ kubectl label $(kubectl get nodes -oname) feature.node.kubernetes.io/network-sri
 #### Review the daemonset to see the new `sriov-network-config-daemon` and `sriov-rancher-nfd-worker` as active and ready
 
 ```
-$ kubectl get daemonset -A
+kubectl get daemonset -A
 NAMESPACE             NAME                            DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR                                           AGE
 calico-system         calico-node                     1         1         1       1            1           kubernetes.io/os=linux                                  15h
 cattle-sriov-system   sriov-network-config-daemon     1         1         1       1            1           feature.node.kubernetes.io/network-sriov.capable=true   45m
@@ -451,7 +451,7 @@ kube-system           rke2-multus-ds                  1         1         1     
 After some minutes (can take up to 10 min to be updated) the nodes detected and configured will appear:
 
 ```
-$ kubectl get sriovnetworknodestates.sriovnetwork.openshift.io -A
+kubectl get sriovnetworknodestates.sriovnetwork.openshift.io -A
 NAMESPACE             NAME     AGE
 cattle-sriov-system   xr11-2   83s
 ```

@@ -49,7 +49,7 @@ You can use any type of configuration storage media that your virtualization sys
 
 `sudo mount /dev/sdY /mnt`
 
-4. Create the directory structure as mentioned in Chapter 8, Configuring with Ignition or Chapter 9, Configuring with Combustion, depending on the configuration tool used:
+4. Create the directory structure as mentioned in [this link](https://documentation.suse.com/sle-micro/5.4/html/SLE-Micro-all/cha-images-ignition.html#):
 
 `sudo mkdir -p /mnt/ignition/`
 
@@ -58,6 +58,8 @@ or:
 `sudo mkdir -p /mnt/combustion/`
 
 5. Prior to booting for the first time, prepare all elements of the configuration that will be used by Ignition or Combustion. To log in to your system, you need to provide a password for root or set up passwordless authentication, otherwise the system will not be accessible after the first boot.
+
+> For more information about the configuration files using combustion and ignition, please refer to the documentation: https://documentation.suse.com/sle-micro/5.4/html/SLE-Micro-all/cha-images-ignition.html#
 
 ### Installation 
 
@@ -77,7 +79,7 @@ or:
 
 5. After reboot, the system will start the JEOS Firstboot wizard
 
-> If you want to configure the system using `combustion` and `ignition` files, instead of using the JEOS Firstboot wizard, please refer to the section `Preparing the configuration device (Optional)` above, and ensure your media is connected during the first boot.
+> If you want to configure the system using `combustion` and `ignition` files, instead of using the JEOS Firstboot wizard, please refer to the section [Preparing the configuration device (Optional)](#preparing-the-configuration-device-optional) above, and ensure your media is connected during the first boot.
 
 ![mgmt_install_4.png](images/os/os4.png)
 

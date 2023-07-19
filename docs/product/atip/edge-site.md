@@ -8,11 +8,11 @@ title: "*Draft* Edge Site Installation"
 SUSE ATIP is a platform designed for hosting modern, cloud native, Telco applications at scale from core to edge. 
 
 This page documents the creation of edge sites using the management cluster created in the previous section. 
-There are different ways to create edge sites, depending on the use case. Also, there are different options to customize the edge site creation.
+There are different ways to create edge sites, depending on the use case. Also, there are different options to customize the edge site creation with the most common Telco/Edge options
 
-We will cover the following topics:
+We will cover the following topics which are really interesting for the Telco industry:
 
-[Edge site definition](#edge-site-definition): Basic definition of an edge site as well as the most common Telco/Edge options to customize it properly:
+[Edge site definition](#edge-site-definition): Basic definition of an edge site.
 - [Custom Registry](#custom-registry): Extra registries to be used by the edge site.
 - [CPU Management Policy](#cpu-management-policy): CPU management policy to be used by the edge site.
 - [Networking](#networking): Networking configuration to be used by the edge site.
@@ -91,7 +91,7 @@ Also, you could add some machine labels in order to match with the node labels t
 Rancher offers the possibility to use different networking options to be used by the edge site. 
 Also you could install directly some CNI plugins to be used by the edge site like Calico, Cilium, Multus, and the combination with Multus
 
-In our case, we will use the Multus + calico combination which is more common in the Telco industry, but you could use whatever you want.
+In our case, we will use the Multus + calico combination, but you could use whatever you want.
 
 1. Configure the Container Network Interface (CNI) plugin to be used by the edge site:
 
