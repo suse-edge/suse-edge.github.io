@@ -16,11 +16,14 @@ Expected network setup, example setups
 ##   Services (DHCP, DNS, etc)
 External services required by ATIP, common options for DHCP, DNS, etc.
 
-## Disable rebootmgr strategic 
+## Disable rebootmgr 
 
-For telco workloads is really important to disable the rebootmgr strategic in order to avoid the reboot of the nodes in case of updates scheduled by the system.
+`rebootmgr` is a service which allow to configure a strategic for reboot in case system have some updates available pending.
+For telco workloads is really important to disable or configure properly the rebootmgr service in order to avoid the reboot of the nodes in case of updates scheduled by the system.
 
-You could verify the strategic status using the next command:
+> For more information about rebootmgr, please check: https://github.com/SUSE/rebootmgr
+
+You could verify the strategic being used as:
 
 ```bash
 cat /etc/rebootmgr.conf
@@ -31,7 +34,7 @@ strategy=best-effort
 lock-group=default
 ```
 
-and you could disable it using the next command:
+and you could disable it as:
 
 ```bash
 sed -i 's/strategy=best-effort/strategy=off/g' /etc/rebootmgr.conf
@@ -42,4 +45,3 @@ or using the rebootmgrctl command:
 rebootmgrctl strategy off
 ```
 
-> For more information about rebootmgr, please check: https://github.com/SUSE/rebootmgr

@@ -38,7 +38,7 @@ Next step is to name the new edge site and select the cluster version to be used
 
 ![edge_install_3.png](images/edge/edge_install_3.png)
 
-Now, it's time to customize our installation defining some of the most common Telco/Edge options:
+Now, it's time to customize our installation defining some of the most common Telco/Edge options.
 To do that we will use the next tabs on the left side:
 
 ![edge_install_4.png](images/edge/edge_install_4.png)
@@ -67,7 +67,7 @@ To do that, you should enable the option `Enable cluster scoped container regist
 
 ### CPU Management Policy
 
-Rancher offers the possibility to use different CPU management policies to be used by the edge site. 
+Rancher offers the possibility to use different CPU management policies on RKE2 to be used by the edge site. 
 This is really useful if you need to tune the cpu cores management that you will offer to your workloads running on top of kubernetes.
 
 > For more information about the different CPU management policies available in Kubernetes, please check the [official documentation](https://kubernetes.io/docs/tasks/administer-cluster/cpu-management-policies/)
@@ -115,7 +115,7 @@ After the edge site definition, you could click on the `Create` button to start 
 
 In our case, we've selected the node role `etcd`, `control plane`, and `worker` because we want to deploy a single node cluster, but you could select whatever you want depending on your use case.
 
-The next step should be copy the Registration command to be used by the new edge node, and then, execute it on the new edge cluster server to start the installation process. 
+The next step should be copy the registration command to be used by the new edge node, and then, execute it on the new edge cluster server to start the installation process. 
 > Note: you could use the insecure check option in order to skip the TLS verification if your server has a self-signed certificate.
 
 

@@ -7,21 +7,27 @@ title: "*Draft* Management Cluster Setup"
 
 SUSE ATIP is a platform designed for hosting modern, cloud native, Telco applications at scale from core to edge. 
 
-This page explains how to install and configure the management cluster. The management cluster is the cluster that will be used to manage the edge clusters.
-The server used for the management cluster should be installed on VMs or bare metal. The management cluster can be installed on a single node, but it is recommended to have at least 3 nodes for HA.
+This page explains how to install and configure the management cluster.
+Rancher is a complete software stack for teams adopting containers. It addresses the operational and security challenges of managing multiple Kubernetes clusters across any infrastructure, while providing DevOps teams with integrated tools for running containerized workloads.
+In our particular case, the Rancher management cluster will be the tool that will be used to manage the edge cluster lifecycle.
+The server used for the management cluster can be installed on VMs or bare metal. The management cluster can be installed on a single node, but it is recommended to have at least 3 nodes/VMs for HA.
+
+> For more information about Rancher, please check: https://rancher.com/why-rancher
 
 
 ## Requirements
-- A minimum of 1GB of RAM per node available to be used by the management cluster
-- Accurate time synchronization between all nodes in the cluster
-- A minimum of 2 vCPUs per node available to be used by the management cluster
-- A minimum of 12GB of disk space (recomended 20GB of disk) per node available to be used by the management cluster
+- A minimum of 1GB of RAM per node available to be used by the Rancher management cluster
+- Accurate time synchronization (`ntp` or `chronyd`) between all nodes in the cluster.
+- A minimum of 2 vCPUs per node available to be used by the Rancher management cluster
+- A minimum of 12GB of disk space (recomended 20GB of disk) per node available to be used by the Rancher management cluster
+
+> For more information about time synchronization, please check: https://documentation.suse.com/sles/15-SP4/html/SLES-all/cha-ntp.html
 
 ##  OS Install
 
 This section covers the installation of the OS on the management cluster nodes. The OS used for the management cluster installation is `SLE Micro 5.4` that can be downloaded from [here](https://www.suse.com/download/sle-micro/).
 Using SUSE Linux Enterprise Micro, you can build and scale differentiating edge systems across a wide range of industries including aerospace, telecom, automotive, defense, healthcare, hospitality, and manufacturing.
-SUSE Linux Enterprise Micro 5.4 is available on the AMD64 and Intel* 64 (x86_64), Arm* 64 and IBM* z System or LinuxONE (s390x) hardware architectures.
+SUSE Linux Enterprise Micro 5.4 is available on the AMD64 and Intel 64 (x86_64), Arm 64 and IBM z System or LinuxONE (s390x) hardware architectures.
 
 SUSE Linux Enterprise Micro provides `self-install ISO images` that enable you to deploy SLE Micro to your machine easily (either a virtual machine or a bare metal) and configure the system on the first boot.
 For this installation we will use the self-install ISO: `SLE-Micro.x86_64-5.4.0-Default-SelfInstall-GM.install.iso`
@@ -154,7 +160,7 @@ if you want to install a especific version, you can use the following command (i
 
 `systemctl enable rke2-agent.service`
 
-3. Configure the config.yaml:
+3. Configure the config.yaml file located in `/etc/rancher/rke2/` with the following content:
 
 ```yaml
 server: https://<server>:9345
@@ -167,7 +173,7 @@ token: <token from server node>
 
 
 
-##  Rancher Install
+##  Rancher Manager Install
 
 Rancher is installed using the Helm package manager for Kubernetes. 
 Helm charts provide templating syntax for Kubernetes YAML manifest documents. With Helm, we can create configurable deployments instead of just using static files.
@@ -178,7 +184,7 @@ Helm charts provide templating syntax for Kubernetes YAML manifest documents. Wi
 
 ### 1. Add the Helm repository
 
-There are three releases available to be added as a Helm repository for Rancher. In our case, we will use the `rancher-stable` because it's the release recommended for production environments, but you could use `rancher-latest` or `rancher-alpha` if you want.
+There are three releases available to be added as a Helm repository for Rancher. In our case, we will use the `rancher-stable` because it's the release recommended for production environments, but you could use `rancher-latest` or `rancher-alpha` if you want. Also, there is a `rancher primer` release that is the enterprise version of Rancher.
 
 `helm repo add rancher-stable https://releases.rancher.com/server-charts/stable`
 
