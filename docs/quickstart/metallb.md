@@ -68,7 +68,7 @@ metadata:
   namespace: metallb-system
 spec:
   ipAddressPools:
-  - ip-pool-pool
+  - ip-pool
 EOF
 ```
 
