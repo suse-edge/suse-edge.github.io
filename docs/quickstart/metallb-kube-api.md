@@ -1,0 +1,177 @@
+---
+sidebar_position: 5
+title: MetalLB Service in front of the Kubernetes API server
+---
+
+# Intro
+## MetalLB in front of the Kubernetes API server
+
+In this guide a MetalLB service will be used to expose the K3s API externally on an HA K3s cluster with 3 control-plane nodes.
+To achieve this, a Kubernetes Service of type `LoadBalancer` and Endpoints will be manually created. The Endpoints will keep the IPs of all control plane nodes available in the cluster.
+In order for the Endpoint to be continuously synchronized with the events occurring in the cluster (adding/removing a node or a node goes offline), the [Endpoint Copier Operator](https://github.com/suse-edge/endpoint-copier-operator) will be deployed. The operator monitors the events happening in the default `kubernetes` Endpoint and updates the managed one automatically to keep them in sync.
+Since the managed Service will be of type `LoadBalancer`, `MetalLB` will assign it a static `ExternalIP`. This `ExternalIP` will be used in order to communicate with the API Server.
+
+### Prerequisites
+
+* 3 hosts to deploy K3s on top. Hint [SLE Micro on OSX on Apple Silicon (UTM)](https://suse-edge.github.io/docs/quickstart/slemicro-utm-aarch64) can be used.
+  - Ensure the hosts have different hostnames.
+* At least 2 available IPs in the network (One for the Traefik and one for the managed service).
+* Helm
+
+### Install K3s
+
+**NOTE:** In case you don't want a fresh cluster but want to use an already existing one, just skip this step and proceed to the next one.
+
+First a free IP in the network must be reserved that will be used later for `ExternalIP` of the managed Service.
+
+SSH to the first host and install `K3s` in cluster mode as:
+
+```bash
+# Export the free IP mentioned above
+export VIP_SERVICE_IP=<ip>
+export INSTALL_K3S_SKIP_START=false
+
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --cluster-init --disable=servicelb --write-kubeconfig-mode=644 --tls-san=${VIP_SERVICE_IP} --tls-san=https://${VIP_SERVICE_IP}.sslip.io" K3S_TOKEN=foobar sh -
+```
+
+**NOTE:** Make sure that `--disable=servicelb` flag is provided in the `k3s server` command.
+
+**NOTE:** From now on, the commands should be run on the local machine.
+
+In order to access the API server from outside, the IP of the K3s VM will be used.
+
+```bash
+# Replace <node-ip> with the actual IP of the machine
+export NODE_IP=<node-ip>
+scp ${NODE_IP}:/etc/rancher/k3s/k3s.yaml ~/.kube/config && sed -i '' "s/127.0.0.1/${NODE_IP}/g" ~/.kube/config && chmod 600 ~/.kube/config
+```
+
+### Configure existing K3s cluster
+
+**NOTE:** This step is valid only if you want to use an existing K3s cluster.
+
+To use an existing K3s cluster, the `servicelb` lb should be disabled and also `tls-san` flags modified.
+
+In order to change the K3s flags, `/etc/systemd/system/k3s.service` should be modified on all of the VMs in the cluster.
+
+The flags should be inserted in the `ExecStart`. For example:
+
+```bash
+# Replace the <vip-service-ip> with the actual ip
+ExecStart=/usr/local/bin/k3s \
+    server \
+        '--cluster-init' \
+        '--write-kubeconfig-mode=644' \
+        '--disable=servicelb' \
+        '--tls-san=<vip-service-ip>' \
+        '--tls-san=https://<vip-service-ip>.sslip.io' \
+```
+
+Then the following commands should be executed in order for K3S to load the new configurations:
+
+```bash
+systemctl daemon-reload
+systemctl restart k3s
+```
+
+### Install MetalLB
+
+To deploy `MetalLB`, the [MetalLB on K3s](https://suse-edge.github.io/docs/quickstart/metallb) guide can be used.
+
+**NOTE:** Ensure that the IP addresses of the `ip-pool` IPAddressPool do not overlap with the IP addresses previously selected for the `LoadBalancer` service.
+
+Create a separate `IpAddressPool` that will be used only for the managed Service.
+
+```bash
+# Export the VIP_SERVICE_IP on the local machine
+# Replace with the actual IP
+export VIP_SERVICE_IP=<ip>
+
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: kubernetes-vip-ip-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - ${VIP_SERVICE_IP}/32
+  serviceAllocation:
+    priority: 100
+    namespaces:
+      - default
+EOF
+
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: ip-pool-l2-adv
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - ip-pool
+  - kubernetes-vip-ip-pool
+EOF
+```
+
+### Install the Endpoint Copier Operator
+
+```bash
+helm repo add endpoint-copier-operator https://suse-edge.github.io/endpoint-copier-operator
+
+helm install --create-namespace -n endpoint-copier-operator endpoint-copier-operator endpoint-copier-operator/endpoint-copier-operator
+```
+
+The command above will deploy three different resources in the cluster:
+
+1. The `endpoint-copier-operator` operator Deployment with 2 replicas. One will be the leader and the other will take over the leader role if needed.
+2. A Kubernetes service called `vip-kubernetes` in the `default` namespace that will be a copy of the `kubernetes` Service but from type `LoadBalancer`.
+3. An Endpoint resource called `vip-kubernetes` in the `default` namespace that will be a copy of the `kubernetes` Endpoint.
+
+Verify that the `kubernetes-vip` Service has the correct IP address:
+
+```bash
+kubectl get service kubernetes-vip -n default -o=jsonpath='{.status.loadBalancer.ingress[0].ip}'
+```
+
+Ensure that the `kubernetes-vip` and `kubernetes` Endpoints resources in the `default` namespace point to the same IPs.
+
+```bash
+kubectl get endpoints kubernetes kubernetes-vip
+```
+
+If everything is correct, the last thing left is to use the `VIP_SERVICE_IP` in our `Kubeconfig`.
+
+```bash
+sed -i '' "s/${NODE_IP}/${VIP_SERVICE_IP}/g" ~/.kube/config
+```
+
+From now on, all the `kubectl` will go through the `kubernetes-vip` service.
+
+### Add control-plane nodes
+
+To monitor the entire process, two more terminal tabs can be opened.
+
+First terminal:
+
+```bash
+watch kubectl get nodes
+```
+
+Second terminal:
+
+```bash
+watch kubectl get endpoints
+```
+
+Now execute the commands below on the second and third nodes.
+
+```bash
+# Export the VIP_SERVICE_IP in the VM
+# Replace with the actual IP
+export VIP_SERVICE_IP=<ip>
+export INSTALL_K3S_SKIP_START=false
+
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --server https://${VIP_SERVICE_IP}:6443 --disable=servicelb --write-kubeconfig-mode=644" K3S_TOKEN=foobar sh -
+```
