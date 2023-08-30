@@ -46,7 +46,7 @@ while ! kubectl wait --for condition=ready -n metallb-system $(kubectl get pods 
 
 At this point, the installation is completed. Now it is time to [configure](https://metallb.universe.tf/configuration/) using our example values:
 
-```
+```sh
 cat <<-EOF | kubectl apply -f -
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
@@ -103,7 +103,7 @@ We will leverage this [later](#ingress-with-metallb).
 
 Let's create an example deployment:
 
-```
+```sh
 cat <<- EOF | kubectl apply -f -
 ---
 apiVersion: v1
@@ -177,7 +177,7 @@ EOF
 
 And finally, the service:
 
-```
+```sh
 cat <<- EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
@@ -200,7 +200,7 @@ EOF
 
 Let's see it in action:
 
-```
+```sh
 kubectl get svc -n hello-kubernetes
 NAME               TYPE           CLUSTER-IP     EXTERNAL-IP      PORT(S)        AGE
 hello-kubernetes   LoadBalancer   10.43.127.75   192.168.122.11   80:31461/TCP   8s
@@ -277,7 +277,7 @@ EOF
 
 And then:
 
-```
+```sh
 curl http://hellok3s.${IP}.sslip.io
 <!DOCTYPE html>
 <html>
@@ -319,3 +319,22 @@ curl http://hellok3s.${IP}.sslip.io
 </body>
 </html>
 ```
+
+Also to verify that MetalLB is working correctly `arping` can be used as:
+
+`arping hellok3s.${IP}.sslip.io`
+
+Expected result:
+
+```sh
+ARPING 192.168.64.210
+60 bytes from 92:12:36:00:d3:58 (192.168.64.210): index=0 time=1.169 msec
+60 bytes from 92:12:36:00:d3:58 (192.168.64.210): index=1 time=2.992 msec
+60 bytes from 92:12:36:00:d3:58 (192.168.64.210): index=2 time=2.884 msec
+```
+
+In the example above, the traffic flows as follows:
+1. hellok3s.${IP}.sslip.io is resolved to the actual IP.
+2. Then the traffic is handled by the `metallb-speaker` pod.
+3. `metallb-speaker` redirects the traffic to the `traefik` controller.
+4. Finally Traefik forwards the request to the `hello-kubernetes` Service.
