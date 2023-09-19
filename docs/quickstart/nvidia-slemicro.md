@@ -102,7 +102,7 @@ exit
 Next, if you're *not* using a supported GPU, remembering that the list can be found [here](https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus), you can see if the driver will work by enabling support at the module level, but your mileage may vary -- skip this step if you're using a *supported* GPU:
 
 ```shell
-sed '/NVreg_OpenRmEnableUnsupportedGpus/s/^#//g' /etc/modprobe.d/50-nvidia-default.conf
+sed -i '/NVreg_OpenRmEnableUnsupportedGpus/s/^#//g' /etc/modprobe.d/50-nvidia-default.conf
 ```
 
 Now that you've got your drivers installed, it's time to reboot, as SLE Micro is an immutable operating system it needs to reboot into the new snapshot that you created in a previous step; the drivers are only installed into this new snapshot, and hence it's not possible to load the drivers without rebooting into this new snapshot, which will happen automatically. Issue the reboot command when you're ready:
