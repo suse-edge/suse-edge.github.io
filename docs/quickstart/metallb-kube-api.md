@@ -126,8 +126,8 @@ helm install --create-namespace -n endpoint-copier-operator endpoint-copier-oper
 The command above will deploy three different resources in the cluster:
 
 1. The `endpoint-copier-operator` operator Deployment with 2 replicas. One will be the leader and the other will take over the leader role if needed.
-2. A Kubernetes service called `vip-kubernetes` in the `default` namespace that will be a copy of the `kubernetes` Service but from type `LoadBalancer`.
-3. An Endpoint resource called `vip-kubernetes` in the `default` namespace that will be a copy of the `kubernetes` Endpoint.
+2. A Kubernetes service called `kubernetes-vip` in the `default` namespace that will be a copy of the `kubernetes` Service but from type `LoadBalancer`.
+3. An Endpoint resource called `kubernetes-vip` in the `default` namespace that will be a copy of the `kubernetes` Endpoint.
 
 Verify that the `kubernetes-vip` Service has the correct IP address:
 
