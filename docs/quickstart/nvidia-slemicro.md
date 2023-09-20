@@ -316,3 +316,25 @@ exit
 ## Implementation with Kubernetes
 
 (Coming soon!)
+
+## Resolving issues
+
+### Propagating Proxies to toolbox if required
+
+In case your system is behind a proxy ensure to propagate your proxy settings to `mounts.conf` by adding the following lines:
+
+```mounts.conf
+/etc/environment:/etc/environment
+```
+
+### Propagating trusted CA Certificates to toolbox if required
+
+In case your system is running in an environment that requires trusting traffic of private CA's, propagate the certificates to toolbox by adding the following lines to `mounts.conf`
+
+```mounts.conf
+/etc/pki/trust/:/etc/pki/trust/
+/usr/share/pki/trust/:/usr/share/pki/trust/
+/etc/ssl/certs/:/etc/ssl/certs/
+```
+
+and run `update-ca-certificates` after starting toolbox
