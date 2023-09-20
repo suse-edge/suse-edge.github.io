@@ -79,7 +79,7 @@ When you're in your `transactional-update` shell, add the additional required pa
 
 ```shell
 zypper ar https://developer.download.nvidia.com/compute/cuda/repos/sles15/x86_64/ nvidia-sle15sp4-cuda
-zypper ar http://download.nvidia.com/suse/sle15sp4/ nvidia-sle15sp4-main
+zypper ar https://download.nvidia.com/suse/sle15sp4/ nvidia-sle15sp4-main
 ```
 
 Next, move to the `/root/nvidia` directory, which will contain a couple of directories that the previous `zypper` command created with the downloaded packages from SLES. Then, we can request that the package manager install the pre-built signed kernel modules, the firmware packages, and the additional useful utilities package:
