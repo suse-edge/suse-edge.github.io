@@ -86,7 +86,7 @@ Next, move to the `/root/nvidia` directory, which will contain a couple of direc
 
 ```shell
 cd /root/nvidia/container-suseconnect-zypp:SLE-Module-Basesystem15-SP4-Updates/x86_64
-zypper in -y nvidia-open-driver-G06-signed-kmp-default* kernel-firmware-nvidia-gspx-G06* nvidia-compute-utils-G06
+zypper in nvidia-open-driver-G06-signed-kmp-default* kernel-firmware-nvidia-gspx-G06* nvidia-compute-utils-G06
 ```
 
 > NOTE: If this fails to install it's likely that there's a dependency mismatch between the selected driver version and what NVIDIA is shipping in their repositories - please revisit the section above to validate that your versions match; it may require you to remove files from `/root/nvidia` and re-execute the commands starting from `toolbox`.
@@ -102,7 +102,7 @@ exit
 Next, if you're *not* using a supported GPU, remembering that the list can be found [here](https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus), you can see if the driver will work by enabling support at the module level, but your mileage may vary -- skip this step if you're using a *supported* GPU:
 
 ```shell
-sed -i '/NVreg_OpenRmEnableUnsupportedGpus/s/^#//g' /etc/modprobe.d/50-nvidia-default.conf
+transactional-update run sed -i '/NVreg_OpenRmEnableUnsupportedGpus/s/^#//g' /etc/modprobe.d/50-nvidia-default.conf
 ```
 
 Now that you've got your drivers installed, it's time to reboot, as SLE Micro is an immutable operating system it needs to reboot into the new snapshot that you created in a previous step; the drivers are only installed into this new snapshot, and hence it's not possible to load the drivers without rebooting into this new snapshot, which will happen automatically. Issue the reboot command when you're ready:
@@ -338,3 +338,13 @@ In case your system is running in an environment that requires trusting traffic 
 ```
 
 and run `update-ca-certificates` after starting toolbox
+
+### NVidia SMI does not find the GPU
+
+Check the kernel messages using `dmesg`. In case this indicates that it fails to allocate `NvKMSKapDevice`, then apply the override documented above
+
+### Check if Kernel Modules match the kernel
+
+In case zypper also downloads a new `kernel-default` package, then check if there is a mismatch in the NVidia kernel modules package and the running kernel (comparing to `uname -r`)
+
+In case of a differences, consider to also install the downloaded `kernel-default` package and other suggested packages by executing the installation as `zypper in *`
