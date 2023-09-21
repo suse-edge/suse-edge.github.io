@@ -3,10 +3,18 @@ sidebar_position: 3
 title: Create a custom single-iso image (using SLE Micro installer and combustion image) to use it on Virtual CD-ROM
 ---
 
+The feature to create a single iso (installer image and combustion) to be used by Virtual CD-Rom, will be added to the SLE Micro 5.5 release.
+When the SLE Micro 5.5 is released, we will be able to create a single-iso image with the combustion script included just following the last part of this document [here](#download-the-new-iso-image-to-prepare-it-with-xorriso-and-adding-combustion).
+
+Meanwhile, we could use this workaround to create a single-iso image in order to modify the combustion package to add some lines to detect the CD-Rom properly executing the combustion after installing the SLE Micro image.
+
+To do that we can follow the next steps:
+
+
 ## Clone the SLE Micro installer repository from OBS
 
 * Log in to [OBS](https://build.opensuse.org)
-* Go to the [SLE Micro installer repository](https://build.opensuse.org/project/show/SUSE:SLE-15-SP4:Update:Products:Micro54/SLE-Micro)
+* Go to the [SLE Micro installer repository](https://build.opensuse.org/project/show/SUSE:SLE-15-SP4:Update:Products:Micro54)
 * Create a branch from this project to link 2 packages (`combustion` and `SLE-Micro`) to modify the combustion package to add some extra code. Then we need to link the SLE Micro image to be able to build a new image with the combustion package modified.
 
 To create the link between the 2 packages, go to the `Meta` tab and then add the next lines:
@@ -29,7 +37,7 @@ After that click on `Save` and then you should see something like:
 
 ![obs-single-iso.png](images/obs-single-iso.png)
 
-Now, any modification in the combustion package, after building the package, the SLE Micro image will be automatically rebuilt with the new combustion package changes.
+Now, for any modification to the combustion package, the SLE Micro image will be automatically rebuilt with the new combustion package changes.
 
 ## Modify the combustion package
 
@@ -135,4 +143,3 @@ xorriso -indev ./SLE-Micro.x86_64-5.4.0-Default-SelfInstall-Build15.1.install.is
 After that, we should have the final iso image with the combustion script included `SLE-Micro-Selfinstall-with-mycombustion-single-iso.iso`
 
 
-> This feature will be added to the SLE Micro 5.5 release, but meanwhile, we could use this workaround to create a single-iso image with the combustion script included.
