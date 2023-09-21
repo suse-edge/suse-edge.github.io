@@ -88,12 +88,12 @@ CLI](https://coreos.github.io/butane/) as Butane is not consumable by
 Ignition.
 
 **Combustion** is a dracut module that enables you to configure your
-system on its first boot. Combustion reads a provided file called script
+system on its first boot. Combustion reads a provided file called `script`
 and executes commands in it and thus performs changes to the file
 system. You can use Combustion to change the default partitions, set
-users\' passwords, create files, install packages, etc.
+users' passwords, create files, install packages, etc.
 
-The Combustion dracut module is invoked after the ignition.firstboot
+The Combustion dracut module is invoked after the `ignition.firstboot`
 argument is passed to the kernel command line. Combustion then reads the
 configuration from script. Combustion tries to configure the network, if
 the network flag has been found in script. After `/sysroot` is mounted,
@@ -332,7 +332,7 @@ Delete the VirtIO Drive
 
 ![](./assets/5e96b95370a5c483f022d179dabc0b704351523a.png)
 
-Add a new Device and select "Import"
+Add a new Drive and select "Import"
 
 ![](./assets/5027d068b69ea4e908bd569ca7f907fe8e034e1d.png)
 
