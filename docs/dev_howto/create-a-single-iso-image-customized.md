@@ -4,7 +4,7 @@ title: Create a custom single-iso image (using SLE Micro installer and combustio
 ---
 
 The feature to create a single iso (installer image and combustion) to be used by Virtual CD-Rom, will be added to the SLE Micro 5.5 release.
-When the SLE Micro 5.5 is released, we will be able to create a single-iso image with the combustion script included just following the last part of this document [here](#download-the-new-iso-image-to-prepare-it-with-xorriso-and-adding-combustion).
+When the SLE Micro 5.5 is released, or if you want to use the existing [build](https://build.opensuse.org/project/show/home:amorgante:branches:SUSE:SLE-15-SP4:Update:Products:Micro54) created in this guide, we will be able to create a single-iso image with the combustion script included just following the last part of this document [here](#download-the-new-iso-image-to-prepare-it-with-xorriso-and-adding-combustion).
 
 Meanwhile, we could use this workaround to create a single-iso image in order to modify the combustion package to add some lines to detect the CD-Rom properly executing the combustion after installing the SLE Micro image.
 
