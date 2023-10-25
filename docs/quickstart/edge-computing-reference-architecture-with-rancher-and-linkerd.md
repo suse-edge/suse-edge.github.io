@@ -89,12 +89,9 @@ Industries such as manufacturing, healthcare, transportation, retail, and energy
 
 **Edge Computing stack:**
 
-
-![](./assets/Buoyant-SUSE-Joint-reference-architecture-2.png)
-
+<img src="./assets/Buoyant-SUSE-Joint-reference-architecture-2.png" alt="Edge Computing" width="95%" height="auto">
 
 <br>
-
 
 ## Accelerate time-to-value with the Rancher and Buoyant teams
 
