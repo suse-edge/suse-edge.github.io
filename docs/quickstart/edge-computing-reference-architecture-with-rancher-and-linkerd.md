@@ -109,4 +109,3 @@ Contact the SUSE team at: https://www.suse.com/contact/
 <br>
 
 To sum it up, combining **Rancher Prime**, **Linkerd**, **RKE2**, and **K3s** delivers a robust, observable, and easy-to-manage Edge computing solution. Organizations gain a powerful set of capabilities to improve edge computing performance and tackle the complexities and challenges of managing edge environments. As edge computing applications across  industries continue to proliferate, these tools will play an increasingly critical role in shaping the future of how we process, manage, and utilize data in an increasingly decentralized world.
-
