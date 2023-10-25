@@ -14,7 +14,7 @@ With the exponential growth of connected devices, Edge computing is becoming a g
 
 Before we get into the "how," let's introduce the edge computing stack and examine why these tools work so well together for an edge computing scenario. If you are running Rancher, we recommend combining Rancher Prime, Buoyant's Linkerd, RKE2, and K3s (for an overview of what each piece does, please refer to the table below).
 
-<img src="./assets/Buoyant-SUSE-Edge-Computing.png" alt="Edge Computing" width="60%" height="auto">
+![](./assets/Buoyant-SUSE-Edge-Computing.png)
 
 Why this stack for edge computing? First and foremost, they integrate seamlessly, which will save you a lot of headaches. Additionally, Linkerd and RKE2 significantly improve security, while Linkerd provides an additional layer of reliability. This stack is lightweight and resource efficient, making it ideal for resource-constrained environments. And lastly, all these tools focus on operational simplicity. And when it comes to edge computing, that is incredibly important. With multiple disparate devices, you need a unified way to operate them all.
 
@@ -31,13 +31,11 @@ Why this stack for edge computing? First and foremost, they integrate seamlessly
 
 Security, reliability, and observability are all critical concerns for edge computing, and it’s therefore important to choose an architecture that helps, rather than hinders, accomplishing these goals. An effective architecture will be simple to deploy and operate, using technologies in ways that play to their strengths, as described above. With Rancher and Linkerd, we can adopt an extremely simple architecture that nevertheless brings an enormous amount of functionality to the table:
 
-<img src="./assets/Buoyant-SUSE-Joint-reference-architecture-1.png" alt="Edge Computing" width="70%" height="auto">
+![](./assets/Buoyant-SUSE-Joint-reference-architecture-1.png)
 
 Here, our instruments (on the left of the diagram) are connected to IoT “gateway” systems running Linux. By deploying k3s clusters with Linkerd all the way out on the edge gateways, we can use Linkerd’s secure multicluster capabilities to extend the secure service mesh all the way from the central cluster (shown on the right, running RKE) to the edge gateways themselves.
 
 These tools all integrate seamlessly, providing a secure, reliable, observable edge platform that is lightweight and resource efficient. Now let's explore why we believe these technologies are a perfect match for the edge.
-
-
 
 
 ## Why Rancher and Buoyant's Linkerd?
@@ -65,7 +63,7 @@ The **Linkerd** service mesh requires minimal configuration and comes with zero-
 
 **Linkerd Architecture:**
 
-<img src="./assets/Buoyant-SUSE-Linkerd-architecture.png" alt="Edge Computing" width="30%" height="auto">
+![](./assets/Buoyant-SUSE-Linkerd-architecture.png)
 
 The Linkerd architecture is fairly simple. The Linkerd control plane manages Linkerd’s operation; it also has a CLI that the user can use to configure, and examine, the mesh. Application Pods that are part of the mesh have the ultra-fast, ultra-lightweight Linkerd proxy, purpose-built in Rust, injected into them as a sidecar container. Once the proxy is injected, all application communication goes through the proxy, which manages mTLS, workload authentication and authorization, retries, circuit breaking, metrics collection, and much more. Having these critical features uniformly applied across the entire application at the platform level eliminates the need to change the application itself, meaning that the application developers are free to focus on the business needs of the application rather than on the complexities of the network.
 
@@ -88,8 +86,7 @@ Industries such as manufacturing, healthcare, transportation, retail, and energy
 
 **Edge Computing stack:**
 
-<img src="./assets/Buoyant-SUSE-Joint-reference-architecture-2.png" alt="Edge Computing" width="95%" height="auto">
-
+![](./assets/Buoyant-SUSE-Joint-reference-architecture-2.png)
 
 
 ## Accelerate time-to-value with the Rancher and Buoyant teams
