@@ -1,3 +1,8 @@
+---
+sidebar_position: 9
+title: Edge Computing Reference Architecture with Rancher and Linkerd
+---
+
 # Edge Computing Reference Architecture with Rancher and Linkerd
 
 With the exponential growth of connected devices, Edge computing is becoming a game changer. Edge computing is a model that processes data near the network edge where data is generated. It addresses the issues of latency, bandwidth, and data privacy more effectively than centralized cloud architectures. However, managing and orchestrating applications and services at the Edge is no easy task. Robust, lightweight, and reliable tools are needed — a challenge some open source tools are prepared to tackle. By combining Rancher Prime, Buoyant’s Linkerd, RKE2, and K3s, users get a state-of-the-art, highly secure, highly performant solution for unique edge requirements.
