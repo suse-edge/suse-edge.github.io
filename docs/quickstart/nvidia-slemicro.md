@@ -315,7 +315,107 @@ exit
 
 ## Implementation with Kubernetes
 
-(Coming soon!)
+In the upcoming paragraph we assume [K3S is installed](./k3s-on-slemicro.mdx) on your system & the above steps to install the [NVidia Container Toolkit](#further-validation) are completed successfully. On this setup, we will add support to use the GPU from K3S
+
+> Note: The below commands referencing either `helm` or `kubectl` can be either executed directly on the target system, or on a workstation that has the target system `kubeconfig` configured and selected.
+
+### Restart K3S
+
+Ensure K3S is restarted and discovers the NVidia Runtime.
+
+> Rationale: During boot K3S discovers the Nvidia runtime, and register this as an available runtime.
+
+Verify the runtime is registered:
+
+```
+cat /var/lib/rancher/k3s/agent/etc/containerd/config.toml | grep nvidia
+```
+
+This should show multiple lines referencing the newly installed runtime.
+
+### Register the NVidia Container Runtime in K3S
+
+The Nvidia runtime will not be installed as the default runtime. Therefore, all workloads need a way to reference
+this runtime. This is configured by specifying a `RuntimeClass` for every workload that requires NVidia GPU acceleration.
+
+define a runtime class that references the NVidia container runtime.
+
+```nvidia-runtime.yaml
+apiVersion: node.k8s.io/v1
+handler: nvidia
+kind: RuntimeClass
+metadata:
+  name: nvidia
+```
+
+Now, register this runtime class in K3S by executing: 
+
+```BASH
+kubectl apply -f nvidia-runtime.yaml
+```
+
+### Install the NVidia Device Plugin in K3S
+The last step to reach the GPU, is to run a privileged container which can link any workload to the GPU. This is the Nvidia Device Plugin.
+
+To install the plugin, first create the following configuration:
+
+```nvidia-device-plugin-values.yaml
+config:
+  map:
+    default: |-
+      version: v1
+      flags:
+        migStrategy: none
+        failOnInitError: true
+        nvidiaDriverRoot: "/"
+        plugin:
+          passDeviceSpecs: false
+          deviceListStrategy: "envvar"
+          deviceIDStrategy: "uuid"
+      sharing:
+        timeSlicing:
+          resources:
+          - name: nvidia.com/gpu
+            replicas: 10
+runtimeClassName: nvidia
+gfd:
+  enabled: true
+```
+
+Important sections in this configuration:
+* Configure time slicing: we chose `10`, therefore 10 containers can have a resource limit set to `nvidia.com/gpu: 1`
+* Ensure the NVidia device plugin uses the NVidia container runtime by specifying the `runtimeclass`
+
+Install device plugin via `helm`, referencing the configuration:
+
+```
+helm upgrade --install nvidia-device-plugin nvidia-dp/nvidia-device-plugin --namespace nvidia-device-plugin --values nvidia-device-plugin-values.yml
+```
+
+##### Verify the Nvidia GPU is enabled in K3S
+
+Create the following Pod:
+
+```YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nvidia-smi-test
+spec:
+  restartPolicy: OnFailure
+  runtimeClassName: nvidia
+  containers:
+  - name: nvidia-smi-test
+    image: nvidia/cuda:12.0.0-base-ubi8
+    command: ["nvidia-smi"]
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+```
+
+And verify the pod successfully completes and that the logging indicates a successful query of the GPU.
+
+From here on, you can configure any container to use the GPU by specifying `runtimeClassName: nvidia` & definining the resource limit `nvidia.com/gpu: 1` 
 
 ## Resolving issues
 
