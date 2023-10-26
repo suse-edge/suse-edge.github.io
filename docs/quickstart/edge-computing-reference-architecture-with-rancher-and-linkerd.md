@@ -25,10 +25,6 @@ Why this stack for edge computing? First and foremost, they integrate seamlessly
 |[RKE2](https://docs.rke2.io/)|CNCF-certified Kubernetes distribution optimized for air-gapped, offline, or edge environments deployed at the core or near the edge.|Fully CNCF-certified, RKE2 improves security and simplicity of your Kubernetes deployment. It is designed to be secure, reliable, and lightweight, ideal for general-purpose computing and near-edge use cases.|
 |[K3s](https://docs.rke2.io/)|CNCF-certified ultra-lightweight Kubernetes distribution providing the best choice for clusters running at the edge.|Ideal for edge applications, allowing for simple deployment and management while still fully CNCF-certified. It is ultra-lightweight and optimized for resource-constrained environments and functions even in remote and disconnected areas.|
 
-
-
-
-
 Security, reliability, and observability are all critical concerns for edge computing, and it’s therefore important to choose an architecture that helps, rather than hinders, accomplishing these goals. An effective architecture will be simple to deploy and operate, using technologies in ways that play to their strengths, as described above. With Rancher and Linkerd, we can adopt an extremely simple architecture that nevertheless brings an enormous amount of functionality to the table:
 
 ![](./assets/Buoyant-SUSE-Joint-reference-architecture-1.png)
@@ -36,7 +32,6 @@ Security, reliability, and observability are all critical concerns for edge comp
 Here, our instruments (on the left of the diagram) are connected to IoT “gateway” systems running Linux. By deploying k3s clusters with Linkerd all the way out on the edge gateways, we can use Linkerd’s secure multicluster capabilities to extend the secure service mesh all the way from the central cluster (shown on the right, running RKE) to the edge gateways themselves.
 
 These tools all integrate seamlessly, providing a secure, reliable, observable edge platform that is lightweight and resource efficient. Now let's explore why we believe these technologies are a perfect match for the edge.
-
 
 ## Why Rancher and Buoyant's Linkerd?
 
@@ -67,12 +62,9 @@ The **Linkerd** service mesh requires minimal configuration and comes with zero-
 
 The Linkerd architecture is fairly simple. The Linkerd control plane manages Linkerd’s operation; it also has a CLI that the user can use to configure, and examine, the mesh. Application Pods that are part of the mesh have the ultra-fast, ultra-lightweight Linkerd proxy, purpose-built in Rust, injected into them as a sidecar container. Once the proxy is injected, all application communication goes through the proxy, which manages mTLS, workload authentication and authorization, retries, circuit breaking, metrics collection, and much more. Having these critical features uniformly applied across the entire application at the platform level eliminates the need to change the application itself, meaning that the application developers are free to focus on the business needs of the application rather than on the complexities of the network.
 
-
-
 ## Edge computing use case examples 
 
 Industries such as manufacturing, healthcare, transportation, retail, and energy are all increasingly taking advantage of edge computing to optimize their operations. Let's look at some examples. But keep in mind that the stack is vertical agnostic. The role of Rancher, Linkerd, K3s, and RKE2 is always the same. The examples below put them in industry-specific context. 
-
 
 |Industry Use Case|Retail Industry - Point of Sale (POS) Systems|Manufacturing - Predictive Maintenance|Healthcare - Remote Patient Monitoring|Transportation - Fleet Management|Summing it up|
 |---|---|---|---|---|---|
@@ -82,12 +74,9 @@ Industries such as manufacturing, healthcare, transportation, retail, and energy
 |**RKE2**|For store backend systems, ensuring reliable and secure operation of the POS system.|Provides secure, reliable Kubernetes runtime for the central systems processing and analyzing the sensor data.|Provides secure, reliable Kubernetes runtime for central health monitoring systems, so patient data is processed accurately and securely.|Provides secure, reliable Kubernetes runtime for central fleet management systems, ensuring real-time fleet data is processed accurately and securely.|Provides secure, reliable Kubernetes runtime for the central system.|
 |**K3s**|Efficiently deploy and manage containerized apps across multiple stores.|Run data processing apps at the edge, close to data source, reducing latency and network load​​.|Efficiently processes data at the edge, reducing latency and ensuring timely alerts in case of any health anomalies​.|Processes data at the edge, providing real-time insights and reducing network load​​.|Efficiently processes data at the edge.|
 
-
-
 **Edge Computing stack:**
 
 ![](./assets/Buoyant-SUSE-Joint-reference-architecture-2.png)
-
 
 ## Accelerate time-to-value with the Rancher and Buoyant teams
 
@@ -97,11 +86,8 @@ Practical use cases showcase how these open source tools synergize to create rob
 
 As with any implementation, there are some challenges, however. The initial setup and configuration on the edge can be complex. A deep understanding of these tools and Kubernetes is required. If you need help and want to accelerate your time-to-value, the Buoyant and SUSE teams can help. Reach out, and let's chat!
 
-
 Contact the Buoyant team at: https://buoyant.io/contact
 
 Contact the SUSE team at: https://www.suse.com/contact/
-
-
 
 To sum it up, combining **Rancher Prime**, **Linkerd**, **RKE2**, and **K3s** delivers a robust, observable, and easy-to-manage Edge computing solution. Organizations gain a powerful set of capabilities to improve edge computing performance and tackle the complexities and challenges of managing edge environments. As edge computing applications across  industries continue to proliferate, these tools will play an increasingly critical role in shaping the future of how we process, manage, and utilize data in an increasingly decentralized world.
