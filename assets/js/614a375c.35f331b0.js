@@ -1,0 +1,1 @@
+"use strict";(self.webpackChunksuse_edge_docs=self.webpackChunksuse_edge_docs||[]).push([[1530],{6610:e=>{e.exports=JSON.parse('{"label":"rancher","permalink":"/blog/tags/rancher","allTagsPath":"/blog/tags","count":1}')}}]);
