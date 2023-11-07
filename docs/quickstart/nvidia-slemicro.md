@@ -11,8 +11,6 @@ However, should you want to utilise the GPU Operator for Kubernetes integration,
 
 It's important to call out that the support for these drivers is provided by both SUSE and NVIDIA in tight collaboration, however if you have any concerns or questions about the combination in which you're utilising the drivers, then please ask your SUSE or NVIDIA account managers for further assistance. If you're planning on utilising [NVIDIA AI Enterprise](https://www.nvidia.com/en-gb/data-center/products/ai-enterprise/) (NVAIE) you will need to ensure that you're using an [NVAIE certified GPU](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/platform-support.html#supported-nvidia-gpus-and-systems), which *may* require the use of proprietary NVIDIA drivers. If you're unsure, please speak with your NVIDIA representative.
 
-> NOTE: The instructions provided below will drastically simplify in the coming weeks; the instructions below demonstrate how to pull some packages from SLES repos and install them on SLE Micro, and we're currently porting these packages over to SLE Micro 5.3, 5.4, and 5.5. They'll also be available in the ALP-based Micro equivalent in the coming months.
-
 ## Prerequisites
 
 If you're following this guide, it's assumed that you've got the following already available:
@@ -22,54 +20,15 @@ If you're following this guide, it's assumed that you've got the following alrea
 * A [compatible NVIDIA GPU](https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus) installed (or passed through to the virtual machine in which SLE Micro is running).
 * Access to the root user - these instructions assume you're the root user, and *not* escalating your privileges via `sudo`.
 
+> *NOTE*: SUSE is in the process of ensuring that the NVIDIA drivers are part of the SLE Micro 5.3+ repositories. We can be sure that the drivers are in SLE Micro 5.5, but we may not have completed the tasks for 5.3 and 5.4 yet.
+
 ## Installation
 
-Currently, the required packages for the NVIDIA open driver are not available in standard SLE Micro package repositories, only SUSE Linux Enterprise Server (SLES), so we need to pull them from those repositories, which we can easily do via the toolbox utility. Note that this will not be required in coming weeks - we're currently making these packages available in SLE Micro, so the next few steps will become redundant.
-
-In the meantime, ensure that you've got the `mounts.conf` file setup correctly, this will ensure that any containers started by podman (which includes the `toolbox` utility) will automatically have your SUSE Connect credentials injected into the image. This will allow package access so we can download the packages from the SLES repositories (this file is *usually* already configured on SLE Micro 5.3, but let's make sure): 
-
-```shell
-cat << EOF > /etc/containers/mounts.conf
-# This configuration file specifies the default mounts for each container of the
-# tools adhering to this file (e.g., CRI-O, Podman, Buildah).  The format of the
-# config is /SRC:/DST, one mount per line.
-#/etc/SUSEConnect:/etc/SUSEConnect
-/etc/zypp/credentials.d/SCCcredentials:/etc/zypp/credentials.d/SCCcredentials
-EOF
-```
-
-Next, make a temporary directory in which we can push the packages that we need to download from SLES onto the local filesystem, for this I'm just using `/root/nvidia`:
-
-```shell
-mkdir -p /root/nvidia
-```
-
-Now we can open up the `toolbox` utility, which provides additional command line tooling and utilities that are not part of SLE Micro's base operating system. This tool is useful for troubleshooting a system where you want to maintain a minimal footprint underlying operating system:
-
-```shell
-toolbox
-```
-
-Once we're in the toolbox utility, we can ask the package manager (`zypper`) to add the `sle-module-basesystem` module, refresh the repositories, and then *download* the NVIDIA driver packages into the previously created `/root/nvidia` directory on the host filesystem, noting that from within toolbox the absolute path is `/media/root/root/nvidia`. In the example below we're specifically pulling the "G06" generation of driver, which supports the latest GPU's (please see [here](https://en.opensuse.org/SDB:NVIDIA_drivers#Install) for further information), so please ensure that you're selecting an appropriate GPU version.
+In this section you're going to install the NVIDIA drivers directly onto the SLE Micro operating system as the NVIDIA open-driver is now part of the core SLE Micro package repositories, which makes it incredibly easy to install. In the example below we're specifically pulling the "G06" generation of driver, which supports the latest GPU's (please see [here](https://en.opensuse.org/SDB:NVIDIA_drivers#Install) for further information), so please ensure that you're selecting an appropriate GPU version.
 
 In addition, the example below calls for *535.86.05* of the driver; please make sure that the driver version that you're selecting is compatible with your GPU, and in addition meets the CUDA requirements (if applicable) by checking [here](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/). It's also advisable to check the [NVIDIA SLE15-SP4 repository](http://download.nvidia.com/suse/sle15sp4/x86_64/) to ensure that the driver version that you've chosen has an equivalent `nvidia-compute-utils-G06` package with the same version string; this repository is regularly refreshed by NVIDIA, but the versions need to match; there's a possibility that we have a newer driver version in the SUSE repo than NVIDIA has in theirs (or vice versa), so it's important to match the versions here.
 
-When you've confirmed the above, use the following commands to pull the required packages appropriate for your system:
-
-```shell
-ADDITIONAL_MODULES=sle-module-basesystem zypper ref
-zypper --pkg-cache-dir /media/root/root/nvidia install -y --download-only nvidia-open-driver-G06-signed-kmp=535.86.05
-```
-
-Now that you've got the packages available outside of the toolbox utility, exit the toolbox:
-
-```shell
-exit
-```
-
-> NOTE: Please make sure that you've exited the `toolbox` utility before proceeding!
-
-Now you're ready to install the packages on the host operating system, and for this we need to open up a `transactional-update` session, which creates a new read/write snapshot of the underlying operating system so we can make changes to the immutable platform (for further instructions on `transactional-update` see [here](https://documentation.suse.com/sle-micro/5.4/html/SLE-Micro-all/sec-transactional-udate.html)):
+When you've confirmed the above, you're ready to install the packages on the host operating system, and for this we need to open up a `transactional-update` session, which creates a new read/write snapshot of the underlying operating system so we can make changes to the immutable platform (for further instructions on `transactional-update` see [here](https://documentation.suse.com/sle-micro/5.4/html/SLE-Micro-all/sec-transactional-udate.html)):
 
 ```shell
 transactional-update shell
@@ -82,14 +41,19 @@ zypper ar https://developer.download.nvidia.com/compute/cuda/repos/sles15/x86_64
 zypper ar https://download.nvidia.com/suse/sle15sp4/ nvidia-sle15sp4-main
 ```
 
-Next, move to the `/root/nvidia` directory, which will contain a couple of directories that the previous `zypper` command created with the downloaded packages from SLES. Then, we can request that the package manager install the pre-built signed kernel modules, the firmware packages, and the additional useful utilities package:
+You can then install the driver and the `nvidia-compute-utils` for additional utilities:
 
 ```shell
-cd /root/nvidia/container-suseconnect-zypp:SLE-Module-Basesystem15-SP4-Updates/x86_64
-zypper in nvidia-open-driver-G06-signed-kmp-default* kernel-firmware-nvidia-gspx-G06* nvidia-compute-utils-G06
+zypper install -y nvidia-open-driver-G06-signed-kmp=535.86.05 kernel-firmware-nvidia-gspx-G06 nvidia-compute-utils-G06
 ```
 
-> NOTE: If this fails to install it's likely that there's a dependency mismatch between the selected driver version and what NVIDIA is shipping in their repositories - please revisit the section above to validate that your versions match; it may require you to remove files from `/root/nvidia` and re-execute the commands starting from `toolbox`.
+> NOTE: If this fails to install it's likely that there's a dependency mismatch between the selected driver version and what NVIDIA is shipping in their repositories - please revisit the section above to validate that your versions match. You may want to attempt to install a different driver version.
+
+Next, if you're *not* using a supported GPU, remembering that the list can be found [here](https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus), you can see if the driver will work by enabling support at the module level, but your mileage may vary -- skip this step if you're using a *supported* GPU:
+
+```shell
+sed -i '/NVreg_OpenRmEnableUnsupportedGpus/s/^#//g' /etc/modprobe.d/50-nvidia-default.conf
+```
 
 Now that you've installed these packages, it's time to exit the `transactional-update` session:
 
@@ -98,12 +62,6 @@ exit
 ```
 
 > NOTE: Please make sure that you've exited the `transactional-update` session before proceeding!
-
-Next, if you're *not* using a supported GPU, remembering that the list can be found [here](https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus), you can see if the driver will work by enabling support at the module level, but your mileage may vary -- skip this step if you're using a *supported* GPU:
-
-```shell
-transactional-update run sed -i '/NVreg_OpenRmEnableUnsupportedGpus/s/^#//g' /etc/modprobe.d/50-nvidia-default.conf
-```
 
 Now that you've got your drivers installed, it's time to reboot, as SLE Micro is an immutable operating system it needs to reboot into the new snapshot that you created in a previous step; the drivers are only installed into this new snapshot, and hence it's not possible to load the drivers without rebooting into this new snapshot, which will happen automatically. Issue the reboot command when you're ready:
 
@@ -319,32 +277,12 @@ exit
 
 ## Resolving issues
 
-### Propagating Proxies to toolbox if required
+### nvidia-smi does not find the GPU
 
-In case your system is behind a proxy ensure to propagate your proxy settings to `mounts.conf` by adding the following lines:
+Check the kernel messages using `dmesg`. In case this indicates that it fails to allocate `NvKMSKapDevice`, then apply the unsupported GPU workaround:
 
-```mounts.conf
-/etc/environment:/etc/environment
+```shell
+transactional-update run sed -i '/NVreg_OpenRmEnableUnsupportedGpus/s/^#//g' /etc/modprobe.d/50-nvidia-default.conf
 ```
 
-### Propagating trusted CA Certificates to toolbox if required
-
-In case your system is running in an environment that requires trusting traffic of private CA's, propagate the certificates to toolbox by adding the following lines to `mounts.conf`
-
-```mounts.conf
-/etc/pki/trust/:/etc/pki/trust/
-/usr/share/pki/trust/:/usr/share/pki/trust/
-/etc/ssl/certs/:/etc/ssl/certs/
-```
-
-and run `update-ca-certificates` after starting toolbox
-
-### NVidia SMI does not find the GPU
-
-Check the kernel messages using `dmesg`. In case this indicates that it fails to allocate `NvKMSKapDevice`, then apply the override documented above
-
-### Check if Kernel Modules match the kernel
-
-In case zypper also downloads a new `kernel-default` package, then check if there is a mismatch in the NVidia kernel modules package and the running kernel (comparing to `uname -r`)
-
-In case of a differences, consider to also install the downloaded `kernel-default` package and other suggested packages by executing the installation as `zypper in *`
+> *NOTE*: You will need to reboot at this stage.
