@@ -33,6 +33,19 @@ const FeatureList = [
       </>
     ),
   },
+  {
+    title: 'Stack Validation',
+    Svg: require('@site/static/img/stack-validation.svg').default,
+    description: (
+      <>
+        We regularly and rigorously verifying a validated design.<br />
+        We use open-source and open-standards.<br />
+        Driven by specific use-cases/market segments.<br />
+        Publicly available results.<br />
+        Operated to drive confidence and trust in our customer base.<br />
+      </>
+    ),
+  }
 ];
 
 function Feature({Svg, title, description}) {

@@ -94,6 +94,11 @@ const config = {
             position: 'left'
           },
           {
+             to: 'stack-validation',
+             position: 'left',
+             label: 'Stack Validation'
+           },
+          {
             href: 'https://github.com/suse-edge/',
             label: 'GitHub',
             position: 'right',
