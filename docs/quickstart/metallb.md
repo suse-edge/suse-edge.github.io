@@ -334,7 +334,7 @@ ARPING 192.168.64.210
 ```
 
 In the example above, the traffic flows as follows:
-1. hellok3s.${IP}.sslip.io is resolved to the actual IP.
+1. `hellok3s.${IP}.sslip.io` is resolved to the actual IP.
 2. Then the traffic is handled by the `metallb-speaker` pod.
 3. `metallb-speaker` redirects the traffic to the `traefik` controller.
 4. Finally Traefik forwards the request to the `hello-kubernetes` Service.

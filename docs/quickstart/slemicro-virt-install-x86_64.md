@@ -32,7 +32,7 @@ Basically we will use the following documents as reference to create the image c
 
 If you are trying to download to a remote server, you can use scp to copy that file to the server.
 
-- Access to <https://scc.suse.com/> to generate a registration code
+- Access to [SCC.suse.com](https://scc.suse.com/) to generate a registration code
     - Search for `SUSE Linux Enterprise Micro` via the `Products` menu, select the arch/version then copy and manually activate the registration code
 
 - Butane, qemu-img and cdrtools installed (using zypper for example)
