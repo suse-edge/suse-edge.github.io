@@ -1,1 +1,0 @@
-"use strict";(self.webpackChunksuse_edge_docs=self.webpackChunksuse_edge_docs||[]).push([[8868],{1257:e=>{e.exports=JSON.parse('{"label":"telco","permalink":"/blog/tags/telco","allTagsPath":"/blog/tags","count":1}')}}]);
