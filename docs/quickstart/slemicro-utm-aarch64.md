@@ -157,8 +157,7 @@ In this scenario, Ignition runs before Combustion.
 
 # Image-based process step by step
 
-**NOTE**: There is a helper script that automates all the steps included here
-<https://github.com/suse-edge/misc/blob/main/slemicro/create_vm.sh>
+**NOTE**: There is a helper script that automates all the steps included [here](https://github.com/suse-edge/misc/blob/main/slemicro/create_vm.sh).
   
 ## Prerequisites
 
@@ -170,7 +169,7 @@ In this scenario, Ignition runs before Combustion.
   **NOTE:** You need to have a valid user on the SUSE site to be able to
   download the file.
 
-- Access to <https://scc.suse.com/> to generate a registration code
+- Access to [SCC.suse.com](https://scc.suse.com/) to generate a registration code
   - Search for `SUSE Linux Enterprise Micro` via the `Products` menu, select the arch/version then copy and manually activate the registration code
 
 - Butane, qemu and cdrtools installed (using brew for example)
