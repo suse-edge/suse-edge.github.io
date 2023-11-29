@@ -1,6 +1,5 @@
 ---
-sidebar_position: 4
-title: MetalLB on K3s
+title: MetalLB
 ---
 
 # Intro
