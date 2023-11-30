@@ -1,4 +1,5 @@
 ---
 sidebar_position: 3
-title: Airgapped with Edge Image Builder
+title: Standalone Clusters with Edge Image Builder
 ---
+

@@ -1,4 +1,4 @@
 ---
 sidebar_position: 4
-title: Well Connected with Metal Kubed
+title: BMC controlled onboarding with Metal3
 ---
