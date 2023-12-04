@@ -11,3 +11,5 @@ Welcome to the **SUSE Edge Engineering** docs.
 We suggest you to please put on your hard hat, as we are rapidly building out our documentation.
 :::
 
+
+ATIP documentation can be found [here](/docs/product/atip/introduction)
