@@ -75,14 +75,19 @@ const sidebars = {
         }
       ]
     },
-    // {
-    //   "type": "category",
-    //   "collapsible": true,
-    //   "collapsed": true,
-    //   "label": "Product Documentation",
-    //   "items": [
-    //   ]
-    // },
+    {
+      "type": "category",
+      "collapsible": true,
+      "collapsed": true,
+      "label": "Product Documentation",
+      "items": [
+        {
+          type: "link",
+          label: "Adaptive Telco Infrastructure Platform (ATIP)",
+          href: "/docs/product/atip/introduction"
+        }
+      ]
+    },
     {
       "type": "category",
       "collapsible": true,
@@ -103,18 +108,6 @@ const sidebars = {
     }
 
   ]
-  // But you can create a sidebar manually
-  /*
-  tutorialSidebar: [
-    'intro',
-    'hello',
-    {
-      type: 'category',
-      label: 'Tutorial',
-      items: ['tutorial-basics/create-a-document'],
-    },
-  ],
-   */
 };
 
 module.exports = sidebars;
