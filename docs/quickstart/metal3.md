@@ -1,6 +1,6 @@
 ---
 sidebar_position: 4
-title: BMC controlled onboarding with Metal3
+title: BMC automated deployments with Metal3
 ---
 
 # What is Metal<sup>3</sup>?
