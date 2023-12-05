@@ -3,23 +3,23 @@ sidebar_position: 4
 title: BMC automated deployments with Metal3
 ---
 
-# What is Metal<sup>3</sup>?
+## What is Metal<sup>3</sup>?
 
-# Why use this method
+## Why use this method
 
-# High level architecture
+## High level architecture
 
-# How to use Metal3
+## How to use Metal3
 
-## Setup bootstrap cluster
+### Setup bootstrap cluster
 
-## Add systems
+### Add systems
 
-## Create downstream clusters
+### Create downstream clusters
 
 
-# Next steps
+## Next steps
 
-# Planned changes
+## Planned changes
 
-# Additional Resources
+## Additional Resources

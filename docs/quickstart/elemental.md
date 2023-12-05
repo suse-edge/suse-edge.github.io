@@ -3,25 +3,25 @@ sidebar_position: 5
 title: Remote host onboarding with Elemental
 ---
 
-# What is Elemental?
+## What is Elemental?
 
-# Why use this method
+## Why use this method
 
-# High level architecture
+## High level architecture
 
-# How to use Elemental
+## How to use Elemental
 
-## Setup bootstrap cluster
+### Setup bootstrap cluster
 
-## Build installation media
+### Build installation media
 
-## Add systems
+### Add systems
 
-## Create downstream clusters
+### Create downstream clusters
 
 
-# Next steps
+## Next steps
 
-# Planned changes
+## Planned changes
 
-# Additional Resources
+## Additional Resources

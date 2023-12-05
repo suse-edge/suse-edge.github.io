@@ -3,25 +3,25 @@ sidebar_position: 3
 title: Standalone Clusters with Edge Image Builder
 ---
 
-# What is the Edge Image Builder?
+## What is the Edge Image Builder?
 
-# Why use this method
+## Why use this method
 
-# How to use the Edge Image Builder
+## How to use the Edge Image Builder
 
-## Installing Rancher Desktop or Podman 
+### Installing Rancher Desktop or Podman 
 
-## Building config file
+### Building config file
 
-## Running the application
+### Running the application
 
-## Using your newly built image
+### Using your newly built image
 
-## Updating your system while airgapped
+### Updating your system while airgapped
 
-# Next steps
+## Next steps
 
-# Planned changes
+## Planned changes
 
-# Additional Resources
+## Additional Resources
 
