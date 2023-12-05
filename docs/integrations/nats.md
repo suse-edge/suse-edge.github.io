@@ -1,6 +1,5 @@
 ---
-sidebar_position: 6
-title: NATS on K3s
+title: Setting up NATS on K3s
 ---
 
 # Intro
