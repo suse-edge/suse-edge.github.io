@@ -1,5 +1,4 @@
 ---
-sidebar_position: 1
 title: Using NVIDIA GPU's on SLE Micro
 ---
 

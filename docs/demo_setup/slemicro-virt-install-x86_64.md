@@ -1,5 +1,4 @@
 ---
-sidebar_position: 1
 title: SLE Micro on X86_64 on libvirt (virt-install)
 ---
 
