@@ -29,8 +29,10 @@ At the very least, you need:
 - A resolvable hostname
   - Or static ip address to use with a service like sslip.io 
 - A host to build the installation media with
-  - TODO: What are the requirements for this?
-- A USB flash drive to boot from
+  - This would likely be your local computer for most people
+  - [Kubectl](https://kubernetes.io/docs/reference/kubectl/kubectl/), [Podman](https://podman.io), and [Helm](https://helm.sh) need to be installed
+  - TODO: edit this after writing the EIB doc
+- (If using physical hardware) A USB flash drive to boot from
   - Existing will be overwritten as part of the process
 
 In the writing of this guide, I will be using a Digital Ocean droplet to host the upstream cluster and an Intel NUC as the downstream device. For building the installation media, I will be using my desktop running [openSUSE Tumbleweed](https://get.opensuse.org/tumbleweed/).
@@ -68,21 +70,114 @@ TODO: Should I add more detail?
 
 #### Setup DNS
 
-As with the setup of the cluster itself, how you configure DNS will be different depending on where it's being hosted.
+Before continuing, you will need to setup access to your cluster. As with the setup of the cluster itself, how you configure DNS will be different depending on where it's being hosted.
 
-If you don't want to deal with setting up DNS (for example this is just an ephemeral test server), you can use a service like [sslip.io](https://sslip.io). With this, you can take you  
+:::tip 
+If you don't want to deal with setting up DNS (for example this is just an ephemeral test server), you can use a service like [sslip.io](https://sslip.io). With this service, you can resolve any ip address with `<address>.sslip.io`. 
+:::
 
 #### Install Rancher
 
 To install Rancher, you need to get access to the kubeapi of the cluster you just created. This looks differently depending on what distribution of Kubernetes is being used. 
 
-You will also need to install the [kubectl](https://kubernetes.io/docs/reference/kubectl/kubectl/) and [helm](https://helm.sh) tools.
+For RKE2,the kubeconfig file will have been written to `/etc/rancher/rke2/rke2.yaml`. Save this file to `~/.kube/config` on your local system. You may need to edit the file to include the correct externally routable IP address or hostname. 
 
-For RKE2,the kubeconfig file will have been written to `/etc/rancher/rke2/rke2.yaml`. You may need to edit the file to include the correct externally routable IP address or hostname. 
 
-TODO: actually install Rancher
+The simplest way to get Rancher installed is with these commands that can be found in the [Rancher Documentation](https://ranchermanager.docs.rancher.com/pages-for-subheaders/install-upgrade-on-a-kubernetes-cluster):
+
+TODO: simplify these a bit
+
+<Tabs>
+  <TabItem value="linux" label="Linux" default>
+  Install [cert-manager](https://cert-manager.io):
+
+```bash
+helm repo add rancher-latest https://releases.rancher.com/server-charts/latest
+kubectl create namespace cattle-system
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.3/cert-manager.crds.yaml
+helm repo add jetstack https://charts.jetstack.io
+helm repo update
+helm install cert-manager jetstack/cert-manager \
+  --namespace cert-manager \
+  --create-namespace
+```
+
+Then install Rancher itself:
+
+```bash
+helm install rancher rancher-latest/rancher \
+  --namespace cattle-system \
+  --set hostname=<DNS or sslip from above> \
+  --set replicas=1 \
+  --set bootstrapPassword=<PASSWORD_FOR_RANCHER_ADMIN>
+```
+
+  </TabItem>
+  <TabItem value="OSX" label="Mac OS">
+  Install [cert-manager](https://cert-manager.io):
+
+```bash
+helm repo add rancher-latest https://releases.rancher.com/server-charts/latest
+kubectl create namespace cattle-system
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.3/cert-manager.crds.yaml
+helm repo add jetstack https://charts.jetstack.io
+helm repo update
+helm install cert-manager jetstack/cert-manager \
+  --namespace cert-manager \
+  --create-namespace
+```
+
+Then install Rancher itself:
+
+```bash
+helm install rancher rancher-latest/rancher \
+  --namespace cattle-system \
+  --set hostname=<DNS or sslip from above> \
+  --set replicas=1 \
+  --set bootstrapPassword=<PASSWORD_FOR_RANCHER_ADMIN>
+```
+
+  </TabItem>
+  <TabItem value="windows" label="Windows">
+  Install [cert-manager](https://cert-manager.io):
+
+```powershell
+helm repo add rancher-latest https://releases.rancher.com/server-charts/latest
+kubectl create namespace cattle-system
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.3/cert-manager.crds.yaml
+helm repo add jetstack https://charts.jetstack.io
+helm repo update
+helm install cert-manager jetstack/cert-manager `
+  --namespace cert-manager `
+  --create-namespace
+```
+
+Then install Rancher itself:
+
+```powershell
+helm install rancher rancher-latest/rancher `
+  --namespace cattle-system `
+  --set hostname=<DNS or sslip from above> `
+  --set replicas=1 `
+  --set bootstrapPassword=<PASSWORD_FOR_RANCHER_ADMIN>
+```
+  </TabItem>
+</Tabs>
+
+
+:::note
+If this is intended to be a production system, please use cert-manager to configure a real certificate (such as one from Let's Encrypt). 
+:::
+
+Browse to the hostname you set up and log in to Rancher with the bootstrapPassword you used. There is a short setup process that you will be guided through.
+
 
 #### Install Elemental
+
+With Rancher installed, you can now install Elemental itself!
+
+
+
 
 #### Optionally Install the Elemental UI Plugin
 
@@ -109,7 +204,7 @@ If you are booting a physical device, we need to burn the image to a USB flash d
     sudo dd if=/path/to/output.iso of=/dev/sdX
     ```
   </TabItem>
-  <TabItem value="OSX" label="OS X">
+  <TabItem value="OSX" label="Mac OS">
     TODO: any difference? 
     
     ```bash
