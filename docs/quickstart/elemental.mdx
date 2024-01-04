@@ -290,12 +290,71 @@ If you are using the UI Extension, you should see your node appear in the "Inven
 
 ### Create downstream clusters
 
-Now that Elemental can see and control our downstream machines, we can create a cluster from those machine
+Now that Elemental can see and control our downstream machines, we can create a cluster from those machine.
 
 <Tabs>
   <TabItem value="yaml" label="YAML">
 
-  TODO: MachineSelectorTemplate and Cluster
+  There are two objects that we need to create when provisioning a new cluster using Elemental. 
+
+  The first is the MachineInventorySelectorTemplate. This object allows us to specify a mapping between Clusters and the machines in inventory. 
+
+  Create a file called `selector.yaml` with the contents:
+
+  ```yaml
+apiVersion: elemental.cattle.io/v1beta1
+kind: MachineInventorySelectorTemplate
+metadata:
+  name: location-123-selector
+  namespace: fleet-default
+spec:
+  template:
+    spec:
+      selector:
+        matchLabel:
+          locationID: 123
+  ```
+
+  The we can create it with 
+
+  ```bash
+kubectl create -f selector.yaml 
+  ```
+
+  This will match any machine in the inventory with the label `locationID: 123` so we need to add this label to the machines that should be matched. We can do this with:
+
+  ```bash
+  kubectl label MachineInventory -n fleet-default <name of MachineInventory object> locationID=123
+  ``` 
+
+  Next, we create the cluster itself. There are a lot of options here but a simple single-node K3s Cluster looks like: 
+
+  ```yaml
+apiVersion: provisioning.cattle.io/v1
+kind: Cluster
+metadata:
+  name: location-123
+  namespace: fleet-default
+spec:
+  kubernetesVersion: v1.26.11+k3s2
+  rkeConfig:
+    machinePools:
+      - name: pool1
+        etcdRole: true
+        controlPlaneRole: true
+        workerRole: true
+        machineConfigRef:
+          kind: MachineInventorySelectorTemplate
+          name: location-123-selector
+          apiVersion: elemental.cattle.io/v1beta1
+          quantity: 1
+  ```
+
+  To provision this cluster, we can create a file with these contents called `cluster.yaml` and run 
+
+```bash
+kubectl create -f cluster.yaml
+```
     
   </TabItem>
   <TabItem value="visual" label="UI Extension">
