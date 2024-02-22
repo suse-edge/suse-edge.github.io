@@ -1,0 +1,262 @@
+= Standalone Clusters with Edge Image Builder
+
+ifdef::env-github[]
+imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+The Edge Image Builder is a tool that allows for generating a fully customized disk image for installing and bootstrapping nodes without the usual pain and suffering.
+
+It supports a variety of configuration options including (but not limited to):
+
+* Users, passwords, and ssh-keys
+* Kernel command line arguments
+* Systemd-services to be enabled/disabled at boot-time
+* Configuration of Network Devices (static IP, hostname, VLAN's, bonding, etc.)
+* Airgapped installation of host-level packages (including dependency resolution)
+* Standard system configuration (e.g. proxies, NTP, custom SSL certificates, etc.)
+* Registration to Rancher via Elemental API
+* Registration to SUSE Manager for OS management
+* Fallback for custom scripts that enables any manual tasks
+* Fully air-gapped deployments of Kubernetes (single & multi-node deployments)
+* Fully air-gapped workload management (enabling customer images & manifests)
+* Fully unattended node deployment
+
+== Why use this method
+
+While the Edge Image Builder tool is a part of the process from all three provisioning methods, it really shows it's value in scenarios where the clusters being deployed have limited networking or are fully air-gapped.
+
+== How to use the Edge Image Builder
+
+Edge Image Builder is typically run from inside a container so, if you don't already have a way to run containers, we need to start by installing a container runtime such as https://podman.io[Podman] or https://rancherdesktop.io[Rancher Desktop]. For this guide, we will assume you already have a container runtime available.
+
+[NOTE]
+====
+If you are running Rancher Desktop, you need to switch to the https://docs.rancherdesktop.io/ui/preferences/container-engine/general[`dockerd (moby)` container runtime]
+====
+
+=== Directory structure
+
+When running the tool, we will mount in a directory from the host.
+
+This directory has the following structure (all subdirectories other than `images` are optional):
+
+[,console]
+----
+./
+├── eib-config-iso.yaml
+├── base-images/
+│   └ SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM.install.iso
+├── network/
+├── rpms/
+├── elemental/
+└── custom/
+----
+
+[NOTE]
+====
+For this quickstart, we will be ignoring the elemental subdirectory. If you are working with Elemental, please check out it's link:/docs/quickstart/elemental[quickstart guide] for more information!
+====
+
+=== Building the config file
+
+The config file is where we define what changes need to be included in your environment.
+
+The base contents of the file are:
+
+[,yaml]
+----
+apiVersion: 1.0
+image:
+    imageType: iso
+    arch: x86_64
+    baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM.install.iso
+    outputImageName: eib-image.iso
+----
+
+Let's save this file as `iso-config.yaml`
+
+==== Users
+
+The first thing we can add are users of the system. Let's say we want to include a password for the root user (which is not typically a good idea for production but it makes a good demo).
+
+First, we need to encrypt the password using:
+
+[,console]
+----
+openssl passwd -6 MyPassword!123
+----
+
+This will output something similar to:
+
+[,console]
+----
+$6$UrXB1sAGs46DOiSq$HSwi9GFJLCorm0J53nF2Sq8YEoyINhHcObHzX2R8h13mswUIsMwzx4eUzn/rRx0QPV4JIb0eWCoNrxGiKH4R31
+----
+
+We can then add a section in the config file called `operatingSystem` with a `users` array inside it. The resulting file should look like:
+
+[,yaml]
+----
+apiVersion: 1.0
+image:
+    imageType: iso
+    baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM.install.iso
+    outputImageName: eib-image.iso
+operatingSystem:
+    users:
+    - username: root
+      encryptedPassword: $6$UrXB1sAGs46DOiSq$HSwi9GFJLCorm0J53nF2Sq8YEoyINhHcObHzX2R8h13mswUIsMwzx4eUzn/rRx0QPV4JIb0eWCoNrxGiKH4R31
+----
+
+==== Packages
+
+Let's extend our image a bit with some additional packages.
+
+For an example in this quickstart, let's say you were still testing stuff locally and wanted to install the `yq` command to make working with yaml easier. This package can be found in the PackageHub repo.
+
+To have this package installed, we can add a section to the
+
+[,yaml]
+----
+apiVersion: 1.0
+image:
+    imageType: iso
+    baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM.install.iso
+    outputImageName: eib-image.iso
+operatingSystem:
+    users:
+    - username: root
+      encryptedPassword: $6$UrXB1sAGs46DOiSq$HSwi9GFJLCorm0J53nF2Sq8YEoyINhHcObHzX2R8h13mswUIsMwzx4eUzn/rRx0QPV4JIb0eWCoNrxGiKH4R31
+  packages:
+    packageList:
+    - yq
+    additionalRepos:
+    - https://updates.suse.com/SUSE/Backports/SLE-15-SP5_x86_64/standard
+    #registrationCode: INTERNAL-USE-ONLY-foo-bar
+----
+
+TODO: this isn't working
+
+This will look through the requested packages, collect all the dependencies, pull the required rpms, and include them on the image to be installed without needing to connect to the network.
+
+[NOTE]
+====
+More Operating System settings can be found https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md#operating-system[here in the Edge Image Builder documentation]
+====
+
+==== Network Configuration
+
+Lastly, for this quickstart example, let's setup a network device!
+
+This is done by adding a file in the `network` subdirectory called `host1.local.yaml` with the contents:
+
+TODO: what's the minimum needed, and do we really need to specify the MAC address?
+
+[,yaml]
+----
+dns-resolver: {}
+routes:
+  running:
+    - destination: 0.0.0.0/0
+      next-hop-interface: eth0
+      next-hop-address: 192.168.1.1
+      table-id: 254
+  config: []
+interfaces:
+  - name: eth0
+    type: ethernet
+    state: up
+    mac-address: 0E:4D:C6:B8:C4:72
+    ipv4:
+      enabled: true
+      address:
+        - ip: 192.168.1.99
+          prefix-length: 24
+    ethernet:
+      auto-negotiation: false
+  - name: lo
+    type: loopback
+    state: up
+    mac-address: 00:00:00:00:00:00
+    mtu: 65536
+    ipv4:
+      enabled: true
+      address:
+        - ip: 127.0.0.1
+          prefix-length: 8
+----
+
+This will be turned into the needed https://github.com/nmstate/nmstate[nmstate] configuration files when the image is built.
+
+=== Running the image build
+
+To build the image, we can run:
+
+[,bash]
+----
+docker run --rm -it -v $PWD/eib/:/eib \
+ registry.opensuse.org/home/atgracey/eib/container/containerfile/eib:latest \
+ /usr/bin/eib -config-file eib-config.yaml -config-dir /eib -build-dir \
+ /eib/_build
+----
+
+TODO: Change the image to the released version when available
+
+This will create a timestamped folder in `$PWD/eib/_build/` that includes the produced iso image (called `eib-image.iso`)
+
+=== Using your newly built image
+
+We can use this new image by burning it to a USB drive.
+
+TODO: add tabs for each OS
+
+//[.tabs]
+//Linux::
+//+
+//[.console]
+//----
+//<COMMAND>
+//----
+//+
+//MacOS::
+//+
+//[.console]
+//----
+//<COMMAND>
+//----
+//+
+//Windows::
+//+
+//[.console]
+//----
+//<COMMAND>
+//----
+
+=== Updating your system while airgapped
+
+TODO: ???
+
+== Next steps
+
+Due to how many configuration options the Edge Image Builder offers, a quickstart that goes through all of them would not be easily readable. Here are some links to commonly needed configurations options:
+
+TODO: add links
+
+* Systemd-services
+* Registration with SUSE Manager
+* Airgapped container side-loading
+* Kubernetes deployment
+* ???
+
+== Planned changes
+
+TODO
+
+== Additional Resources
+
+TODO: what should be here

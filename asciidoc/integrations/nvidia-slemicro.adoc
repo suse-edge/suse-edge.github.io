@@ -1,0 +1,340 @@
+= Using NVIDIA GPU's on SLE Micro
+
+ifdef::env-github[]
+imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]]
+
+
+In this guide, we'll show you how to implement host-level NVIDIA GPU support via the pre-built https://github.com/NVIDIA/open-gpu-kernel-modules[open-source drivers] on SLE Micro 5.3+. In other words, drivers that are baked into the operating system rather than dynamically loaded by NVIDIA's https://github.com/NVIDIA/gpu-operator[GPU Operator]. This configuration is highly desirable for customers that want to pre-bake all artefacts required for deployment into the image, and where the dynamic selection of the driver version is not a requirement. This guide shows how to deploy the additional components onto a pre-installed system, but the steps could also be used to create a deployment image with the software pre-baked.
+
+However, should you want to utilise the GPU Operator for Kubernetes integration, it should still be possible to follow this guide and enable the GPU operator by telling it to utilise the _pre-installed_ drivers via the `driver.enabled=false` flag in the NVIDIA GPU Operator Helm chart, where more comprehensive instructions are available https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/install-gpu-operator.html#chart-customization-options[here].
+
+It's important to call out that the support for these drivers is provided by both SUSE and NVIDIA in tight collaboration, however if you have any concerns or questions about the combination in which you're utilising the drivers, then please ask your SUSE or NVIDIA account managers for further assistance. If you're planning on utilising https://www.nvidia.com/en-gb/data-center/products/ai-enterprise/[NVIDIA AI Enterprise] (NVAIE) you will need to ensure that you're using an https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/platform-support.html#supported-nvidia-gpus-and-systems[NVAIE certified GPU], which _may_ require the use of proprietary NVIDIA drivers. If you're unsure, please speak with your NVIDIA representative.
+
+== Prerequisites
+
+If you're following this guide, it's assumed that you've got the following already available:
+
+* At least one host with SLE Micro 5.3+ installed; this can be physical or virtual.
+* Your host(s) is/are attached to a subscription as this will be required for package access - an evaluation is available https://www.suse.com/download/sle-micro/[here].
+* A https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus[compatible NVIDIA GPU] installed (or passed through to the virtual machine in which SLE Micro is running).
+* Access to the root user - these instructions assume you're the root user, and _not_ escalating your privileges via `sudo`.
+
+[NOTE]
+====
+SUSE is in the process of ensuring that the NVIDIA drivers are part of the SLE Micro 5.3+ repositories. We can be sure that the drivers are in SLE Micro 5.5, but we may not have completed the tasks for 5.3 and 5.4 yet.
+====
+
+== Installation
+
+In this section you're going to install the NVIDIA drivers directly onto the SLE Micro operating system as the NVIDIA open-driver is now part of the core SLE Micro package repositories, which makes it incredibly easy to install. In the example below we're specifically pulling the "G06" generation of driver, which supports the latest GPU's (please see https://en.opensuse.org/SDB:NVIDIA_drivers#Install[here] for further information), so please ensure that you're selecting an appropriate GPU version.
+
+In addition, the example below calls for _535.86.05_ of the driver; please make sure that the driver version that you're selecting is compatible with your GPU, and in addition meets the CUDA requirements (if applicable) by checking https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/[here]. It's also advisable to check the http://download.nvidia.com/suse/sle15sp4/x86_64/[NVIDIA SLE15-SP4 repository] to ensure that the driver version that you've chosen has an equivalent `nvidia-compute-utils-G06` package with the same version string; this repository is regularly refreshed by NVIDIA, but the versions need to match; there's a possibility that we have a newer driver version in the SUSE repo than NVIDIA has in theirs (or vice versa), so it's important to match the versions here.
+
+When you've confirmed the above, you're ready to install the packages on the host operating system, and for this we need to open up a `transactional-update` session, which creates a new read/write snapshot of the underlying operating system so we can make changes to the immutable platform (for further instructions on `transactional-update` see https://documentation.suse.com/sle-micro/5.4/html/SLE-Micro-all/sec-transactional-udate.html[here]):
+
+[,bash]
+----
+transactional-update shell
+----
+
+When you're in your `transactional-update` shell, add the additional required package repositories from NVIDIA; this will allow us to pull in additional utilities, e.g. `nvidia-smi`, along with access to CUDA packages that you may want to utilise:
+
+[,bash]
+----
+zypper ar \
+ https://developer.download.nvidia.com/compute/cuda/repos/sles15/x86_64/ \
+ nvidia-sle15sp4-cuda
+zypper ar https://download.nvidia.com/suse/sle15sp4/ nvidia-sle15sp4-main
+----
+
+You can then install the driver and the `nvidia-compute-utils` for additional utilities:
+
+[,bash]
+----
+zypper install -y nvidia-open-driver-G06-signed-kmp=535.86.05 \
+ kernel-firmware-nvidia-gspx-G06 nvidia-compute-utils-G06
+----
+
+[TIP]
+====
+If this fails to install it's likely that there's a dependency mismatch between the selected driver version and what NVIDIA is shipping in their repositories - please revisit the section above to validate that your versions match. You may want to attempt to install a different driver version.
+====
+
+Next, if you're _not_ using a supported GPU, remembering that the list can be found https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus[here], you can see if the driver will work by enabling support at the module level, but your mileage may vary -- skip this step if you're using a _supported_ GPU:
+
+[,bash]
+----
+sed -i '/NVreg_OpenRmEnableUnsupportedGpus/s/^#//g' \
+ /etc/modprobe.d/50-nvidia-default.conf
+----
+
+Now that you've installed these packages, it's time to exit the `transactional-update` session:
+
+[,bash]
+----
+exit
+----
+
+[IMPORTANT]
+====
+Please make sure that you've exited the `transactional-update` session before proceeding.
+====
+
+Now that you've got your drivers installed, it's time to reboot, as SLE Micro is an immutable operating system it needs to reboot into the new snapshot that you created in a previous step; the drivers are only installed into this new snapshot, and hence it's not possible to load the drivers without rebooting into this new snapshot, which will happen automatically. Issue the reboot command when you're ready:
+
+[,bash]
+----
+reboot
+----
+
+Once the system has rebooted successfully, log back in and try to use the `nvidia-smi` tool to verify that the driver is loaded successfully and that it's able to both access and enumerate your GPU(s):
+
+[,bash]
+----
+nvidia-smi
+----
+
+The output of this command should show you something similar to the following output, noting that in the example below we have two GPU's:
+
+[,shell]
+----
+Mon Sep 18 06:58:12 2023
++---------------------------------------------------------------------------------------+
+| NVIDIA-SMI 535.86.05              Driver Version: 535.86.05    CUDA Version: 12.2     |
+|-----------------------------------------+----------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |         Memory-Usage | GPU-Util  Compute M. |
+|                                         |                      |               MIG M. |
+|=========================================+======================+======================|
+|   0  NVIDIA A100-PCIE-40GB          Off | 00000000:17:00.0 Off |                    0 |
+| N/A   29C    P0              35W / 250W |      4MiB / 40960MiB |      0%      Default |
+|                                         |                      |             Disabled |
++-----------------------------------------+----------------------+----------------------+
+|   1  NVIDIA A100-PCIE-40GB          Off | 00000000:CA:00.0 Off |                    0 |
+| N/A   30C    P0              33W / 250W |      4MiB / 40960MiB |      0%      Default |
+|                                         |                      |             Disabled |
++-----------------------------------------+----------------------+----------------------+
+
++---------------------------------------------------------------------------------------+
+| Processes:                                                                            |
+|  GPU   GI   CI        PID   Type   Process name                            GPU Memory |
+|        ID   ID                                                             Usage      |
+|=======================================================================================|
+|  No running processes found                                                           |
++---------------------------------------------------------------------------------------+
+----
+
+...and that's it! You've successfully installed and verified that the NVIDIA drivers are loaded into SLE Micro.
+
+== Further Validation
+
+At this stage, all we've been able to verify is that at the host level the NVIDIA device can be accessed and that the drivers are loading successfully. However, if we want to be sure that it's functioning, a simple test would be to try and validate that the GPU can take instruction from a user-space application, ideally via a container, and through the CUDA library, as that's typically what a real workload would utilise. For this, we can make a further modification to the host OS by installing the `nvidia-container-toolkit`. First, open up another `transactional-update` shell, noting that we could have done this in a single transaction in the previous step, but to many (e.g. customers wanting to use Kubernetes) this step won't be required:
+
+[,bash]
+----
+transactional-update shell
+----
+
+Next, install the `nvidia-container-toolkit` package, which comes from one of the repo's that we configured in a previous step. Note that this command will initially appear to fail as it has a dependency on `libseccomp`, whereas this package is `libseccomp2` in SLE Micro, so you can safely select the second option ("break dependencies") here:
+
+[,bash]
+----
+zypper in install nvidia-container-toolkit
+----
+
+Your output should look like the following:
+
+[,shell]
+----
+Refreshing service 'SUSE_Linux_Enterprise_Micro_5.4_x86_64'.
+Refreshing service 'SUSE_Linux_Enterprise_Micro_x86_64'.
+Refreshing service 'SUSE_Package_Hub_15_SP4_x86_64'.
+Loading repository data...
+Reading installed packages...
+Resolving package dependencies...
+
+Problem: nothing provides 'libseccomp' needed by the to be installed nvidia-container-toolkit-1.14.1-1.x86_64
+ Solution 1: do not install nvidia-container-toolkit-1.14.1-1.x86_64
+ Solution 2: break nvidia-container-toolkit-1.14.1-1.x86_64 by ignoring some of its dependencies
+
+Choose from above solutions by number or cancel [1/2/c/d/?] (c): 2
+(...)
+----
+
+[NOTE]
+====
+We're working on fixing this dependency issue, so this should be a lot cleaner in the coming weeks.
+====
+
+When you're ready, you can exit the `transactional-update` shell:
+
+[,bash]
+----
+exit
+----
+
+...and reboot the machine into the new snapshot:
+
+[,bash]
+----
+reboot
+----
+
+[NOTE]
+====
+As before, you will need to ensure that you've exited the `transactional-shell` and rebooted the machine for your changes to be enacted.
+====
+
+Now that the machine has rebooted, you can validate that the system is able to successfully enumerate the devices via the NVIDIA container toolkit (the output should be verbose, and it should provide a number of INFO and WARN messages, but no ERROR messages):
+
+[,bash]
+----
+nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+----
+
+When ready, you can then run a podman-based container (doing this via `podman` gives us a good way of validating access to the NVIDIA device from within a container, which should give confidence for doing the same with Kubernetes), giving it access to the labelled NVIDIA device(s) that were taken care of by the previous command, based on https://registry.suse.com/bci/bci-base-15sp5/index.html[SLE BCI] and simply running bash:
+
+[,bash]
+----
+podman run --rm --device nvidia.com/gpu=all --security-opt=label=disable \
+ -it registry.suse.com/bci/bci-base:latest bash
+----
+
+When we're in the temporary podman container we can install the required CUDA libraries, again checking the correct CUDA version for your driver https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/[here] although the previous output of `nvidia-smi` should show the required CUDA version. In the example below we're installing _CUDA 12.1_ and we're pulling a large number of examples, demo's, and development kits so you can fully validate the GPU:
+
+[,bash]
+----
+zypper ar \
+ http://developer.download.nvidia.com/compute/cuda/repos/sles15/x86_64/ \
+ cuda-sle15-sp4
+zypper in -y cuda-libraries-devel-12-1 cuda-minimal-build-12-1 \
+ cuda-demo-suite-12-1
+----
+
+Once this has been installed successfully, don't exit from the container, we'll run the `deviceQuery` CUDA example, which will comprehensively validate GPU access via CUDA, and from within the container itself:
+
+[,shell]
+----
+/usr/local/cuda-12/extras/demo_suite/deviceQuery
+----
+
+If successful, you should see output that shows similar to the following, noting the `Result = PASS` message at the end of the command:
+
+[,shell]
+----
+/usr/local/cuda-12/extras/demo_suite/deviceQuery Starting...
+
+ CUDA Device Query (Runtime API) version (CUDART static linking)
+
+Detected 2 CUDA Capable device(s)
+
+Device 0: "NVIDIA A100-PCIE-40GB"
+  CUDA Driver Version / Runtime Version          12.2 / 12.1
+  CUDA Capability Major/Minor version number:    8.0
+  Total amount of global memory:                 40339 MBytes (42298834944 bytes)
+  (108) Multiprocessors, ( 64) CUDA Cores/MP:     6912 CUDA Cores
+  GPU Max Clock rate:                            1410 MHz (1.41 GHz)
+  Memory Clock rate:                             1215 Mhz
+  Memory Bus Width:                              5120-bit
+  L2 Cache Size:                                 41943040 bytes
+  Maximum Texture Dimension Size (x,y,z)         1D=(131072), 2D=(131072, 65536), 3D=(16384, 16384, 16384)
+  Maximum Layered 1D Texture Size, (num) layers  1D=(32768), 2048 layers
+  Maximum Layered 2D Texture Size, (num) layers  2D=(32768, 32768), 2048 layers
+  Total amount of constant memory:               65536 bytes
+  Total amount of shared memory per block:       49152 bytes
+  Total number of registers available per block: 65536
+  Warp size:                                     32
+  Maximum number of threads per multiprocessor:  2048
+  Maximum number of threads per block:           1024
+  Max dimension size of a thread block (x,y,z): (1024, 1024, 64)
+  Max dimension size of a grid size    (x,y,z): (2147483647, 65535, 65535)
+  Maximum memory pitch:                          2147483647 bytes
+  Texture alignment:                             512 bytes
+  Concurrent copy and kernel execution:          Yes with 3 copy engine(s)
+  Run time limit on kernels:                     No
+  Integrated GPU sharing Host Memory:            No
+  Support host page-locked memory mapping:       Yes
+  Alignment requirement for Surfaces:            Yes
+  Device has ECC support:                        Enabled
+  Device supports Unified Addressing (UVA):      Yes
+  Device supports Compute Preemption:            Yes
+  Supports Cooperative Kernel Launch:            Yes
+  Supports MultiDevice Co-op Kernel Launch:      Yes
+  Device PCI Domain ID / Bus ID / location ID:   0 / 23 / 0
+  Compute Mode:
+     < Default (multiple host threads can use ::cudaSetDevice() with device simultaneously) >
+
+Device 1: "NVIDIA A100-PCIE-40GB"
+  CUDA Driver Version / Runtime Version          12.2 / 12.1
+  CUDA Capability Major/Minor version number:    8.0
+  Total amount of global memory:                 40339 MBytes (42298834944 bytes)
+  (108) Multiprocessors, ( 64) CUDA Cores/MP:     6912 CUDA Cores
+  GPU Max Clock rate:                            1410 MHz (1.41 GHz)
+  Memory Clock rate:                             1215 Mhz
+  Memory Bus Width:                              5120-bit
+  L2 Cache Size:                                 41943040 bytes
+  Maximum Texture Dimension Size (x,y,z)         1D=(131072), 2D=(131072, 65536), 3D=(16384, 16384, 16384)
+  Maximum Layered 1D Texture Size, (num) layers  1D=(32768), 2048 layers
+  Maximum Layered 2D Texture Size, (num) layers  2D=(32768, 32768), 2048 layers
+  Total amount of constant memory:               65536 bytes
+  Total amount of shared memory per block:       49152 bytes
+  Total number of registers available per block: 65536
+  Warp size:                                     32
+  Maximum number of threads per multiprocessor:  2048
+  Maximum number of threads per block:           1024
+  Max dimension size of a thread block (x,y,z): (1024, 1024, 64)
+  Max dimension size of a grid size    (x,y,z): (2147483647, 65535, 65535)
+  Maximum memory pitch:                          2147483647 bytes
+  Texture alignment:                             512 bytes
+  Concurrent copy and kernel execution:          Yes with 3 copy engine(s)
+  Run time limit on kernels:                     No
+  Integrated GPU sharing Host Memory:            No
+  Support host page-locked memory mapping:       Yes
+  Alignment requirement for Surfaces:            Yes
+  Device has ECC support:                        Enabled
+  Device supports Unified Addressing (UVA):      Yes
+  Device supports Compute Preemption:            Yes
+  Supports Cooperative Kernel Launch:            Yes
+  Supports MultiDevice Co-op Kernel Launch:      Yes
+  Device PCI Domain ID / Bus ID / location ID:   0 / 202 / 0
+  Compute Mode:
+     < Default (multiple host threads can use ::cudaSetDevice() with device simultaneously) >
+> Peer access from NVIDIA A100-PCIE-40GB (GPU0) -> NVIDIA A100-PCIE-40GB (GPU1) : Yes
+> Peer access from NVIDIA A100-PCIE-40GB (GPU1) -> NVIDIA A100-PCIE-40GB (GPU0) : Yes
+
+deviceQuery, CUDA Driver = CUDART, CUDA Driver Version = 12.2, CUDA Runtime Version = 12.1, NumDevs = 2, Device0 = NVIDIA A100-PCIE-40GB, Device1 = NVIDIA A100-PCIE-40GB
+Result = PASS
+----
+
+From here, you can continue to run any other CUDA workload - you can utilise compilers, and any other aspect of the CUDA ecosystem to run some further tests. When you're done you can exit from the container, noting that whatever you've installed in there is ephemeral (so will be lost!), and hasn't impacted the underlying operating system:
+
+[,bash]
+----
+exit
+----
+
+== Implementation with Kubernetes
+
+(Coming soon!)
+
+== Resolving issues
+
+=== nvidia-smi does not find the GPU
+
+Check the kernel messages using `dmesg`. In case this indicates that it fails to allocate `NvKMSKapDevice`, then apply the unsupported GPU workaround:
+
+[,bash]
+----
+transactional-update run sed -i '/NVreg_OpenRmEnableUnsupportedGpus/s/^#//g' \
+ /etc/modprobe.d/50-nvidia-default.conf
+----
+[IMPORTANT]
+====
+You need to reboot at this stage.
+====
