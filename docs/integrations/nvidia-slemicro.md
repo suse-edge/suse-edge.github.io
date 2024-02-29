@@ -27,7 +27,7 @@ Before we begin, it's important to recognise that in addition to the NVIDIA open
 
 Therefore, what's advised is that you not only ensure that the driver version that you're selecting is compatible with your GPU, and meets any CUDA requirements that you may have by checking the [CUDA release notes](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/), that the driver version that you plan on deploying also has a matching version in the [NVIDIA SLE15-SP5 repository](http://download.nvidia.com/suse/sle15sp5/x86_64/) to ensure that you will have equivalent package versions for the supporting components available. The easiest way to check the available versions of the NVIDIA open-driver is to search on SUSE Customer Centre by looking at all of the packages available in [SLE Micro 5.5 for x86_64](https://scc.suse.com/packages?name=SUSE%20Linux%20Enterprise%20Micro&version=5.5&arch=x86_64) and searching for the "nvidia-open-driver", here you'll see that there are *four* versions available, with *545.29.06* being the newest:
 
-<img>
+![SUSE Customer Centre](./images/scc-packages-nvidia.png)
 
 > NOTE: The same could have been achieved on the target machine by executing `zypper se -s nvidia-open-driver`.
 
@@ -485,7 +485,14 @@ EOF
 
 > NOTE: We use `allowDefaultNamespace: "true"` in the above example only for initial template parsing during the image build process so we can identify the required images that need to be pulled into the Embedded Registry for air-gapping purposes (default behaviour for Edge). When the template is deployed at boot time, the `targetNamespace` will be used instead.
 
-All of the required artefacts, including Kubernetes binary, container images, Helm charts (and any referenced images) will be automatically air-gapped, meaning that the systems at deploy time should require no internet connectivity by default. Now you need only grab the SLE Micro ISO from the [SUSE Downloads Page](https://www.suse.com/download/sle-micro/) (and place it in the `base-images` directory), and you can call the Edge Image Builder tool to generate the ISO for you. For further instructions, please see the documentation for Edge Image Builder.
+All of the required artefacts, including Kubernetes binary, container images, Helm charts (and any referenced images) will be automatically air-gapped, meaning that the systems at deploy time should require no internet connectivity by default. Now you need only grab the SLE Micro ISO from the [SUSE Downloads Page](https://www.suse.com/download/sle-micro/) (and place it in the `base-images` directory), and you can call the Edge Image Builder tool to generate the ISO for you. To complete the example, here's the command that was used to build the image:
+
+```shell
+podman run --rm --privileged -it -v /path/to/eib-files/:/eib eib:dev build \
+  -config-file eib-config-iso.yaml -config-dir /eib -build-dir /eib/_build
+```
+
+For further instructions, please see the [documentation](https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md) for Edge Image Builder.
 
 ## Resolving issues
 
