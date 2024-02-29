@@ -13,11 +13,11 @@ The Edge Image Builder is a tool that allows for generating a fully customized d
 
 It supports a variety of configuration options including (but not limited to):
 
-* Users, passwords, and ssh-keys
+* Users, groups, passwords, ssh-keys
 * Kernel command line arguments
-* Systemd-services to be enabled/disabled at boot-time
+* Systemd units to be enabled/disabled at boot-time
 * Configuration of Network Devices (static IP, hostname, VLAN's, bonding, etc.)
-* Airgapped installation of host-level packages (including dependency resolution)
+* Air-gapped installation of host-level packages (including dependency resolution)
 * Standard system configuration (e.g. proxies, NTP, custom SSL certificates, etc.)
 * Registration to Rancher via Elemental API
 * Registration to SUSE Manager for OS management
@@ -28,7 +28,7 @@ It supports a variety of configuration options including (but not limited to):
 
 == Why use this method
 
-While the Edge Image Builder tool is a part of the process from all three provisioning methods, it really shows it's value in scenarios where the clusters being deployed have limited networking or are fully air-gapped.
+While the Edge Image Builder tool is a part of the process from all three provisioning methods, it really shows its value in scenarios where the clusters being deployed have limited networking or are fully air-gapped.
 
 == How to use the Edge Image Builder
 
@@ -47,11 +47,12 @@ This directory has the following structure (all subdirectories other than `image
 
 [,console]
 ----
-./
 ├── eib-config-iso.yaml
 ├── base-images/
 │   └ SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM.install.iso
+├── certificates/
 ├── network/
+├── kubernetes/
 ├── rpms/
 ├── elemental/
 └── custom/
@@ -59,7 +60,7 @@ This directory has the following structure (all subdirectories other than `image
 
 [NOTE]
 ====
-For this quickstart, we will be ignoring the elemental subdirectory. If you are working with Elemental, please check out it's link:/docs/quickstart/elemental[quickstart guide] for more information!
+For this quickstart, we will be ignoring the elemental subdirectory. If you are working with Elemental, please check out its link:elemental.adoc[quickstart guide] for more information!
 ====
 
 === Building the config file
@@ -117,9 +118,9 @@ operatingSystem:
 
 Let's extend our image a bit with some additional packages.
 
-For an example in this quickstart, let's say you were still testing stuff locally and wanted to install the `yq` command to make working with yaml easier. This package can be found in the PackageHub repo.
+For an example in this quickstart, let's say you were still testing locally and wanted to install the `yq` command to make working with YAML easier. This package can be found in the PackageHub repo.
 
-To have this package installed, we can add a section to the
+To have this package installed, we can add a section to the definition file:
 
 [,yaml]
 ----
@@ -136,62 +137,57 @@ operatingSystem:
     packageList:
     - yq
     additionalRepos:
-    - https://updates.suse.com/SUSE/Backports/SLE-15-SP5_x86_64/standard
-    #registrationCode: INTERNAL-USE-ONLY-foo-bar
+    - url: https://download.opensuse.org/repositories/openSUSE:Factory/standard
 ----
 
-TODO: this isn't working
-
-This will look through the requested packages, collect all the dependencies, pull the required rpms, and include them on the image to be installed without needing to connect to the network.
+This will look through the requested packages, collect all the dependencies, pull the required RPMs and include them in the image to be installed without needing to connect to the network.
 
 [NOTE]
 ====
-More Operating System settings can be found https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md#operating-system[here in the Edge Image Builder documentation]
+More operating system settings can be found https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md#operating-system[here] in the Edge Image Builder documentation.
 ====
 
 ==== Network Configuration
 
-Lastly, for this quickstart example, let's setup a network device!
+Lastly, for this quickstart example, let's set up a network device!
 
 This is done by adding a file in the `network` subdirectory called `host1.local.yaml` with the contents:
 
-TODO: what's the minimum needed, and do we really need to specify the MAC address?
-
 [,yaml]
 ----
-dns-resolver: {}
 routes:
-  running:
-    - destination: 0.0.0.0/0
-      next-hop-interface: eth0
-      next-hop-address: 192.168.1.1
-      table-id: 254
-  config: []
+  config:
+  - destination: 0.0.0.0/0
+    metric: 100
+    next-hop-address: 192.168.122.1
+    next-hop-interface: eth0
+    table-id: 254
+  - destination: 192.168.122.0/24
+    metric: 100
+    next-hop-address:
+    next-hop-interface: eth0
+    table-id: 254
+dns-resolver:
+  config:
+    server:
+    - 192.168.122.1
+    - 8.8.8.8
 interfaces:
-  - name: eth0
-    type: ethernet
-    state: up
-    mac-address: 0E:4D:C6:B8:C4:72
-    ipv4:
-      enabled: true
-      address:
-        - ip: 192.168.1.99
-          prefix-length: 24
-    ethernet:
-      auto-negotiation: false
-  - name: lo
-    type: loopback
-    state: up
-    mac-address: 00:00:00:00:00:00
-    mtu: 65536
-    ipv4:
-      enabled: true
-      address:
-        - ip: 127.0.0.1
-          prefix-length: 8
+- name: eth0
+  type: ethernet
+  state: up
+  mac-address: 34:8A:B1:4B:16:E7
+  ipv4:
+    address:
+    - ip: 192.168.122.50
+      prefix-length: 24
+    dhcp: false
+    enabled: true
+  ipv6:
+    enabled: false
 ----
 
-This will be turned into the needed https://github.com/nmstate/nmstate[nmstate] configuration files when the image is built.
+This will be turned into the necessary https://github.com/nmstate/nmstate[nmstate] configuration files when the image is built.
 
 === Running the image build
 
@@ -199,15 +195,12 @@ To build the image, we can run:
 
 [,bash]
 ----
-docker run --rm -it -v $PWD/eib/:/eib \
- registry.opensuse.org/home/atgracey/eib/container/containerfile/eib:latest \
- /usr/bin/eib -config-file eib-config.yaml -config-dir /eib -build-dir \
- /eib/_build
+docker run --rm --privileged -it -v $PWD/eib/:/eib \
+ registry.opensuse.org/isv/suse/edge/edgeimagebuilder/containerfile/suse/edge-image-builder:1.0.0 \
+ --config-file eib-config.yaml --config-dir /eib --build-dir /eib/_build
 ----
 
-TODO: Change the image to the released version when available
-
-This will create a timestamped folder in `$PWD/eib/_build/` that includes the produced iso image (called `eib-image.iso`)
+This will create a timestamped folder in `$PWD/eib/_build/` that includes the produced iso image (called `eib-image.iso`).
 
 === Using your newly built image
 
