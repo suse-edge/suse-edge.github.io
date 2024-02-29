@@ -429,13 +429,6 @@ In addition to this, we need to add some additional components so they get loade
 mkdir -p kubernetes/config kubernetes/helm kubernetes/manifests
 ```
 
-We'll need to grab the NVIDIA Container Toolkit RPM public key before proceeding:
-
-```shell
-mkdir -p rpms/gpg-keys
-curl -o rpms/gpg-keys/nvidia-container-toolkit.key https://nvidia.github.io/libnvidia-container/gpgkey
-```
-
 Let's now set the (optional) Kubernetes configuration up, and for this it's simple, choosing a CNI (which defaults to Cilium if unselected anyway) and enabling SELinux:
 
 ```shell
@@ -457,7 +450,7 @@ handler: nvidia
 EOF
 ```
 
-Finally, we'll leverage the built-in Helm Controller to deploy the NVIDIA Device Plugin
+We'll leverage the built-in Helm Controller to deploy the NVIDIA Device Plugin through Kubernetes itself; we provide the configuration, and it will be applied at boot:
 
 ```shell
 cat << EOF > kubernetes/helm/nvidia-device-plugin.yaml
@@ -484,6 +477,13 @@ EOF
 ```
 
 > NOTE: We use `allowDefaultNamespace: "true"` in the above example only for initial template parsing during the image build process so we can identify the required images that need to be pulled into the Embedded Registry for air-gapping purposes (default behaviour for Edge). When the template is deployed at boot time, the `targetNamespace` will be used instead.
+
+We'll need to grab the NVIDIA Container Toolkit RPM public key before proceeding:
+
+```shell
+mkdir -p rpms/gpg-keys
+curl -o rpms/gpg-keys/nvidia-container-toolkit.key https://nvidia.github.io/libnvidia-container/gpgkey
+```
 
 All of the required artefacts, including Kubernetes binary, container images, Helm charts (and any referenced images) will be automatically air-gapped, meaning that the systems at deploy time should require no internet connectivity by default. Now you need only grab the SLE Micro ISO from the [SUSE Downloads Page](https://www.suse.com/download/sle-micro/) (and place it in the `base-images` directory), and you can call the Edge Image Builder tool to generate the ISO for you. To complete the example, here's the command that was used to build the image:
 
