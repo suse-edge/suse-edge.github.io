@@ -418,7 +418,7 @@ operatingSystem:
       - nvidia-container-toolkit
     additionalRepos:
       - url: https://download.nvidia.com/suse/sle15sp5/
-      - url: https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo
+      - url: https://nvidia.github.io/libnvidia-container/stable/rpm/x86_64
     sccRegistrationCode: <snip>
 kubernetes:
   version: v1.28.6+k3s1
