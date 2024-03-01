@@ -41,12 +41,13 @@ When you're in your `transactional-update` shell, add an additional package repo
 
 ```shell
 zypper ar https://download.nvidia.com/suse/sle15sp5/ nvidia-sle15sp5-main
+zypper --gpg-auto-import-keys refresh
 ```
 
 You can then install the driver and the `nvidia-compute-utils` for additional utilities, note that if you don't need the utils you can omit it, but for testing purposes it's worth installing at this stage:
 
 ```shell
-zypper install -y nvidia-open-driver-G06-signed-kmp nvidia-compute-utils-G06
+zypper install -y --auto-agree-with-licenses nvidia-open-driver-G06-signed-kmp nvidia-compute-utils-G06
 ```
 
 > NOTE: If this fails to install it's likely that there's a dependency mismatch between the selected driver version and what NVIDIA is shipping in their repositories - please revisit the section above to validate that your versions match. You may want to attempt to install a different driver version, for example, if the NVIDIA repositories have an earlier version, you can try specifying `nvidia-open-driver-G06-signed-kmp=545.29.06` on your install command to specify a version that aligns.
@@ -116,11 +117,13 @@ At this stage, all we've been able to verify is that at the host level the NVIDI
 transactional-update shell
 ```
 
-Next, install the `nvidia-container-toolkit` package from the NVIDIA CUDA repo:
+Next, install the `nvidia-container-toolkit` package from the NVIDIA Container Toolkit repo:
+
+- The `nvidia-container-toolkit.repo` below contains a stable (`nvidia-container-toolkit`) and experimental (`nvidia-container-toolkit-experimental`) repository.  The stable repository is recommended for production use. The experimental repository is disabled by default.
 
 ```shell
-zypper ar https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo nvidia-container-toolkit
-zypper zypper --gpg-auto-import-keys install -y nvidia-container-toolkit
+zypper ar https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo
+zypper --gpg-auto-import-keys install -y nvidia-container-toolkit
 ```
 
 When you're ready, you can exit the `transactional-update` shell:
