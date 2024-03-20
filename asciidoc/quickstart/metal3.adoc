@@ -142,15 +142,44 @@ metal3-metal3-mariadb-7c7d6fdbd8-64c7l                  1/1     Running   0     
 
 === Install Cluster API dependencies
 
-TODO - update this to use the Rancher turtles operator instead
-
-Install https://cluster-api.sigs.k8s.io/user/quick-start.html#install-clusterctl[clusterctl] 1.6.x, then install the core, infrastructure, bootstrap and controplane providers
+First we need to disable the Rancher embedded CAPI controller:
 
 [,bash]
 ----
-clusterctl init --core cluster-api:v1.6.0 --infrastructure metal3:v1.6.0
-clusterctl init --bootstrap rke2 --control-plane rke2
+cat <<-EOF | kubectl apply -f -
+apiVersion: management.cattle.io/v3
+kind: Feature
+metadata:
+  name: embedded-cluster-api
+spec:
+  value: false
+EOF
+
+kubectl delete mutatingwebhookconfiguration.admissionregistration.k8s.io mutating-webhook-configuration
+kubectl delete validatingwebhookconfigurations.admissionregistration.k8s.io validating-webhook-configuration
+kubectl wait --for=delete namespace/cattle-provisioning-capi-system --timeout=300s
 ----
+
+Then to use the SUSE images a configuration file is needed:
+
+[,bash]
+----
+mkdir ~/.cluster-api
+cat >  ~/.cluster-api/clusterctl.yaml <<EOF
+images:
+  all:
+    repository: registry.opensuse.org/isv/suse/edge/clusterapi/containerfile/suse
+EOF
+----
+
+Install https://cluster-api.sigs.k8s.io/user/quick-start.html#install-clusterctl[clusterctl] 1.6.x, then we will install the core, infrastructure, bootstrap and controplane providers as follows:
+
+[,bash]
+----
+clusterctl init --core "cluster-api:v1.6.0" --infrastructure "metal3:v1.6.0" --bootstrap "rke2:v0.2.6" --control-plane "rke2:v0.2.6"
+----
+
+After some time the controller pods should be running in the `capi-system`, `capm3-system`, `rke2-bootstrap-system` and `rke2-control-plane-system` namespaces.
 
 === Add BareMetalHost Inventory
 
