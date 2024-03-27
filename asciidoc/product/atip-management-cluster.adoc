@@ -10,328 +10,409 @@ ifdef::env-github[]
 :warning-caption: :warning:
 endif::[]
 
-This section explains how to install and configure the management cluster.
-Rancher is a complete software stack for teams adopting containers. It addresses the operational and security challenges of managing multiple Kubernetes clusters across any infrastructure, while providing DevOps teams with integrated tools for running containerized workloads.
-In our particular case, the Rancher management cluster will be the tool that will be used to manage the edge cluster lifecycle.
-The server used for the management cluster can be installed on VMs or bare metal. The management cluster can be installed on a single node, but it is recommended to have at least 3 nodes/VMs for HA.
+=== Introduction
+The Management Cluster is the part of ATIP that is used to manage the provision and lifecycle of the runtime stacks.
+From a technical point of view, the management cluster contains the following components:
+
+* `SUSE Linux Enterprise Micro` as the OS. Depending on the use case, some configurations like networking, storage, users and kernel arguments can be customized.
+* `RKE2` as the Kubernetes cluster. Depending on the use case, it can be configured to use specific CNI plugins, such as `Multus`, `Cilium` etc.
+* `Rancher` as the management platform to manage the lifecycle of the clusters.
+* `Metal^3^` as the component to manage the lifecycle of the bare metal nodes.
+* `CAPI` as the component to manage the lifecycle of the Kubernetes clusters (downstream clusters). In the case of ATIP, also the `RKE2 CAPI Provider` is used to manage the lifecycle of the RKE2 clusters (downstream clusters).
+
+With all components mentioned above, the management cluster is able to manage the lifecycle of the runtime stacks, using a declarative approach and the `Zero Touch Provisioning` to manage the infrastructure and the applications.
 
 [NOTE]
 ====
-For more information about Rancher, please check: https://rancher.com/why-rancher
+For more information about `SUSE Linux Enterprise Micro`, please check: xref:../components/sle-micro.adoc[Components - SUSE Linux Enterprise Micro]
+
+For more information about `RKE2`, please check: xref:../components/rke2.adoc[Components - RKE2]
+
+For more information about `Rancher`, please check: xref:../components/rancher.adoc[Components - Rancher]
+
+For more information about `Metal3`, please check: xref:../components/metal3.adoc[Components - Metal3]
 ====
 
-=== Requirements
+=== Steps to setup the Management Cluster
 
-* A minimum of 1GB of RAM per node available to be used by the Rancher management cluster
-* Accurate time synchronization (`ntp` or `chronyd`) between all nodes in the cluster.
-* A minimum of 2 vCPUs per node available to be used by the Rancher management cluster
-* A minimum of 12GB of disk space (recomended 20GB of disk) per node available to be used by the Rancher management cluster
+The following steps are necessary to set up the management cluster (using a single-node):
+
+image::../images/product-atip-mgmtcluster1.png[]
+
+There are two main steps to set up the management cluster using a declarative approach:
+
+* **Image Creation**: The first step is to create the image to be used for the management cluster with all the necessary configurations. This image will be generated using `Edge Image Builder` and this step can be done using a laptop, server, VM or any other x86_64 system with a container runtime installed.
+* **Management Cluster Provision**: This step covers the installation of the management cluster using the image created in the previous step, and it will install all components mentioned in the introduction.
 
 [NOTE]
 ====
-For more information about time synchronization, please check: https://documentation.suse.com/sles/15-SP4/html/SLES-all/cha-ntp.html
+For more information about `Edge Image Builder`, please check: xref:../components/eib.adoc[Components - Edge Image Builder] or the xref:../quickstart/eib.adoc[Quickstart - Edge Image Builder guide]
 ====
 
-=== OS Install
+=== Image Preparation
 
-This section covers the installation of the OS on the management cluster nodes. The OS used for the management cluster installation is `SLE Micro 5.4` that can be downloaded from https://www.suse.com/download/sle-micro/[here].
-Using SUSE Linux Enterprise Micro, you can build and scale differentiating edge systems across a wide range of industries including aerospace, telecom, automotive, defense, healthcare, hospitality, and manufacturing.
-SUSE Linux Enterprise Micro 5.4 is available on the AMD64 and Intel 64 (x86_64), Arm 64 and IBM z System or LinuxONE (s390x) hardware architectures.
+Using `Edge Image Builder` to create the image for the management cluster, a lot of configurations can be customized, but in this document, we will cover the minimal configurations necessary to set up the management cluster.
+Edge Image Builder is typically run from inside a container so, if you don't already have a way to run containers, we need to start by installing a container runtime such as https://podman.io[Podman] or https://rancherdesktop.io[Rancher Desktop]. For this guide, we will assume you already have a container runtime available.
 
-SUSE Linux Enterprise Micro provides `self-install ISO images` that enable you to deploy SLE Micro to your machine easily (either a virtual machine or a bare metal) and configure the system on the first boot.
-For this installation we will use the self-install ISO: `SLE-Micro.x86_64-5.4.0-Default-SelfInstall-GM.install.iso`
+==== Directory Structure
+
+When running the `EIB`, a directory will be mounted from the host, so the first thing to do is to create a directory structure to be used by the `EIB` to store the configuration files and the image itself.
+This directory has the following structure:
+
+[,console]
+----
+├── mgmt-cluster.yaml
+├── base-images/
+│   └ SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso
+├── network/
+|   └ mgmt-cluster-network.yaml
+├── kubernetes/
+|   └ config/
+|   | └ server.yaml
+└── custom/
+    └ files/
+    | └ clusterctl.yaml
+    | └ helm-values-metal3.yaml
+    └ scripts/
+    | └ install-dependencies.sh
+----
 
 [NOTE]
 ====
-For more information, please refer Release Notes: https://www.suse.com/releasenotes/x86_64/SLE-Micro/5.4/
-
-For more information about the installation, please refer to the documentation: https://documentation.suse.com/sle-micro/5.5/
+The image `SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso` has to be downloaded from the https://scc.suse.com/[SUSE Customer Center] or the https://www.suse.com/download/sle-micro/[SUSE Download page], and it has to be located under the `base-images` folder.
 ====
 
-[#preparing-the-configuration-device]
-==== Preparing the configuration device (Optional)
+==== Management Cluster definition
 
-The following procedure describes how to prepare the configuration device in case you want to configure the system using `combustion` and `ignition` files, instead of using the JEOS Firstboot wizard:
+The `mgmt-cluster.yaml` file is the main configuration file for the management cluster. It contains the following information:
 
-. Format the disk to any file system supported by SLE Micro: Ext3, Ext4, etc.:
-+
-[,bash]
-----
-sudo mkfs.ext4 /dev/sdY
-----
-+
-. Set the device label to either ignition (when either Ignition or Combustion is used) or combustion (when only Combustion is used). For the Ext4 file system:
-+
-[,bash]
-----
-sudo e2label /dev/sdY ignition
-----
-+
-You can use any type of configuration storage media that your virtualization system or your hardware supports: ISO image, a USB flash disk, etc.
-+
-. Mount the device:
-+
-[,bash]
-----
-sudo mount /dev/sdY /mnt
-----
-+
-. Create the directory structure as mentioned in https://documentation.suse.com/sle-micro/5.4/html/SLE-Micro-all/cha-images-ignition.html#[this link]:
-+
-[,bash]
-----
-sudo mkdir -p /mnt/ignition/`
-----
-+
-or:
-+
-[,bash]
-----
-sudo mkdir -p /mnt/combustion/
-----
-+
-. Prior to booting for the first time, prepare all elements of the configuration that will be used by Ignition or Combustion. To log in to your system, you need to provide a password for root or set up passwordless authentication, otherwise the system will not be accessible after the first boot.
-
-[NOTE]
-====
-For more information about the configuration files using combustion and ignition, please refer to the documentation: https://documentation.suse.com/sle-micro/5.4/html/SLE-Micro-all/cha-images-ignition.html#
-====
-
-=== Installation
-
-. Boot the system from the ISO image and select Install SLE Micro
-+
-image::os1.png[mgmt_install_1.png]
-+
-. Select the Installation Disk and click OK
-+
-image::os2.png[mgmt_install_2.png]
-+
-. Installation will start copying the files to disk
-+
-image::os3.png[mgmt_install_3.png]
-+
-. Once the installation is finished, the system will reboot
-. After reboot, the system will start the JEOS Firstboot wizard
-+
-[NOTE]
-====
-If you want to configure the system using `combustion` and `ignition` files, instead of using the JEOS Firstboot wizard, please refer to the section <<preparing-the-configuration-device,Preparing the configuration device (Optional)>> above, and ensure your media is connected during the first boot.
-====
-+
-image::os4.png[mgmt_install_4.png]
-+
-image::os5.png[mgmt_install_5.png]
-+
-image::os6.png[mgmt_install_6.png]
-+
-image::os7.png[mgmt_install_7.png]
-+
-image::os8.png[mgmt_install_8.png]
-+
-image::os9.png[mgmt_install_9.png]
-
-[TIP]
-====
-During the deployment of the selfinstall ISO, the image of the system is just copied to the selected disk, therefore, an EFI boot entry is not created (like it normally would if the system is deployed using an installer). You might need to manually boot your system using the EFI shell by selecting the SLE Micro boot loader. After the first boot, you can use `efibootmgr` to create the boot entry. `efibootmgr` is available by default in the deployed image.
-====
-
-==== Post Installation
-
-Registering the system is possible from the command line using the `transactional-update register` command. For information that goes beyond the scope of this section, refer to the inline documentation with `SUSEConnect --help
-
-. To register SUSE Linux Enterprise Micro with SUSE Customer Center, run transactional-update register as follows:
-+
-[,bash]
-----
-transactional-update register -r REGISTRATION_CODE -e EMAIL_ADDRESS
-----
-+
-To register with a local registration server, additionally provide the URL to the server:
-+
-[,bash]
-----
-transactional-update register -r REGISTRATION_CODE -e EMAIL_ADDRESS \
---url "https://suse_register.example.com/"
-----
-+
-Replace `REGISTRATION_CODE` with the registration code you received with your copy of SUSE Linux Enterprise Micro. Replace `EMAIL_ADDRESS` with the e-mail address associated with the SUSE account you or your organization uses to manage subscriptions.
-+
-. Reboot your system to switch to the latest snapshot.
-. SUSE Linux Enterprise Micro is now registered.
-
-=== RKE2 Cluster Install
-
-This section covers the installation of the RKE2 cluster on the management cluster nodes:
-
-[NOTE]
-====
-For more information, please refer to the documentation: https://docs.rke2.io/install/quickstart/
-====
-
-==== Server node installation command:
-
-. Run the installer:
-+
-[,bash]
-----
-curl -sfL https://get.rke2.io | sh -
-----
-+
-if you want to install a especific version, you can use the following command (i.e. `v1.25.9+rke2r1`):
-+
-[,bash]
-----
-curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION="v1.25.9+rke2r1" sh -
-----
-+
-[NOTE]
-====
-For more information about the installation, please refer to the documentation: https://docs.rke2.io/install/install_options/
-====
-+
-. Enable the rke2-server service:
-+
-[,bash]
-----
-systemctl enable rke2-server.service
-----
-+
-. Start the service:
-+
-[,bash]
-----
-systemctl start rke2-server.service
-----
-
-=== Agent node installation command:
-
-. Run the installer:
-+
-[,bash]
-----
-curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE="agent" sh -
-----
-+
-. Enable the rke2-agent service:
-+
-[,bash]
-----
-systemctl enable rke2-agent.service
-----
-+
-. Configure the config.yaml file located in `/etc/rancher/rke2/` with the following content:
-+
 [,yaml]
 ----
-server: https://<server>:9345
-token: <token from server node>
-----
-+
-. Start the service:
-+
-[,bash]
-----
-systemctl start rke2-agent.service
+apiVersion: 1.0
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso
+  outputImageName: eib-mgmt-cluster-image.iso
+operatingSystem:
+  isoConfiguration:
+    installDevice: /dev/sda
+    unattended: true
+  users:
+  - username: root
+    encryptedPassword: ${ROOT_PASSWORD}
+  packages:
+    packageList:
+    - git
+    sccRegistrationCode: ${SCC_REGISTRATION_CODE}
+kubernetes:
+  version: ${KUBERNETES_VERSION}
 ----
 
-=== Rancher Manager Install
+To explain the fields and values in the `mgmt-cluster.yaml` file, we have divided it into the following sections.
 
-Rancher is installed using the Helm package manager for Kubernetes.
-Helm charts provide templating syntax for Kubernetes YAML manifest documents. With Helm, we can create configurable deployments instead of just using static files.
+==== Image section:
 
+[,yaml]
+----
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso
+  outputImageName: eib-mgmt-cluster-image.iso
+----
+
+where the `baseImage` is the original image to be used which has been downloaded from the SUSE Customer Center or the SUSE Download page, and the `outputImageName` is the name of the image to be created which will be used to provision the management cluster.
+
+==== Operating System section:
+
+[,yaml]
+----
+operatingSystem:
+  isoConfiguration:
+    installDevice: /dev/sda
+    unattended: true
+  users:
+  - username: root
+    encryptedPassword: ${ROOT_PASSWORD}
+  packages:
+    packageList:
+    - git
+  sccRegistrationCode: ${SCC_REGISTRATION_CODE}
+----
+
+where the `installDevice` is the device to be used to install the operating system, the `unattended` is a flag to indicate if the installation will be unattended, the `username` and `encryptedPassword` are the credentials to be used to access the system, the `packageList` is the list of packages to be installed and the `sccRegistrationCode` is the registration code to be used to register the system that can be obtained from the SUSE Customer Center.
+
+The encrypted password can be generated using the `openssl` command as follows:
+
+[,shell]
+----
+openssl passwd -6 MyPassword!123
+----
+
+This will output something similar to:
+
+[,console]
+----
+$6$UrXB1sAGs46DOiSq$HSwi9GFJLCorm0J53nF2Sq8YEoyINhHcObHzX2R8h13mswUIsMwzx4eUzn/rRx0QPV4JIb0eWCoNrxGiKH4R31
+----
+
+==== Kubernetes section:
+
+[,yaml]
+----
+kubernetes:
+  version: ${KUBERNETES_VERSION}
+----
+
+where `version` is the version of Kubernetes to be installed. In our case, we are using a RKE2 cluster, so the version has to be minor than 1.28 to be compatible with `Rancher` (e.g `v1.27.10+rke2r1`).
+[#mgmt-cluster-helm-values]
+==== Custom files section:
+
+The `custom/files` folder contains the following files:
+
+* `helm-values-metal3.yaml`: contains the configuration params about the `Metal^3^` Helm chart to be used.
+* `clusterctl.yaml`: contains the configuration params about the `CAPI` Helm chart to be used.
+
+The following variables have to be replaced:
+
+`${MGMT_CLUSTER_IP}`: The IP address of the management cluster.
+
+[#metal3-media-server]
 [NOTE]
 ====
-This section covers the installation of Rancher on the management cluster nodes.
-
-For more information about the installation, please refer to the documentation: https://ranchermanager.docs.rancher.com/v2.7/pages-for-subheaders/install-upgrade-on-a-kubernetes-cluster
+The Media Server is an optional feature included in metal3. In case you want to use your own media server (file server), you can disable the `enable_metal3_media_server` on the following manifest.
+In case you want to use the metal3 media server you also specify the following variable:
+`${MEDIA_VOLUME_PATH}`: The path to the media volume to be used by the `Metal^3^` component (e.g. `/home/metal3/bmh-image-cache`)
 ====
 
-==== Add the Helm repository
-
-There are three releases available to be added as a Helm repository for Rancher. In our case, we will use the `rancher-stable` because it's the release recommended for production environments, but you could use `rancher-latest` or `rancher-alpha` if you want. Also, there is a `rancher primer` release that is the enterprise version of Rancher.
-
-[,bash]
+[,yaml]
 ----
-helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
+global:
+  ironicIP: ${MGMT_CLUSTER_IP}
+  enable_vmedia_tls: false
+  enable_metal3_media_server: true
+
+metal3-media:
+  service:
+    type: NodePort
+    port: 6280
+
+metal3-ironic:
+  global:
+    predictableNicNames: "true"
+  service:
+    type: NodePort
+
+metal3-media:
+  mediaVolume:
+    hostPath: ${MEDIA_VOLUME_PATH}
 ----
 
-[TIP]
-====
-If you don't have `helm` installed previously, you could install it using the following command:
+The `clusterctl.yaml` file:
 
-[,bash]
+[,yaml]
 ----
-curl -fsSL \
-https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 |bash
+images:
+  all:
+    repository: registry.opensuse.org/isv/suse/edge/clusterapi/containerfile/suse
 ----
-====
 
-==== Choose your SSL Configuration
+==== Custom Scripts section:
 
-The Rancher management server is designed to be secure by default and requires SSL/TLS configuration.
+The `custom/scripts` folder contains the following files:
 
-There are three recommended options for SSL/TLS configuration:
+* `install-dependencies.sh` script contains the commands to install the necessary dependencies to be installed in the management cluster, like `Rancher`, `Metal^3^`, `Cert-Manager`, etc...:
 
-* Rancher-generated TLS certificate
-* Let's Encrypt
-* Bring your own certificate
+The following steps are executed by the `install-dependencies.sh` script:
 
-[NOTE]
-====
-For more information about the SSL/TLS configuration, please refer to the
-documentation:
-https://ranchermanager.docs.rancher.com/v2.7/pages-for-subheaders/install-upgrade-on-a-kubernetes-cluster/#3-choose-your-ssl-configuration
-====
+- Create the folder to server enable the media server for the `Metal^3^` component.
+- Copy the `helm-values-metal3.yaml` file to the `Metal^3^` folder.
+- Create the installer script to install the necessary tools, like clusterctl, helm for the management cluster.
+- Wait for the cluster to be available.
+- Install the `Cert-Manager` component.
+- Install the `Local-Path-Provisioner` component (for a single-node cluster).
+- Install the `Rancher Prime` component.
+- Install the `Metal^3^` component.
+- Install the `CAPI` component.
+- Create the systemd service to run the installer script during the first boot.
 
-In our case we will use the Rancher-generated TLS certificate:
+The `install-dependencies.sh` script is as follows:
 
-[,bash]
+[,shell]
 ----
+#!/bin/bash
+
+mount /usr/local || true
+mount /home || true
+
+## create folder to server httpd media server
+mkdir -p /home/metal3/bmh-image-cache
+
+## copy the metal3 yaml file to metal3 folder
+cp ./helm-values-metal3.yaml ./clusterctl.yaml ./disable-embedded-capi.yaml /home/metal3/
+
+## KUBECTL command var
+export KUBECTL=/var/lib/rancher/rke2/bin/kubectl
+
+# Create the installer script
+cat <<- EOF > /usr/local/bin/mgmt-cluster-installer.sh
+#!/bin/bash
+set -euo pipefail
+
+## install clusterctl and helm
+curl -Lk https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.6.0/clusterctl-linux-amd64 -o /usr/local/bin/clusterctl
+chmod +x /usr/local/bin/clusterctl
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+## Wait for RKE2 cluster to be available
+until [ -f /etc/rancher/rke2/rke2.yaml ]; do sleep 2; done
+# export the kubeconfig using the right kubeconfig path depending on the cluster (k3s or rke2)
+export KUBECONFIG=/etc/rancher/rke2/rke2.yaml
+# Wait for the node to be available, meaning the K8s API is available
+while ! ${KUBECTL} wait --for condition=ready node $(cat /etc/hostname | tr '[:upper:]' '[:lower:]') ; do sleep 2 ; done
+
+## Add Helm repos
+helm repo add rancher-prime https://charts.rancher.com/server-charts/prime
 helm repo add jetstack https://charts.jetstack.io
 helm repo update
+
+while ! ${KUBECTL} rollout status daemonset -n kube-system rke2-ingress-nginx-controller ; do sleep 2 ; done
+
+## install cert-manager
 helm install cert-manager jetstack/cert-manager \
- --namespace cert-manager \
- --create-namespace \
- --set installCRDs=true \
- --version v1.11.1
+	--namespace cert-manager \
+        --create-namespace \
+        --set installCRDs=true \
+	--version v1.11.1
+
+## Local path provisioner
+${KUBECTL} apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.26/deploy/local-path-storage.yaml
+until [ \$(${KUBECTL} get sc -o name | wc -l) -ge 1 ]; do sleep 10; done
+${KUBECTL} patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+
+## Example in case you want to configure the httpd cache server for images
+## podman run -dit --name bmh-image-cache -p 8080:80 -v /home/metal3/bmh-image-cache:/usr/local/apache2/htdocs/ docker.io/library/httpd:2.4
+
+## install rancher
+helm install rancher rancher-prime/rancher \
+	--namespace cattle-system \
+	--create-namespace \
+	--set hostname=rancher-$(hostname -I | awk '{print $1}').sslip.io \
+	--set bootstrapPassword=admin \
+	--set replicas=1 \
+        --set global.cattle.psp.enabled=false
+while ! ${KUBECTL} wait --for condition=ready -n cattle-system \$(${KUBECTL} get pods -n cattle-system -l app=rancher -o name) --timeout=10s; do sleep 2 ; done
+
+## install metal3 with helm
+helm repo add suse-edge https://suse-edge.github.io/charts
+helm install   metal3 suse-edge/metal3   --namespace metal3-system   --create-namespace -f /home/metal3/helm-values-metal3.yaml
+
+
+## install capi
+if [ \$(${KUBECTL} get pods -n cattle-system -l app=rancher -o name | wc -l) -ge 1 ]; then
+	${KUBECTL} apply -f /home/metal3/disable-embedded-capi.yaml
+	${KUBECTL} delete mutatingwebhookconfiguration.admissionregistration.k8s.io mutating-webhook-configuration
+	${KUBECTL} delete validatingwebhookconfigurations.admissionregistration.k8s.io validating-webhook-configuration
+	${KUBECTL} wait --for=delete namespace/cattle-provisioning-capi-system --timeout=300s
+fi
+clusterctl init --core "cluster-api:v1.6.0" --infrastructure "metal3:v1.6.0" --bootstrap "rke2:v0.2.6" --control-plane "rke2:v0.2.6" --config /home/metal3/clusterctl.yaml
+
+rm -f /etc/systemd/system/mgmt-cluster-installer.service
+EOF
+
+chmod a+x /usr/local/bin/mgmt-cluster-installer.sh
+
+cat <<- EOF > /etc/systemd/system/mgmt-cluster-installer.service
+[Unit]
+Description=Deploy mgmt cluster tools on K3S/RKE2
+Wants=network-online.target
+After=network.target network-online.target rke2-server.target
+ConditionPathExists=/usr/local/bin/mgmt-cluster-installer.sh
+
+[Service]
+User=root
+Type=forking
+TimeoutStartSec=900
+ExecStart=/usr/local/bin/mgmt-cluster-installer.sh
+RemainAfterExit=yes
+KillMode=process
+# Disable & delete everything
+ExecStartPost=rm -f /usr/local/bin/mgmt-cluster-installer.sh
+ExecStartPost=/bin/sh -c "systemctl disable mgmt-cluster-installer.service"
+ExecStartPost=rm -f /etc/systemd/system/mgmt-cluster-installer.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable mgmt-cluster-installer.service
+
+umount /usr/local || true
+umount /home || true
 ----
 
-Once you've installed cert-manager, you can verify the pods are running:
+==== Kubernetes definition (optional)
 
-[,bash]
+By default, the `CNI` plugin installed by default is `Cilium`, so you don't need to create this file. Just in case you need to customize the `CNI` plugin, you can use the `server.yaml` file under the `kubernetes/config` folder. It contains the following information:
+
+[,yaml]
 ----
-kubectl get pods --namespace cert-manager
-----
-
-==== Install Rancher with Helm and your chosen certificate option
-
-You can install Rancher with helm using the following command modifying the `<hostname>` and `<bootstrapPassword>` values:
-
-[,bash]
-----
-helm install rancher rancher-stable/rancher \
- --namespace cattle-system \
- --create-namespace \
- --set hostname=<hostname> \
- --set bootstrapPassword=<bootstrapPassword> \
- --set replicas=1 \
- --set global.cattle.psp.enabled=false
+cni:
+- multus
+- cilium
 ----
 
-==== Verify the Rancher installation
+This is an optional file to define some Kubernetes customization like the CNI plugins to be used or many options you can check in the https://docs.rke2.io/install/configuration[official documentation].
 
-You should wait a few minutes for Rancher to be rolled out:
+==== Networking definition (optional)
 
-[,bash]
+In case you need to customize the networking configuration, for example, in case you need to use a specific IP address (DHCP-less scenario), you can use the `mgmt-cluster-network.yaml` file under the `network` folder. It contains the following information:
+
+* `${MGMT_GATEWAY}`: The gateway IP address.
+* `${MGMT_DNS}`: The DNS server IP address.
+* `${MGMT_MAC}`: The MAC address of the network interface.
+* `${MGMT_CLUSTER_IP}`: The IP address of the management cluster.
+
+[,yaml]
 ----
-kubectl -n cattle-system rollout status deploy/rancher
+routes:
+  config:
+  - destination: 0.0.0.0/0
+    metric: 100
+    next-hop-address: ${MGMT_GATEWAY}
+    next-hop-interface: eth0
+    table-id: 254
+dns-resolver:
+  config:
+    server:
+    - ${MGMT_DNS}
+    - 8.8.8.8
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mac-address: ${MGMT_MAC}
+  ipv4:
+    address:
+    - ip: ${MGMT_CLUSTER_IP}
+      prefix-length: 24
+    dhcp: false
+    enabled: true
+  ipv6:
+    enabled: false
 ----
 
-=== Initial Configuration
+=== Image Creation
 
-TBC - Initial configuration necessary to begin creating edge cluster
+Once the directory structure is prepared following the previous sections, run the following command to build the image:
 
-=== Bare Metal Management Configuration
+[,shell]
+----
+podman run --rm --privileged -it -v $PWD/eib/:/eib \
+ registry.opensuse.org/isv/suse/edge/edgeimagebuilder/containerfile/suse/edge-image-builder:1.0.0 \
+ --config-file mgmt-cluster.yaml --config-dir /eib --build-dir /eib/_build
+----
 
-TBC - Integration and setup of Metal3/CAPI components
+This will create the iso output image file that in our case based on the image definition described above will be `eib-mgmt-cluster-image.iso`.
+This image contains all components inside, and it can be used to provision the management cluster using a virtual machine, a bare metal server (using the virtual-media feature)
