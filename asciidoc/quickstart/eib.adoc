@@ -1,4 +1,4 @@
-= Edge Image Builder Quick-Start Guide
+= Standalone Clusters with Edge Image Builder
 :experimental:
 
 ifdef::env-github[]
@@ -27,7 +27,9 @@ If you are running Rancher Desktop, you need to switch to the https://docs.ranch
 
 === Getting the EIB Image
 
-`podman pull EIB-IMAGE-HERE`
+```
+podman pull registry.opensuse.org/isv/suse/edge/edgeimagebuilder/containerfile/suse/edge-image-builder:1.0.0.rc2
+```
 
 === Creating the image configuration directory
 
@@ -37,68 +39,66 @@ This directory must follow a specific structure, the following instructions outl
 
 For simplicity, setting the variable `$EIB` to the full path of where you want the configuration directory is recommended, e.g. `EIB=/home/user/eib/config`.
 
-`mkdir -p $EIB/base-images`
+```
+mkdir -p $EIB/base-images
+```
 
-`mkdir $EIB/network`
-
-`cp SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso $EIB/base-images/slemicro.iso`
+```
+cp SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso $EIB/base-images/slemicro.iso
+```
 
 The generated directory should look like:
 
 [,console]
 ----
-├── base-images/
-│   └ slemicro.iso
-├── network/
-└──
+└── base-images/
+    └ slemicro.iso
 ----
 
 === Building the image definition file
 
 The definition file declaratively defines the desired configuration of the RTD image.
 
-The base contents of the file are:
+The following is the base content of the definition file that we will name `eib-iso-definition.yaml`:
 
-[,yaml]
+[,console]
 ----
+cat << EOF > $EIB/eib-iso-definition.yaml
 apiVersion: 1.0
 image:
   imageType: iso
   arch: x86_64
   baseImage: slemicro.iso
   outputImageName: eib-image.iso
+EOF
 ----
 
 This definition outlines that we are generating an image for an `x86_64` system and that the base image to be modified is an `ISO` image named `slemicro.iso` that is expected to be found at `$EIB/base-images/slemicro.iso`. It also outlines that after EIB is done modifying the image, the RTD image will be named `eib-image.iso`.
-
-We will save this file as `eib-iso-definition.yaml`
 
 Now our directory structure should look like:
 [,console]
 ----
 ├── eib-iso-definition.yaml
 ├── base-images/
-│   └ slemicro.iso
-├── network/
-└──
+└── └ slemicro.iso
 ----
 
 ==== Configuring OS Users
 
-EIB allows us to pre-configure users with login information such as passwords or SSH keys. (Doing this for root is not typically recommended but we will use root for this guide).
+EIB allows us to pre-configure users with login information such as passwords or SSH keys. (Doing this for root is not recommended but we will use root for this guide).
 
 First, create an encrypted password:
 
 [,console]
 ----
-openssl passwd -6 MyPassword!123
+openssl passwd -6 SecurePassword
 ----
 
 This will output something similar to:
 
 [,console]
 ----
-$6$UrXB1sAGs46DOiSq$HSwi9GFJLCorm0J53nF2Sq8YEoyINhHcObHzX2R8h13mswUIsMwzx4eUzn/rRx0QPV4JIb0eWCoNrxGiKH4R31
+$6$NEi4Y1pauz2Ya9gy$QUBRl/YkPgUyiJ41Iw9Zho7ngoWxbhTQL2U/ahB3b7iXmAOBc1xqw4RabfYs/2SfCo6EWi4Sg8avnczEkDjRk0
 ----
 
 We can then add a section in the definition file called `operatingSystem` with a `users` array inside it. The resulting file should look like:
@@ -114,10 +114,10 @@ image:
 operatingSystem:
   users:
     - username: root
-      encryptedPassword: $6$UrXB1sAGs46DOiSq$HSwi9GFJLCorm0J53nF2Sq8YEoyINhHcObHzX2R8h13mswUIsMwzx4eUzn/rRx0QPV4JIb0eWCoNrxGiKH4R31
+      encryptedPassword: $6$NEi4Y1pauz2Ya9gy$QUBRl/YkPgUyiJ41Iw9Zho7ngoWxbhTQL2U/ahB3b7iXmAOBc1xqw4RabfYs/2SfCo6EWi4Sg8avnczEkDjRk0
 ----
 
-==== Packages
+==== Configuring packages
 
 EIB also allows us to pre-configure our RTD image with packages.
 
@@ -145,7 +145,7 @@ image:
 operatingSystem:
   users:
     - username: root
-      encryptedPassword: $6$UrXB1sAGs46DOiSq$HSwi9GFJLCorm0J53nF2Sq8YEoyINhHcObHzX2R8h13mswUIsMwzx4eUzn/rRx0QPV4JIb0eWCoNrxGiKH4R31
+      encryptedPassword: $6$NEi4Y1pauz2Ya9gy$QUBRl/YkPgUyiJ41Iw9Zho7ngoWxbhTQL2U/ahB3b7iXmAOBc1xqw4RabfYs/2SfCo6EWi4Sg8avnczEkDjRk0
   packages:
     packageList:
       - yq
@@ -160,11 +160,11 @@ Given this, the EIB package resolver will automatically search for and download 
 More operating system settings can be found https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md#operating-system[here] in the Edge Image Builder documentation.
 ====
 
-==== Kubernetes and Kubernetes workload Configuration
+==== Configuring Kubernetes cluster and user workloads
 
 Another feature of EIB is the simplified air-gapped deployment of a Kubernetes cluster with Helm charts and manifests.
 
-The following addition to the definition file:
+The following addition to the definition file specifies that a single-node RKE2 Kubernetes cluster using version `v1.28.7+rke2r1` should be deployed. It also specifies that version `0.2.2` of `kubevirt` found in the `https://suse-edge.github.io/charts` repository, and the manifest found at `https://k8s.io/examples/application/nginx-app.yaml` should be automatically deployed on the generated RTD image as well.
 
 [,yaml]
 ----
@@ -183,8 +183,6 @@ kubernetes:
         url: https://suse-edge.github.io/charts
 ----
 
-defines that RKE2 Kubernetes version `v1.28.7+rke2r1`, the `kubevirt` Helm chart version `0.2.2` found in the `https://suse-edge.github.io/charts` repository, and the manifest found at `https://k8s.io/examples/application/nginx-app.yaml` should be automatically deployed on the generated RTD image.
-
 The resulting full definition file should now look like:
 [,yaml]
 ----
@@ -197,7 +195,7 @@ image:
 operatingSystem:
   users:
     - username: root
-      encryptedPassword: $6$UrXB1sAGs46DOiSq$HSwi9GFJLCorm0J53nF2Sq8YEoyINhHcObHzX2R8h13mswUIsMwzx4eUzn/rRx0QPV4JIb0eWCoNrxGiKH4R31
+      encryptedPassword: $6$NEi4Y1pauz2Ya9gy$QUBRl/YkPgUyiJ41Iw9Zho7ngoWxbhTQL2U/ahB3b7iXmAOBc1xqw4RabfYs/2SfCo6EWi4Sg8avnczEkDjRk0
   packages:
     packageList:
       - yq
@@ -224,14 +222,25 @@ Further examples of options such as multi-node deployments, networking, and Helm
 ====
 
 
-==== Network Configuration
+==== Configuring Network
+[NOTE]
+====
+This example is designed for the `default` libvirt network. Other environments may need their own network configuration in order to work.
+====
 
 Lastly, for this quick-start example, let's set up a network device.
 
-Within the `network` directory at `$EIB/network`, create a file named `host1.local.yaml` containing the following:
+First, create the `network` directory at `$EIB/network`.
 
-[,yaml]
+```
+mkdir $EIB/network
+```
+
+Within the `network` directory, create a file named `host1.local.yaml` containing the following:
+
+[,console]
 ----
+cat << EOF > $EIB/network/host1.local.yaml
 routes:
   config:
   - destination: 0.0.0.0/0
@@ -262,7 +271,19 @@ interfaces:
     enabled: true
   ipv6:
     enabled: false
+EOF
 ----
+
+[NOTE]
+====
+EIB networking is MAC Address dependent. In the case of virtual machines, you may be able to set the MAC Address at boot. For physical machines you need to know the MAC Address ahead of time.
+====
+
+
+// [WARNING]
+// ====
+// Be sure to specify the correct 
+// ====
 
 The resulting file structure should look like:
 [,console]
@@ -270,12 +291,11 @@ The resulting file structure should look like:
 ├── eib-iso-definition.yaml
 ├── base-images/
 │   └ slemicro.iso
-├── network/
-│   └ host1.local.yaml
-└──
+└── network/  
+    └ host1.local.yaml
 ----
 
-This will be turned into the necessary https://github.com/nmstate/nmstate[nmstate] configuration files when the image is built, which configures the RTD image's networking according to that file.
+This will be turned into the necessary https://github.com/nmstate/nmstate[nmstate] configuration files when the image is built. These files will be automatically applied during the provisioning of the RTD image resulting in a complete network configuration.
 
 === Building the image
 
@@ -284,7 +304,7 @@ To build the image, we can run:
 [,bash]
 ----
 podman run --rm -it --privileged -v $EIB:/eib \
-eib:demo \
+registry.opensuse.org/isv/suse/edge/edgeimagebuilder/containerfile/suse/edge-image-builder:1.0.0.rc2 \
 build --definition-file eib-iso-definition.yaml
 ----
 
@@ -330,11 +350,10 @@ The generated RTD `ISO` image will be created at `$EIB/eib-image.iso`:
 ├── eib-iso-definition.yaml
 ├── eib-image.iso
 ├── _build
-│    └ build-XYZ
+│   └ build-XYZ
 ├── base-images/
-│    └ slemicro.iso
-├── network/
-└──
+│   └ slemicro.iso
+└── network/
 ----
 
 Additionally, each build creates a timestamped folder in `$EIB/_build/` that includes the logs of the build, the artifacts used during the build, and the `combustion` directory which contains all of the artifacts that are added to the RTD image.
@@ -411,6 +430,10 @@ The contents of this directory should look like:
 ----
 
 In the case of the build failing, `eib-build.log` is the first log that will contain information. From there, it will direct you to the component that failed for debugging.
+
+=== Debugging the image build process
+
+If the image build process fails, refer to the https://github.com/dbw7/edge-image-builder/blob/main/docs/debugging.md[EIB debugging guide].
 
 === Testing your newly built image
 
