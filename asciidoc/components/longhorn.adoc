@@ -1,3 +1,4 @@
+[#components-longhorn]
 = Longhorn
 :experimental:
 
@@ -10,4 +11,266 @@ ifdef::env-github[]
 :warning-caption: :warning:
 endif::[]
 
-https://longhorn.io/docs/
+Longhorn is a lightweight, reliable, and user-friendly distributed block storage system designed for Kubernetes.
+As an open-source project, Longhorn was initially developed by Rancher Labs and is currently incubated under the CNCF.
+
+== Prerequisites
+
+* SLE Micro
+* K3s or RKE2 installed. You can find a guide on how to install K3s https://documentation.suse.com/trd/kubernetes/single-html/kubernetes_ri_k3s-slemicro/index.html#id-k3s[here]
+or RKE2 https://docs.rke2.io/install/quickstart[here]
+* Open-iSCSI
+** You can install it on an existing SLE Micro by running `sudo transactional-update pkg install open-iscsi` and rebooting the host.
+** If you are building your images with Edge Image Builder, add `open-iscsi` to the packages list
+* Helm 
+
+== Install Longhorn
+
+To deploy `Longhorn`, the https://longhorn.io/docs/1.6.0/deploy/install/install-with-helm/#installing-longhorn[Longhorn install] guide can be used.
+
+In this example Helm was used to install longhorn.
+
+* Add the Longhorn Helm repository:
+
+** `helm repo add longhorn https://charts.longhorn.io`
+
+* Fetch the latest charts from the repository:
+
+** `helm repo update`
+
+* Install Longhorn in the longhorn-system namespace.
+
+** `helm install longhorn longhorn/longhorn --namespace longhorn-system --create-namespace --version 1.6.0`
+
+* To confirm that the deployment succeeded, run:
+
+** `kubectl -n longhorn-system get pod`
+
+[,console]
+----
+localhost:~ # kubectl -n longhorn-system get pod
+NAMESPACE         NAME                                                READY   STATUS      RESTARTS        AGE
+longhorn-system   longhorn-ui-5fc9fb76db-z5dc9                        1/1     Running     0               90s
+longhorn-system   longhorn-ui-5fc9fb76db-dcb65                        1/1     Running     0               90s
+longhorn-system   longhorn-manager-wts2v                              1/1     Running     1 (77s ago)     90s
+longhorn-system   longhorn-driver-deployer-5d4f79ddd-fxgcs            1/1     Running     0               90s
+longhorn-system   instance-manager-a9bf65a7808a1acd6616bcd4c03d925b   1/1     Running     0               70s
+longhorn-system   engine-image-ei-acb7590c-htqmp                      1/1     Running     0               70s
+longhorn-system   csi-attacher-5c4bfdcf59-j8xww                       1/1     Running     0               50s
+longhorn-system   csi-provisioner-667796df57-l69vh                    1/1     Running     0               50s
+longhorn-system   csi-attacher-5c4bfdcf59-xgd5z                       1/1     Running     0               50s
+longhorn-system   csi-provisioner-667796df57-dqkfr                    1/1     Running     0               50s
+longhorn-system   csi-attacher-5c4bfdcf59-wckt8                       1/1     Running     0               50s
+longhorn-system   csi-resizer-694f8f5f64-7n2kq                        1/1     Running     0               50s
+longhorn-system   csi-snapshotter-959b69d4b-rp4gk                     1/1     Running     0               50s
+longhorn-system   csi-resizer-694f8f5f64-r6ljc                        1/1     Running     0               50s
+longhorn-system   csi-resizer-694f8f5f64-k7429                        1/1     Running     0               50s
+longhorn-system   csi-snapshotter-959b69d4b-5k8pg                     1/1     Running     0               50s
+longhorn-system   csi-provisioner-667796df57-n5w9s                    1/1     Running     0               50s
+longhorn-system   csi-snapshotter-959b69d4b-x7b7t                     1/1     Running     0               50s
+longhorn-system   longhorn-csi-plugin-bsc8c                           3/3     Running     0               50s
+----
+
+== Create Longhorn Volumes
+
+* Longhorn StorageClass Creation
+
+** First, create a Longhorn StorageClass containing parameters for provisioning PVs.
+PersistentVolumeClaim (PVC) Creation
+
+*** `kubectl create -f <name_of_file.yaml>`
+
+*** Example values
+
+[,yaml]
+----
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: longhorn
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+parameters:
+  numberOfReplicas: "3"
+  staleReplicaTimeout: "2880" # 48 hours in minutes
+  fromBackup: ""
+  fsType: "ext4"
+----
+
+* Create a PVC referencing the StorageClass.
+
+** The Kubernetes master checks the PVC to ensure the resource request can be fulfilled.
+
+*** `kubectl create -f <name_of_file.yaml>`
+
+*** Example values
+
+[,yaml]
+----
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: longhorn-volv-pvc
+  namespace: longhorn-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 2Gi
+----
+
+* Pod Deployment
+
+** When the Pod is deployed, the Kubernetes master creates the Longhorn volume and binds it to the Pod if storage is available.
+
+*** `kubectl create -f <name_of_file.yaml>`
+
+*** Example values
+
+[,yaml]
+----
+apiVersion: v1
+kind: Pod
+metadata:
+  name: volume-test
+  namespace: longhorn-system
+spec:
+  containers:
+  - name: volume-test
+    image: nginx:stable-alpine
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+    - name: volv
+      mountPath: /data
+    ports:
+    - containerPort: 80
+  volumes:
+  - name: volv
+    persistentVolumeClaim:
+      claimName: longhorn-volv-pvc
+----
+
+In this example the end result should look something like this:
+
+[,console]
+----
+localhost:~ # kubectl get storageclass
+NAME                   PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
+local-path (default)   rancher.io/local-path   Delete          WaitForFirstConsumer   false                  25h
+longhorn (default)     driver.longhorn.io      Delete          Immediate              true                   24h
+
+localhost:~ # kubectl get pvc
+NAME                  STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+longhorn-volv-pvc     Bound    pvc-ad598c98-4cb7-4216-aff6-a52f7e4ea6ac   2Gi        RWO            longhorn       22h
+
+localhost:~ # kubectl get pods -A
+NAMESPACE         NAME                                                READY   STATUS      RESTARTS        AGE
+longhorn-system   longhorn-ui-5fc9fb76db-z5dc9                        1/1     Running     0               24h
+longhorn-system   longhorn-ui-5fc9fb76db-dcb65                        1/1     Running     0               24h
+longhorn-system   longhorn-manager-wts2v                              1/1     Running     1 (24h ago)     24h
+longhorn-system   longhorn-driver-deployer-5d4f79ddd-fxgcs            1/1     Running     0               24h
+longhorn-system   instance-manager-a9bf65a7808a1acd6616bcd4c03d925b   1/1     Running     0               24h
+longhorn-system   engine-image-ei-acb7590c-htqmp                      1/1     Running     0               24h
+longhorn-system   csi-attacher-5c4bfdcf59-j8xww                       1/1     Running     0               24h
+longhorn-system   csi-provisioner-667796df57-l69vh                    1/1     Running     0               24h
+longhorn-system   csi-attacher-5c4bfdcf59-xgd5z                       1/1     Running     0               24h
+longhorn-system   csi-resizer-694f8f5f64-7n2kq                        1/1     Running     0               24h
+longhorn-system   csi-snapshotter-959b69d4b-rp4gk                     1/1     Running     0               24h
+longhorn-system   csi-resizer-694f8f5f64-r6ljc                        1/1     Running     0               24h
+longhorn-system   csi-resizer-694f8f5f64-k7429                        1/1     Running     0               24h
+longhorn-system   csi-snapshotter-959b69d4b-5k8pg                     1/1     Running     0               24h
+longhorn-system   csi-provisioner-667796df57-n5w9s                    1/1     Running     0               24h
+longhorn-system   csi-snapshotter-959b69d4b-x7b7t                     1/1     Running     0               24h
+longhorn-system   longhorn-csi-plugin-bsc8c                           3/3     Running     0               24h
+longhorn-system   csi-provisioner-667796df57-dqkfr                    1/1     Running     2 (8m45s ago)   24h
+longhorn-system   csi-attacher-5c4bfdcf59-wckt8                       1/1     Running     2 (3m59s ago)   24h
+longhorn-system   volume-test                                         1/1     Running     0               22h
+----
+
+== Accessing the UI
+
+If you installed Longhorn with kubectl or Helm, you’ll need to set up an Ingress controller to
+allow external traffic into the cluster, authentication will not be enabled by
+default. If Rancher catalog app was used, Rancher automatically created an Ingress controller with
+access control (the rancher-proxy).
+
+* Get the Longhorn’s external service IP:
+
+[,console]
+----
+kubectl -n longhorn-system get svc
+----
+
+* Once you have retrieved the longhorn-frontend IP you can start using the UI by navigating to it in your browser.
+
+== Use Edge Image Builder to deploy Longhorn
+
+The config file from below can be used to create an image via
+<<component-eib,the Edge Image Builder>> with
+Longhorn being setup as well.
+
+* Build the container
+
+[,console]
+----
+podman build -t eib:dev .
+----
+
+* This command attaches the directory and runs EIB. The $DEFINITION_FILE.yaml should contain the values from the yaml below. It is customizable but for our purpose this is enough to deploy Longhorn.
+
+[,console]
+----
+podman run --rm -it -v $IMAGE_DIR:/eib eib:dev build --definition-file $DEFINITION_FILE.yaml
+----
+
+[,yaml]
+----
+apiVersion: 1.0
+image:
+  imageType: iso
+  baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM.install.iso
+  arch: x86_64
+  outputImageName: eib-image.iso
+kubernetes:
+  version: v1.28.7+rke2r1
+  helm:
+    charts:
+      - name: longhorn
+        version: 1.6.0
+        repositoryName: longhorn
+        targetNamespace: longhorn-system
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: longhorn.yaml # optional! if we want to edit some of the default settings
+    repositories:
+      - name: longhorn
+        url: https://charts.longhorn.io
+operatingSystem:
+  packages:
+    sccRegistrationCode: <reg-code>
+    packageList:
+      - open-iscsi
+  users:
+  - username: root
+    encryptedPassword: <password>
+----
+
+* If you want to customise the default values of the chart you can do so by creating `./kubernetes/helm/values/longhorn.yaml`.
+
+** You can retrieve a copy of the longhorn `values.yaml` https://raw.githubusercontent.com/longhorn/charts/master/charts/longhorn/values.yaml[here]
+
+*** Now you can edit the defaultSettings in the file we created earlier under `./kubernetes/helm/values/longhorn.yaml`
+
+** Example yaml file to use which will add the changes to the configmap `longhorn-default-setting`
+
+[,yaml]
+----
+defaultSettings:
+  defaultLonghornStaticStorageClass: longhorn-static-example
+  backupstorePollInterval: 500
+  priorityClass: high-priority
+----
+
+* After the image is build you can use it to install your OS and Longhorn will be deployed on top of RKE2.
