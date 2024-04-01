@@ -1,0 +1,1385 @@
+== Automated Provisioning with ZTP
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+=== Introduction
+
+The downstream cluster provisioning with `ZTP` (Zero Touch Provisioning) is a feature that allows you to automate the provisioning of downstream clusters. This feature is useful when you have a large number of downstream clusters to provision, and you want to automate the process.
+From a technical point of view, the management cluster contains the following components:
+
+* `SUSE Linux Enterprise Micro RT` as the OS. Depending on the use case, some configurations like networking, storage, users and kernel arguments can be customized.
+* `RKE2` as the Kubernetes cluster. The default `CNI` plugin is `Cilium`.  Depending on the use case, some `CNI` plugins can be used, such as `Cilium+Multus`.
+* `Longhorn` as the storage solution.
+* `NeuVector` as the security solution.
+
+Depending on the use case, `MetalLB` can be used as the load balancer for the Kubernetes cluster to enable high availability on multi-node clusters.
+
+* `MetalLB` as the component to deploy multi-node clusters using a load balancer.
+
+[NOTE]
+====
+For more information about `SUSE Linux Enterprise Micro`, please check: xref:../components/sle-micro.adoc[Components - SUSE Linux Enterprise Micro]
+
+For more information about `RKE2`, please check: xref:../components/rke2.adoc[Components - RKE2]
+
+For more information about `Longhorn`, please check: xref:../components/longhorn.adoc[Components - Longhorn]
+
+For more information about `NeuVector`, please check: xref:../components/neuvector.adoc[Components - NeuVector]
+====
+
+The `ZTP` workflow allows to automate the provisioning of the downstream clusters. The following sections describe the different `ZTP` workflows and some additional features that can be added to the provisioning process:
+
+* xref:ztp-eib-edge-image[]
+
+* xref:ztp-single-node[]
+
+* xref:ztp-multi-node[]
+
+* xref:ztp-add-advanced-network[]
+
+* xref:ztp-add-telco[]
+
+* xref:ztp-private-registry[]
+
+
+[#ztp-eib-edge-image]
+=== Generate the downstream Image using EIB
+
+Using `Edge Image Builder` to create the image to be used in the downstream clusters, a lot of configurations can be customized, but in this guide, we will cover the minimal configurations necessary to set up the downstream cluster.
+Edge Image Builder is typically run from inside a container so, if you don't already have a way to run containers, we need to start by installing a container runtime such as https://podman.io[Podman] or https://rancherdesktop.io[Rancher Desktop]. For this document, we will assume you already have a container runtime available.
+
+*Directory Structure*
+
+When running the `EIB`, a directory will be mounted from the host, so the first thing to do is to create a directory structure to be used by the `EIB` to store the configuration files and the image itself.
+This directory has the following structure:
+
+[,console]
+----
+├── downstream-cluster-config.yaml
+├── base-images/
+│   └ SLE-Micro.x86_64-5.5.0-Default-RT-GM.raw
+├── network/
+|   └ configure-network.sh
+└── custom/
+    └ scripts/
+        └ growfs.sh
+----
+
+Where the `network` folder is optional, just in case you need to customize for DHCP-less, or advanced networking scenarios (covered in the following sections).
+
+
+[NOTE]
+====
+The image `SLE-Micro.x86_64-5.5.0-Default-RT-GM.raw` has to be downloaded from the https://scc.suse.com/[SUSE Customer Center] or the https://www.suse.com/download/sle-micro/[SUSE Download page], and it has to be located under the `base-images` folder.
+====
+
+*Downstream Cluster config file*
+
+The `downstream-cluster-config.yaml` file is the main configuration file for the downstream cluster.
+
+* Depending on the use case, the common configuration file for all scenarios contains the following information:
+
+[,yaml]
+----
+apiVersion: 1.0
+image:
+  imageType: RAW
+  arch: x86_64
+  baseImage: SLE-Micro.x86_64-5.5.0-Default-RT-GM.raw
+  outputImageName: eibimage-slemicro55rt-telco.raw
+operatingSystem:
+  kernelArgs:
+    - ignition.platform.id=openstack
+    - net.ifnames=1
+  systemd:
+    disable:
+      - rebootmgr
+  users:
+    - username: root
+      encryptedPassword: ${ROOT_PASSWORD}
+      sshKeys:
+      - ${USERKEY1}
+----
+where the `$\{ROOT_PASSWORD\}` is the encrypted password for the root user. Just for testing purposes, if you want to generate the encrypted password, you can use the following command:
+
+[,shell]
+----
+openssl passwd -6 PASSWORD
+----
+
+For production environment, the recommendation is to use the ssh-keys which can be added to the users block replacing the `$\{USERKEY1\}` with the real ssh keys.
+
+[#ztp-add-telco-feature-eib]
+* In case you need to configure some Telco features like `dpdk`, `sr-iov` or `FEC`, the following file includes the packages required to enable these features:
+
+[,yaml]
+----
+apiVersion: 1.0
+image:
+  imageType: RAW
+  arch: x86_64
+  baseImage: SLE-Micro.x86_64-5.5.0-Default-RT-GM.raw
+  outputImageName: eibimage-slemicro55rt-telco.raw
+operatingSystem:
+  kernelArgs:
+    - ignition.platform.id=openstack
+    - net.ifnames=1
+  systemd:
+    disable:
+      - rebootmgr
+  users:
+    - username: root
+      encryptedPassword: ${ROOT_PASSWORD}
+      sshKeys:
+      - ${user1Key1}
+  packages:
+    packageList:
+      - jq
+      - dpdk22
+      - dpdk22-tools
+      - libdpdk-23
+      - pf-bb-config
+    additionalRepos:
+      - url: https://download.opensuse.org/repositories/isv:/SUSE:/Edge:/Telco/SLEMicro5.5/
+    sccRegistrationCode: ${SCC_REGISTRATION_CODE}
+----
+
+
+Where the `$\{SCC_REGISTRATION_CODE\}` is the registration code for the SUSE Customer Center, and the package list contains the minimum packages to be used for the Telco profiles.
+In case you want to use the `pf-bb-config` package (to enable the `FEC` feature and binding with drivers), the `additionalRepos` block has to be included to add the `SUSE Edge Telco` repository.
+
+[#ztp-add-advanced-network-eib]
+
+[#ztp-add-network-eib]
+* In case you need to configure the networking for a DHCP-less or more networking advanced scenarios, the following folder and file should be included with the networking configuration:
+
+In the `network` folder, the `configure-network.sh` file contains the networking configuration for the downstream cluster.
+The following script tries to statically configure a NIC when the bare metal object has been created with a secret containing the static network configuration covered in the xref:ztp-add-advanced-network[Additional Features with ZTP - DHCP Less] section.
+Also, it uses the networking information to generate the network configuration for the downstream cluster using the `nmc` https://github.com/suse-edge/nm-configurator[tool].
+
+[,shell]
+----
+#!/bin/bash
+
+set -eux
+
+# Attempt to statically configure a NIC in the case where we find a network_data.json
+# In a configuration drive
+
+CONFIG_DRIVE=$(blkid --label config-2 || true)
+if [ -z "${CONFIG_DRIVE}" ]; then
+  echo "No config-2 device found, skipping network configuration"
+  exit 0
+fi
+
+mount -o ro $CONFIG_DRIVE /mnt
+
+NETWORK_DATA_FILE="/mnt/openstack/latest/network_data.json"
+
+if [ ! -f "${NETWORK_DATA_FILE}" ]; then
+  umount /mnt
+  echo "No network_data.json found, skipping network configuration"
+  exit 0
+fi
+
+DESIRED_HOSTNAME=$(cat /mnt/openstack/latest/meta_data.json | tr ',{}' '\n' | grep '\"metal3-name\"' | sed 's/.*\"metal3-name\": \"\(.*\)\"/\1/')
+
+mkdir -p /tmp/nmc/{desired,generated}
+cp ${NETWORK_DATA_FILE} /tmp/nmc/desired/${DESIRED_HOSTNAME}.yaml
+umount /mnt
+
+./nmc generate --config-dir /tmp/nmc/desired --output-dir /tmp/nmc/generated
+./nmc apply --config-dir /tmp/nmc/generated
+----
+
+In the `network` folder, the `configure-network.sh` file contains the networking configuration for the downstream cluster.
+The following script tries to statically configure a NIC in the case the bare metal object has been created with a secret containing the static network configuration covered in the xref:ztp-add-advanced-network[Additional Features with ZTP - advanced network configuration] section.
+Also, it uses the networking information to generate the network configuration for the downstream cluster using the `nmc` https://github.com/suse-edge/nm-configurator[tool].
+
+[#ztp-add-custom-script-growfs]
+* There is a custom script (`custom/scripts/growfs.sh`) which is required to grow the filesystem to the disk size once it's installed during the process. The `growfs.sh` script contains the following information:
+
+[,shell]
+----
+#!/bin/bash
+growfs() {
+  mnt="$1"
+  dev="$(findmnt --fstab --target ${mnt} --evaluate --real --output SOURCE --noheadings)"
+  # /dev/sda3 -> /dev/sda, /dev/nvme0n1p3 -> /dev/nvme0n1
+  parent_dev="/dev/$(lsblk --nodeps -rno PKNAME "${dev}")"
+  # Last number in the device name: /dev/nvme0n1p42 -> 42
+  partnum="$(echo "${dev}" | sed 's/^.*[^0-9]\([0-9]\+\)$/\1/')"
+  ret=0
+  growpart "$parent_dev" "$partnum" || ret=$?
+  [ $ret -eq 0 ] || [ $ret -eq 1 ] || exit 1
+  /usr/lib/systemd/systemd-growfs "$mnt"
+}
+growfs /
+----
+
+[NOTE]
+====
+You can add your own custom scripts to be executed during the provisioning process.
+For more information please check the xref:../components/edge-image-builder.adoc[Edge Image Builder] documentation.
+====
+
+
+*Image Creation*
+
+Once the directory structure is prepared following the previous sections, run the following command to build the image:
+
+[,shell]
+----
+podman run --rm --privileged -it -v $PWD/eib/:/eib \
+ registry.opensuse.org/isv/suse/edge/edgeimagebuilder/containerfile/suse/edge-image-builder:1.0.0 \
+ --config-file downstream-cluster-config.yaml --config-dir /eib --build-dir /eib/_build
+----
+
+This will create the output ISO image file, named `eibimage-slemicro55rt-telco.raw`, based on the definition described above.
+
+
+
+[#ztp-single-node]
+=== Downstream Cluster Provisioning with ZTP (single-node)
+
+This section describes the workflow to automate the provisioning of a single-node downstream cluster using `ZTP`.
+Basically, this is the simplest way to automate the provisioning of a downstream cluster.
+
+*Requirements*
+
+- The image generated using `EIB` as described in the xref:ztp-eib-edge-image[previous section] with the minimal configuration to set up the downstream cluster has to be located in the management cluster exactly on the path you configured on xref:atip-management-cluster.adoc#metal3-media-server[this section].
+- The management server created and available to be used on the following sections. Please check the xref:atip-management-cluster.adoc[Management Cluster] section for more information.
+
+*Workflow*
+
+The following diagram shows the workflow to automate the provisioning of a single-node downstream cluster using `ZTP`:
+
+image::atip-automated-singlenode1.png[]
+
+There are two different steps to automate the provisioning of a single-node downstream cluster using `ZTP`:
+
+1. Enroll the bare metal Host to make it available for the provisioning process.
+2. Provision the bare metal Host to install and configure the operating system and the Kubernetes cluster.
+
+*Enroll the bare metal Host*
+
+The first step is to enroll the new bare metal host in the management cluster to make it available to be provisioned.
+To do that, the following file (`bmh-example.yaml`) has to be created in the management-cluster, to specify the `BMC` credentials to be used and the `BaremetalHost` object to be enrolled:
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: example-demo-credentials
+type: Opaque
+data:
+  username: ${BMC_USERNAME}
+  password: ${BMC_PASSWORD}
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: flexran-demo
+  labels:
+    cluster-role: control-plane
+spec:
+  online: true
+  bootMACAddress: ${BMC_MAC}
+  rootDeviceHints:
+    deviceName: /dev/nvme0n1
+  bmc:
+    address: ${BMC_ADDRESS}
+    disableCertificateVerification: true
+    credentialsName: example-demo-credentials
+----
+where:
+
+- `$\{BMC_USERNAME\}` - The username for the `BMC` of the new bare metal host.
+- `$\{BMC_PASSWORD\}` - The password for the `BMC` of the new bare metal host.
+- `$\{BMC_MAC\}` - The `MAC` address of the new bare metal host to be used.
+- `$\{BMC_ADDRESS\}` - The `URL` for the bare metal host `BMC` (e.g `redfish-virtualmedia://192.168.200.75/redfish/v1/Systems/1/`). If you want to know more about the different options available depending on your hardware provider, please check the following https://github.com/metal3-io/baremetal-operator/blob/main/docs/api.md[link].
+
+Once the file is created, the following command has to be executed in the management cluster to start enrolling the new bare metal host in the management cluster:
+
+[,shell]
+----
+$ kubectl apply -f bmh-example.yaml
+----
+
+The new bare metal host object will be enrolled changing its state from registering to inspecting and available. The changes can be checked using the following command:
+
+[,shell]
+----
+$ kubectl get bmh
+----
+
+[NOTE]
+====
+The `BaremetalHost` object will be in the `registering` state until the `BMC` credentials are validated. Once the credentials are validated, the `BaremetalHost` object will change its state to `inspecting`, and this step could take some time depending on the hardware (up to 20 minutes). During the inspecting phase, the hardware information is retrieved and the Kubernetes object is updated. You can check the information using the following command `kubectl get bmh -o yaml`.
+====
+
+[#ztp-single-node-provision]
+*Provision Step*
+
+Once the bare metal host is enrolled and available, the next step is to provision the bare metal host to install and configure the operating system and the Kubernetes cluster.
+To do that, the following file (`capi-provisioning-example.yaml`) has to be created in the management-cluster with the following information (the `capi-provisioning-example.yaml` can be generated joining the following blocks).
+
+[NOTE]
+====
+Only the values between `$\{...\}` have to be replaced with the real values.
+====
+
+The following block is the cluster definition where the networking can be configured using the `pods` and the `services` blocks. Also, it contains the references to the control plane and the infrastructure (using the `Metal^3^` provider) objects to be used.
+
+[,yaml]
+----
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks:
+        - 192.168.0.0/18
+    services:
+      cidrBlocks:
+        - 10.96.0.0/12
+  controlPlaneRef:
+    apiVersion: controlplane.cluster.x-k8s.io/v1alpha1
+    kind: RKE2ControlPlane
+    name: single-node-cluster
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: Metal3Cluster
+    name: single-node-cluster
+----
+
+The `Metal3Cluster` object to specify the control plane endpoint (replacing the `$\{DOWNSTREAM_CONTROL_PLANE_IP\}`) to be configured and the `noCloudProvider` because a bare metal node will be used.
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3Cluster
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  controlPlaneEndpoint:
+    host: ${DOWNSTREAM_CONTROL_PLANE_IP}
+    port: 6443
+  noCloudProvider: true
+----
+
+The `RKE2ControlPlane` object to specify the control plane configuration to be used and the `Metal3MachineTemplate` object to specify the control plane image to be used.
+Also, it contains the information about the number of replicas to be used (in this case, one) and the `CNI` plugin to be used (in this case, `Cilium`).
+The agentConfig block contains the `Ignition` format to be used and the `additionalUserData` to be used to configure the `RKE2` node with some information like a systemd named `rke2-preinstall.service` to replace automatically the `BAREMETALHOST_UUID` and `node-name` during the provisioning process using the Ironic information.
+The last block of information contains the Kubernetes version to be used. The `$\{RKE2_VERSION\}` is the version of `RKE2` to be used replacing this value (e.g. `v1.28.7+rke2r1`).
+
+[,yaml]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1alpha1
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  replicas: 1
+  serverConfig:
+    cni: cilium
+  agentConfig:
+    format: ignition
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+            - name: rke2-preinstall.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=rke2-preinstall
+                Wants=network-online.target
+                Before=rke2-install.service
+                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStartPost=/bin/sh -c "umount /mnt"
+                [Install]
+                WantedBy=multi-user.target
+    kubelet:
+      extraArgs:
+        - provider-id=metal3://BAREMETALHOST_UUID
+    version: ${RKE2_VERSION}
+    nodeName: "localhost.localdomain"
+----
+
+The `Metal3MachineTemplate` object to specify the following information:
+
+- The `dataTemplate` to be used doing a reference to the template.
+- The `hostSelector` to be used matching with the label created during the enrollment process.
+- The `image` to be used doing a reference to the image generated using `EIB` on the previous xref:ztp-eib-edge-image[section] and the `checksum` and `checksumType` to be used to validate the image.
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: single-node-cluster-controlplane
+  namespace: default
+spec:
+  template:
+    spec:
+      dataTemplate:
+        name: single-node-cluster-controlplane-template
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+      image:
+        checksum: http://imagecache.local:8080/eibimage-slemicro55rt-telco.raw.sha256
+        checksumType: sha256
+        format: raw
+        url: http://imagecache.local:8080/eibimage-slemicro55rt-telco.raw
+----
+
+The `Metal3DataTemplate` object to specify the `metaData` for the downstream cluster.
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3DataTemplate
+metadata:
+  name: single-node-cluster-controlplane-template
+  namespace: default
+spec:
+  clusterName: single-node-cluster
+  metaData:
+    objectNames:
+      - key: name
+        object: machine
+      - key: local-hostname
+        object: machine
+      - key: local_hostname
+        object: machine
+----
+
+Once the file is created joining the previous blocks, the following command has to be executed in the management cluster to start provisioning the new bare metal host:
+
+[,shell]
+----
+$ kubectl apply -f capi-provisioning-example.yaml
+----
+
+
+[#ztp-multi-node]
+=== Downstream Cluster Provisioning with ZTP (multi-node)
+
+This section describes the workflow to automate the provisioning of a multi-node downstream cluster using `ZTP` and `MetalLB` as a load balancer strategy.
+Basically, this is the simplest way to automate the provisioning of a downstream cluster. The following diagram shows the workflow to automate the provisioning of a multi-node downstream cluster using `ZTP` and `MetalLB`.
+
+
+
+*Requirements*
+
+- The image generated using `EIB` as described in the xref:ztp-eib-edge-image[previous section] with the minimal configuration to set up the downstream cluster has to be located in the management cluster exactly on the path you configured on xref:atip-management-cluster.adoc#metal3-media-server[this section].
+- The management server created and available to be used on the following sections. Please check the xref:atip-management-cluster.adoc[Management Cluster] section for more information.
+
+*Workflow*
+
+The following diagram shows the workflow to automate the provisioning of a multi-node downstream cluster using `ZTP`:
+
+image::atip-automate-multinode1.png[]
+
+1. Enroll the  three bare metal Hosts to make them available for the provisioning process.
+2. Provision the three bare metal Host to install and configure the operating system and the Kubernetes cluster using `MetalLB`.
+
+*Enroll the bare metal Hosts*
+
+The first step is to enroll the three bar metal hosts in the management cluster to make them available to be provisioned.
+To do that, the following files (`bmh-example-node1.yaml`, `bmh-example-node2.yaml` and `bmh-example-node3.yaml`) have to be created in the management-cluster, to specify the `BMC` credentials to be used and the `BaremetalHost` object to be enrolled in the management cluster.
+
+[NOTE]
+====
+* Only the values between `$\{...\}` have to be replaced with the real values.
+* Only will be explained 1 host to make the process clear, but the same process has to be done for the other two nodes.
+====
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: node1-example-credentials
+type: Opaque
+data:
+  username: ${BMC_NODE1_USERNAME}
+  password: ${BMC_NODE1_PASSWORD}
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: node1-example
+  labels:
+    cluster-role: control-plane
+spec:
+  online: true
+  bootMACAddress: ${BMC_NODE1_MAC}
+  bmc:
+    address: ${BMC_NODE1_ADDRESS}
+    disableCertificateVerification: true
+    credentialsName: node1-example-credentials
+----
+
+where:
+
+- `$\{BMC_NODE1_USERNAME\}` - The username for the BMC of the first bare metal host.
+- `$\{BMC_NODE1_PASSWORD\}` - The password for the BMC of the first bare metal host.
+- `$\{BMC_NODE1_MAC\}` - The MAC address of the first bare metal host to be used.
+- `$\{BMC_NODE1_ADDRESS\}` - The URL for the first bare metal host BMC (e.g `redfish-virtualmedia://192.168.200.75/redfish/v1/Systems/1/`). If you want to know more about the different options available depending on your hardware provider, please check the following https://github.com/metal3-io/baremetal-operator/blob/main/docs/api.md[link].
+
+Once the file is created, the following command has to be executed in the management cluster to start enrolling the bare metal hosts in the management cluster:
+
+[,shell]
+----
+$ kubectl apply -f bmh-example-node1.yaml
+$ kubectl apply -f bmh-example-node2.yaml
+$ kubectl apply -f bmh-example-node3.yaml
+----
+
+The new bare metal host objects will be enrolled changing their state from registering to inspecting and available. The changes can be checked using the following command:
+
+[,shell]
+----
+$ kubectl get bmh -o wide
+----
+
+[NOTE]
+====
+The `BaremetalHost` object will be in the `registering` state until the `BMC` credentials are validated. Once the credentials are validated, the `BaremetalHost` object will change its state to `inspecting`, and this step could take some time depending on the hardware (up to 20 minutes). During the inspecting phase, the hardware information is retrieved and the Kubernetes object is updated. You can check the information using the following command `kubectl get bmh -o yaml`.
+====
+
+*Provision Step*
+
+Once the three bar metal hosts are enrolled and available, the next step is to provision the bare metal hosts to install and configure the operating system and the Kubernetes cluster creating a load balancer to manage them.
+To do that, the following file (`capi-provisioning-example.yaml`) has to be created in the management-cluster with the following information (the `capi-provisioning-example.yaml can be generated joining the following blocks).
+
+[NOTE]
+====
+- Only the values between `$\{...\}` have to be replaced with the real values.
+- The `VIP` address is a reserved IP address that is not assigned to any node and is used to configure the load balancer.
+====
+
+The cluster definition where the cluster network can be configured using the `pods` and the `services` blocks. Also, it contains the references to the control plane and the infrastructure (using the `Metal^3^` provider) objects to be used.
+
+[,yaml]
+----
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: multinode-cluster
+  namespace: default
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks:
+        - 192.168.0.0/18
+    services:
+      cidrBlocks:
+        - 10.96.0.0/12
+  controlPlaneRef:
+    apiVersion: controlplane.cluster.x-k8s.io/v1alpha1
+    kind: RKE2ControlPlane
+    name: multinode-cluster
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: Metal3Cluster
+    name: multinode-cluster
+----
+
+The `Metal3Cluster` object to specify the control plane endpoint which uses the `VIP` address already reserved (replacing the `$\{DOWNSTREAM_VIP_ADDRESS\}`) to be configured and the `noCloudProvider` because the three bar metal nodes will be used.
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3Cluster
+metadata:
+  name: multinode-cluster
+  namespace: default
+spec:
+  controlPlaneEndpoint:
+    host: ${EDGE_VIP_ADDRESS}
+    port: 6443
+  noCloudProvider: true
+----
+
+The `RKE2ControlPlane` object to specify the control plane configuration to be used and the `Metal3MachineTemplate` object to specify the control plane image to be used.
+
+* The number of replicas to be used (in this case, 3)
+* The advertisement mode to be used by the Load Balancer (`address` will use the L2 implementation), as well as the address to be used (replacing the `$\{EDGE_VIP_ADDRESS\}` with the `VIP` address).
+* The `serverConfig` with the `CNI` plugin to be used (in this case, `Cilium`), and the `tlsSan` to be used to configure the `VIP` address.
+* The agentConfig block contains the `Ignition` format to be used and the `additionalUserData` to be used to configure the `RKE2` node with some information like:
+    ** The systemd service named `rke2-preinstall.service` to replace automatically the `BAREMETALHOST_UUID` and `node-name` during the provisioning process using the Ironic information.
+    ** The systemd files to install the `MetalLB` operator and the `endpoint-copier-operator` operator.
+    ** The `storage` block which contains the helm charts to be used to install the `MetalLB` and the `endpoint-copier-operator`.
+    ** The `metalLB` custom resource file with the `IPaddressPool` and the `L2Advertisement` to be used (replacing the `$\{EDGE_VIP_ADDRESS\}` with the `VIP` address).
+    ** The `endpoint-svc.yaml` file to be used to configure the `kubernetes-vip` service to be used by the `MetalLB` to manage the `VIP` address.
+* The last block of information contains the Kubernetes version to be used. The `$\{RKE2_VERSION\}` is the version of `RKE2` to be used replacing this value (e.g. `v1.28.7+rke2r1`).
+
+[,yaml]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1alpha1
+kind: RKE2ControlPlane
+metadata:
+  name: multinode-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: Metal3MachineTemplate
+    name: multinode-cluster-controlplane
+  replicas: 3
+  registrationMethod: "address"
+  registrationAddress: ${EDGE_VIP_ADDRESS}
+  serverConfig:
+    cni: cilium
+    tlsSan:
+      - ${EDGE_VIP_ADDRESS}
+      - https://${EDGE_VIP_ADDRESS}.sslip.io
+  agentConfig:
+    format: ignition
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+            - name: rke2-preinstall.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=rke2-preinstall
+                Wants=network-online.target
+                Before=rke2-install.service
+                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStartPost=/bin/sh -c "umount /mnt"
+                [Install]
+                WantedBy=multi-user.target
+            - name: metallb-endpointcopier-operators.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=metallb-endpointcopier-operators
+                Wants=network-online.target
+                After=rke2-server.service
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "while [ ! -d /var/lib/rancher/rke2/server/manifests ]; do sleep 1; done"
+                ExecStart=/bin/sh -c "cp /var/metallb-endpointcopier-operators.yaml /var/lib/rancher/rke2/server/manifests/metallb-endpointcopier-operators.yaml"
+                [Install]
+                WantedBy=multi-user.target
+            - name: metallb-cr.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=metallb-cr
+                Wants=network-online.target
+                After=metallb-endpointcopier-operators.service
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "while [ ! -f /var/lib/rancher/rke2/bin/kubectl ] && [ ! -f /etc/rancher/rke2/rke2.yaml ]; do sleep 1; done"
+                ExecStart=/bin/sh -c "while [ $(/var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml get deployment --ignore-not-found metallb-controller | wc -l) -eq 0 ]; do sleep 1; done"
+                ExecStart=/bin/sh -c "/var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml rollout status deployment metallb-controller -n default --timeout=150s"
+                ExecStart=/bin/sh -c "cp /var/metallb-cr.yaml /var/lib/rancher/rke2/server/manifests/"
+                ExecStartPost=/bin/sh -c "cp /var/endpoint-svc.yaml /var/lib/rancher/rke2/server/manifests/"
+                [Install]
+                WantedBy=multi-user.target
+        storage:
+          files:
+            - path: /var/metallb-endpointcopier-operators.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChart
+                  metadata:
+                    name: metallb
+                    namespace: default
+                  spec:
+                    repo: https://suse-edge.github.io/metallb
+                    chart: metallb
+                    targetNamespace: default
+                    version: 0.14.3
+                  ---
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChart
+                  metadata:
+                    name: endpoint-copier-operator
+                    namespace: default
+                  spec:
+                    repo: https://suse-edge.github.io/endpoint-copier-operator
+                    chart: endpoint-copier-operator
+                    targetNamespace: default
+                    version: 0.2.0
+            - path: /var/metallb-cr.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: metallb.io/v1beta1
+                  kind: IPAddressPool
+                  metadata:
+                    name: kubernetes-vip-ip-pool
+                    namespace: default
+                  spec:
+                    addresses:
+                      - ${EDGE_VIP_ADDRESS}/32
+                    serviceAllocation:
+                      priority: 100
+                      namespaces:
+                        - default
+                  ---
+                  apiVersion: metallb.io/v1beta1
+                  kind: L2Advertisement
+                  metadata:
+                    name: ip-pool-l2-adv
+                    namespace: default
+                  spec:
+                    ipAddressPools:
+                      - kubernetes-vip-ip-pool
+            - path: /var/endpoint-svc.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: v1
+                  kind: Service
+                  metadata:
+                    name: kubernetes-vip
+                    namespace: default
+                  spec:
+                    internalTrafficPolicy: Cluster
+                    ipFamilies:
+                    - IPv4
+                    ipFamilyPolicy: SingleStack
+                    ports:
+                    - name: rke2-api
+                      port: 9345
+                      protocol: TCP
+                      targetPort: 9345
+                    - name: k8s-api
+                      port: 6443
+                      protocol: TCP
+                      targetPort: 6443
+                    sessionAffinity: None
+                    type: LoadBalancer
+    kubelet:
+      extraArgs:
+        - provider-id=metal3://BAREMETALHOST_UUID
+    version: ${RKE2_VERSION}
+    nodeName: "Node-multinode-cluster"
+----
+
+The `Metal3MachineTemplate` object to specify the following information:
+
+- The `dataTemplate` to be used doing a reference to the template.
+- The `hostSelector` to be used matching with the label created during the enrollment process.
+- The `image` to be used doing a reference to the image generated using `EIB` on the previous xref:ztp-eib-edge-image[section] and the `checksum` and `checksumType` to be used to validate the image.
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: multinode-cluster-controlplane
+  namespace: default
+spec:
+  template:
+    spec:
+      dataTemplate:
+        name: multinode-cluster-controlplane-template
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+      image:
+        checksum: http://imagecache.local:8080/eibimage-slemicro55rt-telco.raw.sha256
+        checksumType: sha256
+        format: raw
+        url: http://imagecache.local:8080/eibimage-slemicro55rt-telco.raw
+----
+
+The `Metal3DataTemplate` object to specify the `metaData` for the downstream cluster.
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3DataTemplate
+metadata:
+  name: single-node-cluster-controlplane-template
+  namespace: default
+spec:
+  clusterName: single-node-cluster
+  metaData:
+    objectNames:
+      - key: name
+        object: machine
+      - key: local-hostname
+        object: machine
+      - key: local_hostname
+        object: machine
+----
+
+Once the file is created joining the previous blocks, the following command has to be executed in the management cluster to start provisioning the new three bar metal hosts:
+
+[,shell]
+----
+$ kubectl apply -f capi-provisioning-example.yaml
+----
+
+
+[#ztp-add-advanced-network]
+=== Additional Features with ZTP - advanced network configuration
+
+The `ZTP` workflow allows to automate the provisioning of the downstream clusters using advanced network configuration like DHCP-less, bond+vlans. The following sections describes the differences that can be used to automate the provisioning of the downstream clusters using advanced network configuration.
+
+*Requirements*
+
+- The image generated using `EIB` has to include the network folder and the script following xref:ztp-add-network-eib[this section]
+- The image generated using `EIB` as described in the xref:ztp-eib-edge-image[previous section] has to be located in the management cluster exactly on the path you configured on xref:atip-management-cluster.adoc#metal3-media-server[this section].
+- The management server created and available to be used on the following sections. Please check the xref:atip-management-cluster.adoc[Management Cluster] section for more information.
+
+*Configuration*
+
+Using the following two section as the base to enroll and provision the hosts:
+
+* xref:ztp-single-node[Downstream Cluster Provisioning with ZTP (single-node)]
+* xref:ztp-multi-node[Downstream Cluster Provisioning with ZTP (multi-node)]
+
+The changes required to enable the advanced network configuration are the following:
+
+* Enrollment step: The following new example file with a secret containing the information about the `networkData` to be used to configure for example, the static `IPs` and `VLAN` for the downstream cluster
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: controlplane-0-networkdata
+type: Opaque
+stringData:
+  networkData: |
+    interfaces:
+    - name: ${CONTROLPLANE_INTERFACE}
+      type: ethernet
+      state: up
+      mac-address: "${CONTROLPLANE_MAC}"
+      ipv4:
+        address:
+        - ip:  "${CONTROLPLANE_IP}"
+          prefix-length: "${CONTROLPLANE_PREFIX}"
+        enabled: true
+        dhcp: false
+    - name: floating
+      type: vlan
+      state: up
+      vlan:
+        base-iface: ${CONTROLPLANE_INTERFACE}
+        id: ${VLAN_ID}
+    dns-resolver:
+      config:
+        server:
+        - "${DNS_SERVER}"
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-address: "${CONTROLPLANE_GATEWAY}"
+        next-hop-interface: ${CONTROLPLANE_INTERFACE}
+----
+
+This file contains the `networkData` in a `nmstate` format to be used to configure the advance network configuration (e.g. `static IPs`, and `VLAN`) for the downstream cluster.
+As you can see, the example shows the configuration to enable the interface with static IPs, as well as the configuration to enable the VLAN using the base interface.
+Any other `nmstate` example could be defined to be used to configure the network for the downstream cluster in order to adapt to the specific requirements.
+where the following variables have to be replaced with the real values:
+
+- `$\{CONTROLPLANE1_INTERFACE\}` - The control plane interface to be used for the edge cluster (e.g. `eth0`).
+- `$\{CONTROLPLANE1_IP\}` - The IP address to be used as a endpoint for the edge cluster (should match with the kubeapi-server endpoint).
+- `$\{CONTROLPLANE1_PREFIX\}` - The CIDR to be used for the edge cluster (e.g. `24` in case you want `/24` or `255.255.255.0`).
+- `$\{CONTROLPLANE1_GATEWAY\}` - The gateway to be used for the edge cluster (e.g. `192.168.100.1`).
+- `$\{CONTROLPLANE1_MAC\}` - The MAC address to be used for the control plane interface (e.g. `00:0c:29:3e:3e:3e`).
+- `$\{DNS_SERVER\}` - The DNS to be used for the edge cluster (e.g. `192.168.100.2`).
+- `$\{VLAN_ID\}` - The VLAN ID to be used for the edge cluster (e.g. `100`).
+
+Also, the reference to that secret using `preprovisioningNetworkDataName` is needed in the `BaremetalHost` object at the end of the file to be enrolled in the management cluster.
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: example-demo-credentials
+type: Opaque
+data:
+  username: ${BMC_USERNAME}
+  password: ${BMC_PASSWORD}
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: flexran-demo
+  labels:
+    cluster-role: control-plane
+spec:
+  online: true
+  bootMACAddress: ${BMC_MAC}
+  rootDeviceHints:
+    deviceName: /dev/nvme0n1
+  bmc:
+    address: ${BMC_ADDRESS}
+    disableCertificateVerification: true
+    credentialsName: example-demo-credentials
+  preprovisioningNetworkDataName: controlplane-0-networkdata
+----
+
+[NOTE]
+====
+In case you need to deploy a multi-node cluster, the same process has to be done for the other nodes.
+====
+
+* Provision step: The block of information related to the network-data has to be removed because the platform is including the network data configuration into the secret `controlplane-0-networkdata`.
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3DataTemplate
+metadata:
+  name: multinode-cluster-controlplane-template
+  namespace: default
+spec:
+  clusterName: multinode-cluster
+  metaData:
+    objectNames:
+      - key: name
+        object: machine
+      - key: local-hostname
+        object: machine
+      - key: local_hostname
+        object: machine
+----
+
+[NOTE]
+====
+The `Metal3DataTemplate` `networkData` and `Metal3 IPAM` is not currently supported, only the configuration via static secrets is fully supported.
+====
+
+[#ztp-add-telco]
+=== Additional Features with ZTP - Telco Features (DPDK, SR-IOV, CPU isolation, Huge-pages, NUMA, etc.)
+
+The `ZTP` workflow allows to automate the Telco features to be used in the downstream clusters in order to run Telco workloads on top of that servers.
+
+*Requirements*
+
+- The image generated using `EIB` has to include the specific Telco packages following xref:ztp-add-telco-feature-eib[this section]
+- The image generated using `EIB` as described in the xref:ztp-eib-edge-image[previous section]  has to be located in the management cluster exactly on the path you configured on xref:atip-management-cluster.adoc#metal3-media-server[this section].
+- The management server created and available to be used on the following sections. Please check the xref:atip-management-cluster.adoc[Management Cluster] section for more information.
+
+*Configuration*
+
+Using the following two section as the base to enroll and provision the hosts:
+
+* xref:ztp-single-node[Downstream Cluster Provisioning with ZTP (single-node)]
+* xref:ztp-multi-node[Downstream Cluster Provisioning with ZTP (multi-node)]
+
+The Telco features which are covered on this section are the following:
+
+* DPDK and VFs creation
+* SR-IOV and VFs allocation to be used by the workloads
+* CPU isolation and performance tuning
+* Huge-pages configuration
+* Kernel parameters tuning
+
+[NOTE]
+====
+For more information about the Telco features, please check the following xref:atip-features.adoc[link]
+====
+
+The changes required to enable the Telco features shown above are all inside the `RKE2ControlPlane` block in the provision file `capi-provisioning-example.yaml`. The rest of the information inside the file `capi-provisioning-example.yaml` are the same as the information covered on the xref:ztp-single-node-provision[provisioning section].
+
+To make the process clear, the changes required on that block (`RKE2ControlPlane`) to enable the Telco features are the following:
+
+* The `preRKE2Commands` to be used to execute the commands before the `RKE2` installation process. In this case, the `modprobe` command to enable the `vfio-pci` and the `SR-IOV` kernel modules.
+* The ignition file `/var/lib/rancher/rke2/server/manifests/configmap-sriov-custom-auto.yaml` to be used in order to define the interfaces, driver, and number of `VFs` to be created and exposed to the workloads.
+    ** The values inside the configmap `sriov-custom-auto-config` are the only values to be replaced with the real values.
+        *** `$\{RESOURCE_NAME1\}` - The resource name to be used for the first `PF` interface (e.g. `sriov-resource-du1`). It will be added to the prefix `rancher.io` to be used as a label to be used by the workloads (e.g. `rancher.io/sriov-resource-du1`).
+        *** `$\{SRIOV-NIC-NAME1\}` - The name of the first `PF` interface to be used (e.g. `eth0`).
+        *** `$\{PF_NAME1\}` - The name of the first physical function `PF` to be used. You can generate more complex filters using this (e.g. `eth0#2-5`).
+        *** `$\{DRIVER_NAME1\}` - The driver name to be used for the first `VF` interface (e.g. `vfio-pci`).
+        *** `$\{NUM_VFS1\}` - The number of `VFs` to be created for the first `PF` interface (e.g. `8`).
+* The `/var/sriov-auto-filler.sh` to be used as a translator between the high-level configmap `sriov-custom-auto-config` and the `sriovnetworknodepolicy` which contains the low-level hardware information. This script has been created to abstract the user from the complexity to know in advance the hardware information. No changes are required in this file, but it should be present if we need to enable `sr-iov` and create `VFs`.
+* The kernel arguments to be used to enable the following features:
+
+|===
+| Parameter | Value | Description
+| isolcpus| 1-30,33-62| Isolate the cores 1-30 and 33-62
+| skew_tick| 1 | Allows the kernel to skew the timer interrupts across the isolated CPUs.
+| nohz| on | Allows the kernel to run the timer tick on a single CPU when the system is idle.
+| nohz_full| 1-30,33-62 | kernel boot parameter is the current main interface to configure full dynticks along with CPU Isolation.
+| rcu_nocbs| 1-30,33-62 | Allows the kernel to run the RCU callbacks on a single CPU when the system is idle.
+| kthread_cpus| 0,31,32,63 | Allows the kernel to run the kthreads on a single CPU when the system is idle.
+| irqaffinity| 0,31,32,63 | Allows the kernel to run the interrupts on a single CPU when the system is idle.
+| processor.max_cstate| 1 | Prevents the CPU from dropping into a sleep state when idle
+| intel_idle.max_cstate| 0 | Disables the intel_idle driver and allows acpi_idle to be used
+| iommu       | pt         | Allows to use vfio for the dpdk interfaces
+| intel_iommu | on         | Enables to use vfio for VFs.
+| hugepagesz | 1G    | Allows to set the size of huge pages to 1G
+| hugepages | 40    | Number of hugepages defined before
+| default_hugepagesz| 1G | Default value to enable huge pages
+|===
+
+* The following systemd services in order to enable:
+    ** The `rke2-preinstall.service` to replace automatically the `BAREMETALHOST_UUID` and `node-name` during the provisioning process using the Ironic information.
+    ** The `cpu-performance.service` to enable the CPU performance tuning. The `$\{CPU_FREQUENCY\}` has to be replaced with the real values (e.g. `2500000` to set the CPU frequency to `2.5GHz`).
+    ** The `cpu-partitioning.service` to enable the isolation cores of `CPU` (e.g. `1-30,33-62`).
+    ** The `sriov-custom-auto-vfs.service` to install the `sriov` helm chart, wait until custom resources are created and run the `/var/sriov-auto-filler.sh` to replace the values in the config map `sriov-custom-auto-config` and create the `sriovnetworknodepolicy` to be used by the workloads.
+
+* The `$\{RKE2_VERSION\}` is the version of `RKE2` to be used replacing this value (e.g. `v1.28.7+rke2r1`).
+
+With all these changes mentioned, the `RKE2ControlPlane` block in the `capi-provisioning-example.yaml` will look like the following:
+
+[,yaml]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1alpha1
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  replicas: 1
+  serverConfig:
+    cni: cilium
+    cniMultusEnable: true
+  preRKE2Commands:
+    - modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
+  agentConfig:
+    format: ignition
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        storage:
+          files:
+            - path: /var/lib/rancher/rke2/server/manifests/configmap-sriov-custom-auto.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: v1
+                  kind: ConfigMap
+                  metadata:
+                    name: sriov-custom-auto-config
+                    namespace: kube-system
+                  data:
+                    config.json: |
+                      [
+                         {
+                           "resourceName": "${RESOURCE_NAME1}",
+                           "interface": "${SRIOV-NIC-NAME1}",
+                           "pfname": "${PF_NAME1}",
+                           "driver": "${DRIVER_NAME1}",
+                           "numVFsToCreate": ${NUM_VFS1}
+                         },
+                         {
+                           "resourceName": "${RESOURCE_NAME2}",
+                           "interface": "${SRIOV-NIC-NAME2}",
+                           "pfname": "${PF_NAME2}",
+                           "driver": "${DRIVER_NAME2}",
+                           "numVFsToCreate": ${NUM_VFS2}
+                         }
+                      ]
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /var/sriov-auto-filler.sh
+              overwrite: true
+              contents:
+                inline: |
+                  #!/bin/bash
+                  cat <<- EOF > /var/sriov-networkpolicy-template.yaml
+                  apiVersion: sriovnetwork.openshift.io/v1
+                  kind: SriovNetworkNodePolicy
+                  metadata:
+                    name: atip-RESOURCENAME
+                    namespace: kube-system
+                  spec:
+                    nodeSelector:
+                      feature.node.kubernetes.io/network-sriov.capable: "true"
+                    resourceName: RESOURCENAME
+                    deviceType: DRIVER
+                    numVfs: NUMVF
+                    mtu: 1500
+                    nicSelector:
+                      pfNames: ["PFNAMES"]
+                      deviceID: "DEVICEID"
+                      vendor: "VENDOR"
+                      rootDevices:
+                        - PCIADDRESS
+                  EOF
+
+                  export KUBECONFIG=/etc/rancher/rke2/rke2.yaml; export KUBECTL=/var/lib/rancher/rke2/bin/kubectl
+                  while [ $(${KUBECTL} --kubeconfig=${KUBECONFIG} get sriovnetworknodestates.sriovnetwork.openshift.io -n kube-system -ojson | jq -r '.items[].status.syncStatus') != "Succeeded" ]; do sleep 1; done
+                  input=$(${KUBECTL} --kubeconfig=${KUBECONFIG} get cm sriov-custom-auto-config -n kube-system -ojson | jq -r '.data."config.json"')
+                  jq -c '.[]' <<< $input | while read i; do
+                    interface=$(echo $i | jq -r '.interface')
+                    pfname=$(echo $i | jq -r '.pfname')
+                    pciaddress=$(${KUBECTL} --kubeconfig=${KUBECONFIG} get sriovnetworknodestates.sriovnetwork.openshift.io -n kube-system -ojson | jq -r ".items[].status.interfaces[]|select(.name==\"$interface\")|.pciAddress")
+                    vendor=$(${KUBECTL} --kubeconfig=${KUBECONFIG} get sriovnetworknodestates.sriovnetwork.openshift.io -n kube-system -ojson | jq -r ".items[].status.interfaces[]|select(.name==\"$interface\")|.vendor")
+                    deviceid=$(${KUBECTL} --kubeconfig=${KUBECONFIG} get sriovnetworknodestates.sriovnetwork.openshift.io -n kube-system -ojson | jq -r ".items[].status.interfaces[]|select(.name==\"$interface\")|.deviceID")
+                    resourceName=$(echo $i | jq -r '.resourceName')
+                    driver=$(echo $i | jq -r '.driver')
+                    sed -e "s/RESOURCENAME/$resourceName/g" \
+                        -e "s/DRIVER/$driver/g" \
+                        -e "s/PFNAMES/$pfname/g" \
+                        -e "s/VENDOR/$vendor/g" \
+                        -e "s/DEVICEID/$deviceid/g" \
+                        -e "s/PCIADDRESS/$pciaddress/g" \
+                        -e "s/NUMVF/$(echo $i | jq -r '.numVFsToCreate')/g" /var/sriov-networkpolicy-template.yaml > /var/lib/rancher/rke2/server/manifests/$resourceName.yaml
+                  done
+              mode: 0755
+              user:
+                name: root
+              group:
+                name: root
+        kernel_arguments:
+          should_exist:
+            - intel_iommu=on
+            - intel_pstate=passive
+            - processor.max_cstate=1
+            - intel_idle.max_cstate=0
+            - iommu=pt
+            - mce=off
+            - hugepagesz=1G hugepages=40
+            - hugepagesz=2M hugepages=0
+            - default_hugepagesz=1G
+            - kthread_cpus=${NON-ISOLATED_CPU_CORES}
+            - irqaffinity=${NON-ISOLATED_CPU_CORES}
+            - isolcpus=${ISOLATED_CPU_CORES}
+            - nohz_full=${ISOLATED_CPU_CORES}
+            - rcu_nocbs=${ISOLATED_CPU_CORES}
+            - rcu_nocb_poll
+        systemd:
+          units:
+            - name: rke2-preinstall.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=rke2-preinstall
+                Wants=network-online.target
+                Before=rke2-install.service
+                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStartPost=/bin/sh -c "umount /mnt"
+                [Install]
+                WantedBy=multi-user.target
+            - name: cpu-performance.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=CPU perfomance
+                Wants=network-online.target
+                After=network.target network-online.target
+                [Service]
+                User=root
+                Type=forking
+                TimeoutStartSec=900
+                ExecStart=/bin/sh -c "cpupower frequency-set -g performance; cpupower frequency-set -u ${CPU_FREQUENCY}; cpupower frequency-set -d ${CPU_FREQUENCY}"
+                RemainAfterExit=yes
+                KillMode=process
+                [Install]
+                WantedBy=multi-user.target
+            - name: cpu-partitioning.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=cpu-partitioning
+                Wants=network-online.target
+                After=network.target network-online.target
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStart=/bin/sh -c "echo isolated_cores=${ISOLATED_CPU_CORES} > /etc/tuned/cpu-partitioning-variables.conf"
+                ExecStartPost=/bin/sh -c "tuned-adm profile cpu-partitioning"
+                ExecStartPost=/bin/sh -c "systemctl enable tuned.service"
+                [Install]
+                WantedBy=multi-user.target
+            - name: sriov-custom-auto-vfs.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=SR-IOV Custom Auto VF Creation
+                Wants=network-online.target  rke2-server.target
+                After=network.target network-online.target rke2-server.target
+                [Service]
+                User=root
+                Type=forking
+                TimeoutStartSec=900
+                ExecStart=/bin/sh -c "curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash"
+                ExecStartPost=/bin/sh -c "helm repo add suse-edge https://suse-edge.github.io/charts"
+                ExecStartPost=/bin/sh -c "while ! /var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml wait --for condition=ready nodes --all ; do sleep 2 ; done"
+                ExecStartPost=/bin/sh -c "helm --kubeconfig /etc/rancher/rke2/rke2.yaml install sriov-crd suse-edge/sriov-crd -n kube-system"
+                ExecStartPost=/bin/sh -c "helm --kubeconfig /etc/rancher/rke2/rke2.yaml install sriov-network-operator suse-edge/sriov-network-operator -n kube-system"
+                ExecStartPost=/bin/sh -c "while [ $(/var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml get sriovnetworknodestates.sriovnetwork.openshift.io --ignore-not-found --no-headers -A | wc -l) -eq 0 ]; do sleep 1; done"
+                ExecStartPost=/bin/sh -c "/var/sriov-auto-filler.sh"
+                RemainAfterExit=yes
+                KillMode=process
+                [Install]
+                WantedBy=multi-user.target
+    kubelet:
+      extraArgs:
+        - provider-id=metal3://BAREMETALHOST_UUID
+    version: ${RKE2_VERSION}
+    nodeName: "localhost.localdomain"
+----
+
+Once the file is created joining the previous blocks, the following command has to be executed in the management cluster to start provisioning the new downstream cluster using the Telco features:
+
+[,shell]
+----
+$ kubectl apply -f capi-provisioning-example.yaml
+----
+
+[#ztp-private-registry]
+=== Additional Features with ZTP - Private Registry
+
+The `ZTP` workflow allows to automate the provision of the downstream clusters and configure the private registry as a mirror to enable the images to be used by the workloads.
+
+The first step to enable the private registry is to create the secret containing the information about the private registry to be used by the downstream cluster.
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: private-registry-cert
+  namespace: default
+data:
+  tls.crt: ${TLS_CERTIFICATE}
+  tls.key: ${TLS_KEY}
+  ca.crt: ${CA_CERTIFICATE}
+type: kubernetes.io/tls
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: private-registry-auth
+  namespace: default
+data:
+  username: ${REGISTRY_USERNAME}
+  password: ${REGISTRY_PASSWORD}
+----
+
+The `tls.crt`, `tls.key`, and `ca.crt` are the certificates to be used to authenticate the private registry. The `username` and `password` are the credentials to be used to authenticate the private registry.
+
+[NOTE]
+====
+The `tls.crt`, `tls.key`, `ca.crt` , `username` and `password` have to be encoded in base64 format before to be used in the secret.
+====
+
+With all these changes mentioned, the `RKE2ControlPlane` block in the `capi-provisioning-example.yaml` will look like the following:
+
+[,yaml]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1alpha1
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  replicas: 1
+  privateRegistriesConfig:
+    mirrors:
+      "registry.example.com":
+        endpoint:
+          - "https://registry.example.com:5000"
+    configs:
+      "registry.example.com":
+        authSecret:
+          apiVersion: v1
+          kind: Secret
+          namespace: default
+          name: private-registry-auth
+        tls:
+          tlsConfigSecret:
+            apiVersion: v1
+            kind: Secret
+            namespace: default
+            name: private-registry-cert
+  serverConfig:
+    cni: cilium
+  agentConfig:
+    format: ignition
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+            - name: rke2-preinstall.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=rke2-preinstall
+                Wants=network-online.target
+                Before=rke2-install.service
+                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStartPost=/bin/sh -c "umount /mnt"
+                [Install]
+                WantedBy=multi-user.target
+    kubelet:
+      extraArgs:
+        - provider-id=metal3://BAREMETALHOST_UUID
+    version: ${RKE2_VERSION}
+    nodeName: "localhost.localdomain"
+----
+
+Where the `registry.example.com` is the example name of the private registry to be used by the downstream cluster, and it should be replaced with the real values.
