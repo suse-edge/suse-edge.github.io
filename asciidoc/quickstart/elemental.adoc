@@ -88,11 +88,14 @@ Linux::
 [,bash]
 ----
 helm repo add rancher-latest https://releases.rancher.com/server-charts/latest
+
 kubectl create namespace cattle-system
-kubectl apply -f \
- https://github.com/cert-manager/cert-manager/releases/download/v1.13.3/cert-manager.crds.yaml
+
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.3/cert-manager.crds.yaml
 helm repo add jetstack https://charts.jetstack.io
+
 helm repo update
+
 helm install cert-manager jetstack/cert-manager \
  --namespace cert-manager \
  --create-namespace
@@ -103,9 +106,13 @@ Windows::
 [,bash]
 ----
 helm repo add rancher-latest https://releases.rancher.com/server-charts/latest
+
 kubectl create namespace cattle-system
+
 kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.3/cert-manager.crds.yaml
+
 helm repo add jetstack https://charts.jetstack.io
+
 helm repo update
 helm install cert-manager jetstack/cert-manager `
   --namespace cert-manager `
@@ -123,7 +130,6 @@ helm install rancher rancher-latest/rancher \
   --namespace cattle-system \
   --set hostname=<DNS or sslip from above> \
   --set replicas=1 \
-  --set restrictedAdmin="true" \
   --set bootstrapPassword=<PASSWORD_FOR_RANCHER_ADMIN>
 ----
 +
@@ -135,7 +141,6 @@ helm install rancher rancher-latest/rancher `
   --namespace cattle-system `
   --set hostname=<DNS or sslip from above> `
   --set replicas=1 `
-  --set restrictedAdmin="true" `
   --set bootstrapPassword=<PASSWORD_FOR_RANCHER_ADMIN>
 ----
 
@@ -157,6 +162,7 @@ The helm chart for Elemental is published as an OCI artifact so the installation
 helm install --create-namespace -n cattle-elemental-system \
  elemental-operator-crds \
  oci://registry.suse.com/rancher/elemental-operator-crds-chart
+ 
 helm install --create-namespace -n cattle-elemental-system \
  elemental-operator \
  oci://registry.suse.com/rancher/elemental-operator-chart
@@ -190,34 +196,47 @@ TODO: retake screenshots with Rancher 2.8.2 and Elemental 1.4 once released
 
 ==== Configure Elemental
 
+For simplicity, setting the variable `$ELEM` to the full path of where you want the configuration directory is recommended, e.g. `ELEM=/home/user/elemental/`.
+
+```
+mkdir -p $ELEM
+```
+
 To allow machines to register to Elemental, we need to create a MachineRegistration object in the `fleet-default` namespace.
 
 A fairly basic version of this object is:
 
 [,yaml]
 ----
+cat << EOF > $ELEM/registration.yaml
 apiVersion: elemental.cattle.io/v1beta1
 kind: MachineRegistration
 metadata:
   name: ele-quickstart-nodes
   namespace: fleet-default
 spec:
-  machineName: "${System Information/Manufacturer}-${System Information/Serial Number}"
+  machineName: "\${System Information/Manufacturer}-\${System Information/UUID}"
   machineInventoryLabels:
-    manufacturer: "${System Information/Manufacturer}"
-    productName: "${System Information/Product Name}"
+    manufacturer: "\${System Information/Manufacturer}"
+    productName: "\${System Information/Product Name}"
+EOF
 ----
 
-We can create this object in a few ways:
+To create, use:
 
-[.tabs]
-YAML::
-Create a file with the yaml from above called `registration.yaml` the apply it with:
-+
 [,bash]
 ----
-kubectl apply -f registration.yaml
+kubectl apply -f $ELEM/registration.yaml
 ----
+
+Afterwards, find and note the endpoint that gets assigned:
+
+[,bash]
+----
+REGISURL=$(kubectl get machineregistration ele-quickstart-nodes -n fleet-default -o jsonpath='{.status.registrationURL}')
+----
+
+Alternatively, this can also be done from the UI.
 +
 UI Extension::
 +
@@ -245,13 +264,9 @@ image::create-registration-create.png[Click Create]
 
 Afterwards, find and note the endpoint that gets assigned:
 
-[.tabs]
-YAML::
-+
-[.console]
+[,bash]
 ----
-kubectl get machineregistration ele-quickstart-nodes -n fleet-default \
- -o jsonpath '{.status.registrationURL}'
+REGISURL=$(kubectl get machineregistration ele-quickstart-nodes -n fleet-default -o jsonpath='{.status.registrationURL}')
 ----
 UI Extension::
 If you just created the configuration, you should see the Registration URL listed and can click "Copy" to copy the address:
@@ -279,31 +294,40 @@ From a linux system with Podman installed, run
 
 [,bash]
 ----
-mkdir -p eib_quickstart/base-images
-mkdir -p eib_quickstart/elemental
+mkdir -p $ELEM/eib_quickstart/base-images
+mkdir -p $ELEM/eib_quickstart/elemental
 ----
 
 [,bash]
 ----
-curl <REGISTRATION URL FROM ABOVE> -o eib_quickstart/elemental/elemental.yaml
+curl $REGISURL -o $ELEM/eib_quickstart/elemental/elemental_config.yaml
 ----
 
 [,yaml]
 ----
-echo > eib_quickstart/eib-config.yaml <<< HEREDOC
+cat << EOF > $ELEM/eib_quickstart/eib-config.yaml
 apiVersion: 1.0
 image:
     imageType: iso
     arch: x86_64
     baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM.install.iso
     outputImageName: elemental-image.iso
-HEREDOC
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: \$6\$jHugJNNd3HElGsUZ\$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/ # The unencoded password is 'eib'.
+EOF
 ----
+[NOTE]
+====
+* The unencoded password is `eib`
+* The `cat` command has `\` before each `$` so that bash doesn't template them. If you want to copy the encoded password separately it is `$6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/`.
+====
 
 [,bash]
 ----
-podman run --privileged --rm -it -v $PWD/eib_quickstart/:/eib \
- registry.opensuse.org/home/atgracey/eib/container/containerfile/eib:latest \
+podman run --privileged --rm -it -v $ELEM/eib_quickstart/:/eib \
+ registry.opensuse.org/isv/suse/edge/edgeimagebuilder/containerfile/suse/edge-image-builder:1.0.0.rc3 \
  build --definition-file eib-config.yaml
 ----
 
@@ -337,6 +361,7 @@ The first is the MachineInventorySelectorTemplate. This object allows us to spec
 +
 [,yaml]
 ----
+cat << EOF > $ELEM/selector.yaml
 apiVersion: elemental.cattle.io/v1beta1
 kind: MachineInventorySelectorTemplate
 metadata:
@@ -346,29 +371,38 @@ spec:
   template:
     spec:
       selector:
-        matchLabel:
-          locationID: 123
+        matchLabels:
+          locationID: '123'
+EOF
 ----
 +
 . Then we can create it with
 +
 [,bash]
 ----
-kubectl create -f selector.yaml
+kubectl apply -f $ELEM/selector.yaml
 ----
 +
-. This will match any machine in the inventory with the label `locationID: 123` so we need to add this label to the machines that should be matched. We can do this with:
+. This will match any machine in the inventory with the label `locationID: 123` so we need to add this label to the machines that should be matched. We can do this by first getting the name of the machine with:
++
+[,bash]
+----
+MACHINENAME=$(kubectl get MachineInventory -n fleet-default | awk 'NR>1 {print $1}')
+----
++
+Then we can:
 +
 [,bash]
 ----
 kubectl label MachineInventory -n fleet-default \
- <name of MachineInventory object> locationID=123
+ $MACHINENAME locationID=123
 ----
 +
-. Next, we create the cluster itself. There are a lot of options here but a simple single-node K3s Cluster looks like:
+. Next, we create the cluster itself. There are a lot of options here but a simple single-node K3s Cluster that we will name `cluster.yaml` looks like:
 +
 [,yaml]
 ----
+cat << EOF > $ELEM/cluster.yaml
 apiVersion: provisioning.cattle.io/v1
 kind: Cluster
 metadata:
@@ -379,6 +413,7 @@ spec:
   rkeConfig:
     machinePools:
       - name: pool1
+        quantity: 1
         etcdRole: true
         controlPlaneRole: true
         workerRole: true
@@ -386,14 +421,13 @@ spec:
           kind: MachineInventorySelectorTemplate
           name: location-123-selector
           apiVersion: elemental.cattle.io/v1beta1
-          quantity: 1
+EOF
 ----
-+
-. To provision this cluster, we can create a file with these contents called `cluster.yaml` and run
+To apply it:
 +
 [,bash]
 ----
-kubectl create -f cluster.yaml
+kubectl apply -f $ELEM/cluster.yaml
 ----
 +
 UI Extension::
@@ -401,7 +435,7 @@ The UI extension allows for a few shortcuts to be taken. (But is likely to much 
 +
 . As before, open the left "hamburger menu" and select "OS Management". This will bring you back to the main screen for managing you Elemental systems.
 . On the left sidebar, click "Inventory of Machines". This, unsurprisingly, opens the inventory of machines that have registered.
-. To create a cluster from these machines select the system(s) you want to you, click the "Actions" dropdown, then "Create Elemental Cluster". This will open up the Cluster Creation dialog while also creating a MachineSelectorTemplate to use in the background.
+. To create a cluster from these machines, select the system(s) you want, click the "Actions" dropdown, then "Create Elemental Cluster". This will open up the Cluster Creation dialog while also creating a MachineSelectorTemplate to use in the background.
 . On this screen, you can configure the cluster you want to be built. For this quickstart, I will select K3s v1.26.11+k3s2 and leave the rest of the options alone.
 +
 TODO: Screenshot
