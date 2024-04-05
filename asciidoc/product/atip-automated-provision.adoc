@@ -639,7 +639,6 @@ The `RKE2ControlPlane` object to specify the control plane configuration to be u
 * The `serverConfig` with the `CNI` plugin to be used (in this case, `Cilium`), and the `tlsSan` to be used to configure the `VIP` address.
 * The agentConfig block contains the `Ignition` format to be used and the `additionalUserData` to be used to configure the `RKE2` node with some information like:
     ** The systemd service named `rke2-preinstall.service` to replace automatically the `BAREMETALHOST_UUID` and `node-name` during the provisioning process using the Ironic information.
-    ** The systemd files to install the `MetalLB` operator and the `endpoint-copier-operator` operator.
     ** The `storage` block which contains the helm charts to be used to install the `MetalLB` and the `endpoint-copier-operator`.
     ** The `metalLB` custom resource file with the `IPaddressPool` and the `L2Advertisement` to be used (replacing the `$\{EDGE_VIP_ADDRESS\}` with the `VIP` address).
     ** The `endpoint-svc.yaml` file to be used to configure the `kubernetes-vip` service to be used by the `MetalLB` to manage the `VIP` address.
@@ -690,40 +689,24 @@ spec:
                 ExecStartPost=/bin/sh -c "umount /mnt"
                 [Install]
                 WantedBy=multi-user.target
-            - name: metallb-endpointcopier-operators.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=metallb-endpointcopier-operators
-                Wants=network-online.target
-                After=rke2-server.service
-                [Service]
-                Type=oneshot
-                User=root
-                ExecStartPre=/bin/sh -c "while [ ! -d /var/lib/rancher/rke2/server/manifests ]; do sleep 1; done"
-                ExecStart=/bin/sh -c "cp /var/metallb-endpointcopier-operators.yaml /var/lib/rancher/rke2/server/manifests/metallb-endpointcopier-operators.yaml"
-                [Install]
-                WantedBy=multi-user.target
-            - name: metallb-cr.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=metallb-cr
-                Wants=network-online.target
-                After=metallb-endpointcopier-operators.service
-                [Service]
-                Type=oneshot
-                User=root
-                ExecStartPre=/bin/sh -c "while [ ! -f /var/lib/rancher/rke2/bin/kubectl ] && [ ! -f /etc/rancher/rke2/rke2.yaml ]; do sleep 1; done"
-                ExecStart=/bin/sh -c "while [ $(/var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml get deployment --ignore-not-found metallb-controller | wc -l) -eq 0 ]; do sleep 1; done"
-                ExecStart=/bin/sh -c "/var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml rollout status deployment metallb-controller -n default --timeout=150s"
-                ExecStart=/bin/sh -c "cp /var/metallb-cr.yaml /var/lib/rancher/rke2/server/manifests/"
-                ExecStartPost=/bin/sh -c "cp /var/endpoint-svc.yaml /var/lib/rancher/rke2/server/manifests/"
-                [Install]
-                WantedBy=multi-user.target
         storage:
           files:
-            - path: /var/metallb-endpointcopier-operators.yaml
+            - path: /var/lib/rancher/rke2/server/manifests/endpoint-copier-operator.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChart
+                  metadata:
+                    name: endpoint-copier-operator
+                    namespace: kube-system
+                  spec:
+                    repo: https://suse-edge.github.io/charts
+                    chart: endpoint-copier-operator
+                    targetNamespace: endpoint-copier-operator
+                    version: 0.2.0
+                    createNamespace: true
+            - path: /var/lib/rancher/rke2/server/manifests/metallb.yaml
               overwrite: true
               contents:
                 inline: |
@@ -731,24 +714,15 @@ spec:
                   kind: HelmChart
                   metadata:
                     name: metallb
-                    namespace: default
+                    namespace: kube-system
                   spec:
-                    repo: https://suse-edge.github.io/metallb
+                    repo: https://suse-edge.github.io/charts
                     chart: metallb
-                    targetNamespace: default
+                    targetNamespace: metallb-system
                     version: 0.14.3
-                  ---
-                  apiVersion: helm.cattle.io/v1
-                  kind: HelmChart
-                  metadata:
-                    name: endpoint-copier-operator
-                    namespace: default
-                  spec:
-                    repo: https://suse-edge.github.io/endpoint-copier-operator
-                    chart: endpoint-copier-operator
-                    targetNamespace: default
-                    version: 0.2.0
-            - path: /var/metallb-cr.yaml
+                    createNamespace: true
+
+            - path: /var/lib/rancher/rke2/server/manifests/metallb-cr.yaml
               overwrite: true
               contents:
                 inline: |
@@ -756,7 +730,7 @@ spec:
                   kind: IPAddressPool
                   metadata:
                     name: kubernetes-vip-ip-pool
-                    namespace: default
+                    namespace: metallb-system
                   spec:
                     addresses:
                       - ${EDGE_VIP_ADDRESS}/32
@@ -764,16 +738,19 @@ spec:
                       priority: 100
                       namespaces:
                         - default
+                      serviceSelectors:
+                        - matchExpressions:
+                          - {key: "serviceType", operator: In, values: [kubernetes-vip]}
                   ---
                   apiVersion: metallb.io/v1beta1
                   kind: L2Advertisement
                   metadata:
                     name: ip-pool-l2-adv
-                    namespace: default
+                    namespace: metallb-system
                   spec:
                     ipAddressPools:
                       - kubernetes-vip-ip-pool
-            - path: /var/endpoint-svc.yaml
+            - path: /var/lib/rancher/rke2/server/manifests/endpoint-svc.yaml
               overwrite: true
               contents:
                 inline: |
@@ -782,11 +759,9 @@ spec:
                   metadata:
                     name: kubernetes-vip
                     namespace: default
+                    labels:
+                      serviceType: kubernetes-vip
                   spec:
-                    internalTrafficPolicy: Cluster
-                    ipFamilies:
-                    - IPv4
-                    ipFamilyPolicy: SingleStack
                     ports:
                     - name: rke2-api
                       port: 9345
@@ -796,7 +771,6 @@ spec:
                       port: 6443
                       protocol: TCP
                       targetPort: 6443
-                    sessionAffinity: None
                     type: LoadBalancer
     kubelet:
       extraArgs:
