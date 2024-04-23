@@ -525,3 +525,153 @@ Apr 23 09:20:19 localhost.localdomain combustion[1360]: [2024-04-23T09:20:19Z IN
 Apr 23 09:20:19 localhost.localdomain combustion[1360]: [2024-04-23T09:20:19Z INFO  nmc::apply_conf] Using interface name 'eth1' instead of the preconfigured 'eth3'
 Apr 23 09:20:19 localhost.localdomain combustion[1360]: [2024-04-23T09:20:19Z INFO  nmc] Successfully applied config
 ----
+
+We will now provision the rest of the nodes, but we will only show the differences in the final configuration.
+Feel free to apply any or all of the above checks for all nodes you are about to provision.
+
+===== Provisioning the second node
+
+Let's create the virtual machine:
+
+[,shell]
+----
+virt-install --name node2 --ram 10000 --vcpus 6 --disk path=node2.raw,format=raw --osinfo detect=on,name=sle-unknown --graphics none --console pty,target_type=serial --network default,mac=34:8A:B1:4B:16:E3 --network default,mac=34:8A:B1:4B:16:E4 --virt-type kvm --import
+----
+
+Once the virtual machine is up and running, we can confirm that this node is using bonded interfaces:
+
+[,shell]
+----
+node2:~ # ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,SLAVE,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast master bond99 state UP group default qlen 1000
+    link/ether 34:8a:b1:4b:16:e3 brd ff:ff:ff:ff:ff:ff
+    altname enp0s2
+    altname ens2
+3: eth1: <BROADCAST,MULTICAST,SLAVE,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast master bond99 state UP group default qlen 1000
+    link/ether 34:8a:b1:4b:16:e3 brd ff:ff:ff:ff:ff:ff permaddr 34:8a:b1:4b:16:e4
+    altname enp0s3
+    altname ens3
+4: bond99: <BROADCAST,MULTICAST,MASTER,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default qlen 1000
+    link/ether 34:8a:b1:4b:16:e3 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.122.60/24 brd 192.168.122.255 scope global noprefixroute bond99
+       valid_lft forever preferred_lft forever
+----
+
+Confirm that the routing is using the bond:
+
+[,shell]
+----
+node2:~ # ip r
+default via 192.168.122.1 dev bond99 proto static metric 100
+192.168.122.0/24 dev bond99 proto static scope link metric 100
+192.168.122.0/24 dev bond99 proto kernel scope link src 192.168.122.60 metric 300
+----
+
+Ensure that the static connection files are properly utilized:
+
+[,shell]
+----
+node2:~ # nmcli -f NAME,UUID,TYPE,DEVICE,FILENAME con show
+NAME    UUID                                  TYPE      DEVICE  FILENAME
+bond99  4a920503-4862-5505-80fd-4738d07f44c6  bond      bond99  /etc/NetworkManager/system-connections/bond99.nmconnection
+eth0    dfd202f5-562f-5f07-8f2a-a7717756fb70  ethernet  eth0    /etc/NetworkManager/system-connections/eth0.nmconnection
+eth1    0523c0a1-5f5e-5603-bcf2-68155d5d322e  ethernet  eth1    /etc/NetworkManager/system-connections/eth1.nmconnection
+----
+
+===== Provisioning the third node
+
+Let's create the virtual machine:
+
+[,shell]
+----
+virt-install --name node3 --ram 10000 --vcpus 6 --disk path=node3.raw,format=raw --osinfo detect=on,name=sle-unknown --graphics none --console pty,target_type=serial --network default,mac=34:8A:B1:4B:16:E5 --virt-type kvm --import
+----
+
+Once the virtual machine is up and running, we can confirm that this node is using a network bridge:
+
+[,shell]
+----
+node3:~ # ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast master linux-br0 state UP group default qlen 1000
+    link/ether 34:8a:b1:4b:16:e5 brd ff:ff:ff:ff:ff:ff
+    altname enp0s2
+    altname ens2
+3: linux-br0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default qlen 1000
+    link/ether 34:8a:b1:4b:16:e5 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.122.70/24 brd 192.168.122.255 scope global noprefixroute linux-br0
+       valid_lft forever preferred_lft forever
+----
+
+Confirm that the routing is using the bridge:
+
+[,shell]
+----
+node3:~ # ip r
+default via 192.168.122.1 dev linux-br0 proto static metric 100
+192.168.122.0/24 dev linux-br0 proto static scope link metric 100
+192.168.122.0/24 dev linux-br0 proto kernel scope link src 192.168.122.70 metric 425
+----
+
+Ensure that the static connection files are properly utilized:
+
+[,shell]
+----
+node3:~ # nmcli -f NAME,UUID,TYPE,DEVICE,FILENAME con show
+NAME       UUID                                  TYPE      DEVICE     FILENAME
+linux-br0  1f8f1469-ed20-5f2c-bacb-a6767bee9bc0  bridge    linux-br0  /etc/NetworkManager/system-connections/linux-br0.nmconnection
+eth0       dfd202f5-562f-5f07-8f2a-a7717756fb70  ethernet  eth0       /etc/NetworkManager/system-connections/eth0.nmconnection
+----
+
+===== Provisioning the fourth node
+
+Lastly, we will provision a node which will not match any of the predefined configurations by a MAC address.
+In these cases, we will default to DHCP to configure the network interfaces.
+
+Let's create the virtual machine:
+
+[,shell]
+----
+virt-install --name node4 --ram 10000 --vcpus 6 --disk path=node4.raw,format=raw --osinfo detect=on,name=sle-unknown --graphics none --console pty,target_type=serial --network default --virt-type kvm --import
+----
+
+Once the virtual machine is up and running, we can confirm that this node is using a random IP address for its network interface:
+
+[,shell]
+----
+localhost:~ # ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 52:54:00:56:63:71 brd ff:ff:ff:ff:ff:ff
+    altname enp0s2
+    altname ens2
+    inet 192.168.122.86/24 brd 192.168.122.255 scope global dynamic noprefixroute eth0
+       valid_lft 3542sec preferred_lft 3542sec
+    inet6 fe80::5054:ff:fe56:6371/64 scope link noprefixroute
+       valid_lft forever preferred_lft forever
+----
+
+Ensure that the node is using a wired connection created at runtime:
+
+[,shell]
+----
+localhost:~ # nmcli -f NAME,UUID,TYPE,DEVICE,FILENAME con show
+NAME              UUID                                  TYPE      DEVICE  FILENAME
+Wired Connection  300ed658-08d4-4281-9f8c-d1b8882d29b9  ethernet  eth0    /var/run/NetworkManager/system-connections/default_connection.nmconnection
+----
