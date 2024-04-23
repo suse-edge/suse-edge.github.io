@@ -10,34 +10,28 @@ ifdef::env-github[]
 :warning-caption: :warning:
 endif::[]
 
-In this section we’re going to describe the approach SUSE Edge undertakes to customize the various different networking options on your edge nodes.
-Modern Linux distributions (incl. SLE Micro) are leveraging NetworkManager to suit their configuration needs.
+This section describes the approach to network configuration in the SUSE Edge solution.
+We will show how to configure NetworkManager on SLE Micro in a declarative manner, and explain how the related tools are integrated.
 
-At the time of this writing, SUSE Edge Networking is not a standalone product. This guide will, however, dive deep into
-what it consists of and how it is integrated into the SUSE Edge solution.
+== Overview of NetworkManager
 
-== NetworkManager overview
+NetworkManager is a tool that manages the primary network connection and other connection interfaces.
 
-NetworkManager is a program that manages the primary network connection and other connection interfaces.
-It is handled by systemd and is shipped with all necessary service unit files.
-
-NetworkManager stores all network configurations as connections, which are collections of data that describes how to create or connect to a network.
+NetworkManager stores network configurations as connection files that contain the desired state.
 These connections are stored as files in the `/etc/NetworkManager/system-connections/` directory.
 
 Details about NetworkManager can be found in the https://documentation.suse.com/sle-micro/5.5/html/SLE-Micro-all/cha-nm-configuration.html[upstream SLE Micro documentation].
 
-== nmstate overview
+== Overview of nmstate
 
-There are different solutions attempting to automate and manage host networking and one of the most popular ones is nmstate.
-It is a library (with an accompanying CLI tool) which offers a declarative API for network configurations via a predefined schema.
+nmstate is a widely adopted library (with an accompanying CLI tool) which offers a declarative API for network configurations via a predefined schema.
 
 Details about nmstate can be found in the https://nmstate.io/[upstream documentation].
 
 == Enter: NetworkManager Configurator (nmc)
 
-Edge Networking is achieved via a CLI tool called NetworkManager Configurator or _nmc_ in short.
-It is leveraging the functionality provided by the nmstate library and, as such, it is fully capable of
-configuring static IP addresses, DNS servers, VLANs, bonding, bridges, etc.
+The network customization options available in SUSE Edge are achieved via a CLI tool called NetworkManager Configurator or _nmc_ for short.
+It is leveraging the functionality provided by the nmstate library and, as such, it is fully capable of configuring static IP addresses, DNS servers, VLANs, bonding, bridges, etc.
 This tool allows us to generate network configurations from predefined desired states and to apply those across many different nodes in an automated fashion.
 
 Details about the NetworkManager Configurator (nmc) can be found in the https://github.com/suse-edge/nm-configurator[upstream repository].
@@ -51,9 +45,8 @@ SUSE Edge utilizes _nmc_ for the network customizations in the various different
 
 == Configuring with Edge Image Builder
 
-Edge Image Builder is a staple when it comes to configuring multiple hosts with a single OS image.
-In this section we'll show how you can use a declarative approach to describe the desired network states,
-how those are converted to the respective NetworkManager connections and are then applied during the provisioning process.
+Edge Image Builder (EIB) is a tool which enables configuring multiple hosts with a single OS image.
+In this section we'll show how you can use a declarative approach to describe the desired network states, how those are converted to the respective NetworkManager connections, and are then applied during the provisioning process.
 
 === Prerequisites
 
@@ -124,9 +117,12 @@ EOF
 ----
 
 The `image` section is required, and it specifies the input image, its architecture and type, as well as what the output image will be called.
-The `operatingSystem` section, albeit not necessary, will help us to log in on the provisioned systems with the `root:eib` credentials pair.
+The `operatingSystem` section is optional, and contains configuration to enable login on the provisioned systems with the `root/eib` username/password.
+
+> NOTE: Feel free to use your own encrypted password by running `openssl passwd -6 <password>`.
 
 The configuration directory at this point should look like the following:
+
 [,console]
 ----
 ├── definition.yaml
@@ -153,7 +149,15 @@ This guide will explain how to configure the networking on three different nodes
 * A node which uses network bonding
 * A node which uses a network bridge
 
-> NOTE: The following assumes a default `libvirt` network with an IP address range `192.168.122.1/24`. Adjust accordingly if this differs in your environment.
+[WARNING]
+====
+Using completely different network setups is not recommended in production builds, especially if configuring Kubernetes clusters.
+Networking configurations should generally be homogeneous amongst nodes or at least amongst roles within a given cluster.
+This guide is including various different options only to serve as an example reference.
+====
+
+> NOTE: The following assumes a default `libvirt` network with an IP address range `192.168.122.1/24`.
+Adjust accordingly if this differs in your environment.
 
 Let's create the desired states for the first node which we will call `node1.suse.com`:
 
@@ -205,13 +209,13 @@ interfaces:
 EOF
 ----
 
-In this example we define a desired state of two Ethernet interfaces (eth0 and eth3),
-their requested IP addresses, routing and DNS resolution.
+In this example we define a desired state of two Ethernet interfaces (eth0 and eth3), their requested IP addresses, routing, and DNS resolution.
 
 [WARNING]
 ====
 You must ensure that the MAC addresses of all Ethernet interfaces are listed.
-Those are used during the provisioning process to determine which configurations are relevant for the particular node.
+Those are used during the provisioning process as the identifiers of the nodes and serve to determine which configurations should be applied.
+This is how we are able to configure multiple nodes using a single ISO or RAW image.
 ====
 
 Next up is the second node which we will call `node2.suse.com` and which will use network bonding:
@@ -334,6 +338,7 @@ EOF
 ----
 
 The configuration directory at this point should look like the following:
+
 [,console]
 ----
 ├── definition.yaml
@@ -384,7 +389,8 @@ Image build complete!
 
 The snippet above tells us that the `Network` component has successfully been configured, and we can proceed with provisioning our edge nodes.
 
-> NOTE: A log file (`network-config.log`) and the respective NetworkManager connection files can be inspected in the resulting `_build` directory.
+> NOTE: A log file (`network-config.log`) and the respective NetworkManager connection files can be inspected
+in the resulting `_build` directory under a timestamped directory for the image run.
 
 === Provisioning the edge nodes
 
@@ -393,10 +399,7 @@ Let's copy the resulting RAW image:
 [,shell]
 ----
 mkdir edge-nodes && cd edge-nodes
-cp $CONFIG_DIR/modified-image.raw node1.raw
-cp $CONFIG_DIR/modified-image.raw node2.raw
-cp $CONFIG_DIR/modified-image.raw node3.raw
-cp $CONFIG_DIR/modified-image.raw node4.raw
+for i in {1..4}; do cp $CONFIG_DIR/modified-image.raw node$i.raw; done
 ----
 
 You will notice that we copied the built image four times but only specified the network configurations for three nodes.
@@ -667,10 +670,30 @@ localhost:~ # ip a
        valid_lft forever preferred_lft forever
 ----
 
-Ensure that the node is using a wired connection created at runtime:
+Verify that nmc failed to apply static configurations for this node:
 
 [,shell]
 ----
+localhost:~ # journalctl -u combustion | grep nmc
+Apr 23 12:15:45 localhost.localdomain combustion[1357]: [2024-04-23T12:15:45Z ERROR nmc] Applying config failed: None of the preconfigured hosts match local NICs
+----
+
+Verify that the Ethernet interface was configured via DHCP:
+
+[,shell]
+----
+localhost:~ # journalctl | grep eth0
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7801] manager: (eth0): new Ethernet device (/org/freedesktop/NetworkManager/Devices/2)
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7802] device (eth0): state change: unmanaged -> unavailable (reason 'managed', sys-iface-state: 'external')
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7929] device (eth0): carrier: link connected
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7931] device (eth0): state change: unavailable -> disconnected (reason 'carrier-changed', sys-iface-state: 'managed')
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7944] device (eth0): Activation: starting connection 'Wired Connection' (300ed658-08d4-4281-9f8c-d1b8882d29b9)
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7945] device (eth0): state change: disconnected -> prepare (reason 'none', sys-iface-state: 'managed')
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7947] device (eth0): state change: prepare -> config (reason 'none', sys-iface-state: 'managed')
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7953] device (eth0): state change: config -> ip-config (reason 'none', sys-iface-state: 'managed')
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7964] dhcp4 (eth0): activation: beginning transaction (timeout in 90 seconds)
+Apr 23 12:15:33 localhost.localdomain NetworkManager[704]: <info>  [1713874533.1272] dhcp4 (eth0): state changed new lease, address=192.168.122.86
+
 localhost:~ # nmcli -f NAME,UUID,TYPE,DEVICE,FILENAME con show
 NAME              UUID                                  TYPE      DEVICE  FILENAME
 Wired Connection  300ed658-08d4-4281-9f8c-d1b8882d29b9  ethernet  eth0    /var/run/NetworkManager/system-connections/default_connection.nmconnection
