@@ -385,3 +385,143 @@ Image build complete!
 The snippet above tells us that the `Network` component has successfully been configured, and we can proceed with provisioning our edge nodes.
 
 > NOTE: A log file (`network-config.log`) and the respective NetworkManager connection files can be inspected in the resulting `_build` directory.
+
+==== Provisioning the edge nodes
+
+Let's copy the resulting RAW image:
+
+[,shell]
+----
+mkdir edge-nodes && cd edge-nodes
+cp $CONFIG_DIR/modified-image.raw node1.raw
+cp $CONFIG_DIR/modified-image.raw node2.raw
+cp $CONFIG_DIR/modified-image.raw node3.raw
+cp $CONFIG_DIR/modified-image.raw node4.raw
+----
+
+You will notice that we copied the built image four times but only specified the network configurations for three nodes.
+This is because we also want to showcase what will happen if we provision a node which does not match any of the desired configurations.
+
+We will be using `virt-install` to provision virtual machines using the copied raw disks.
+Each virtual machine will be using 10 GB of RAM and 6 vCPUs.
+
+===== Provisioning the first node
+
+Let's create the virtual machine:
+
+[,shell]
+----
+virt-install --name node1 --ram 10000 --vcpus 6 --disk path=node1.raw,format=raw --osinfo detect=on,name=sle-unknown --graphics none --console pty,target_type=serial --network default,mac=34:8A:B1:4B:16:E1 --network default,mac=34:8A:B1:4B:16:E2 --virt-type kvm --import
+----
+
+> NOTE: It is important that we create the network interfaces with the same MAC addresses as the ones in the desired state we described above.
+
+Once the operation is complete, we will see something similar to the following:
+
+[,console]
+----
+Starting install...
+Creating domain...
+
+Running text console command: virsh --connect qemu:///system console node1
+Connected to domain 'node1'
+Escape character is ^] (Ctrl + ])
+
+
+Welcome to SUSE Linux Enterprise Micro 5.5  (x86_64) - Kernel 5.14.21-150500.55.19-default (ttyS0).
+
+SSH host key: SHA256:XN/R5Tw43reG+QsOw480LxCnhkc/1uqMdwlI6KUBY70 (RSA)
+SSH host key: SHA256:/96yGrPGKlhn04f1rb9cXv/2WJt4TtrIN5yEcN66r3s (DSA)
+SSH host key: SHA256:Dy/YjBQ7LwjZGaaVcMhTWZNSOstxXBsPsvgJTJq5t00 (ECDSA)
+SSH host key: SHA256:TNGqY1LRddpxD/jn/8dkT/9YmVl9hiwulqmayP+wOWQ (ED25519)
+eth0: 192.168.122.50
+eth1:
+
+
+Configured with the Edge Image Builder
+Activate the web console with: systemctl enable --now cockpit.socket
+
+node1 login:
+----
+
+We're now able to log in with the `root:eib` credentials pair.
+We're also able to SSH into the host if we prefer that over the `virsh console` we're presented with here.
+
+Once logged in, let's confirm that all the settings are in place.
+
+Verify that the hostname is properly set:
+
+[,shell]
+----
+node1:~ # hostnamectl
+ Static hostname: node1.suse.com
+ ...
+----
+
+Verify that the routing is properly configured:
+
+[,shell]
+----
+node1:~ # ip r
+default via 192.168.122.1 dev eth0 proto static metric 100
+192.168.122.0/24 dev eth0 proto static scope link metric 100
+192.168.122.0/24 dev eth0 proto kernel scope link src 192.168.122.50 metric 100
+----
+
+Verify that Internet connection is available:
+
+[,shell]
+----
+node1:~ # ping google.com
+PING google.com (142.250.72.78) 56(84) bytes of data.
+64 bytes from den16s09-in-f14.1e100.net (142.250.72.78): icmp_seq=1 ttl=56 time=13.2 ms
+64 bytes from den16s09-in-f14.1e100.net (142.250.72.78): icmp_seq=2 ttl=56 time=13.4 ms
+^C
+--- google.com ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1002ms
+rtt min/avg/max/mdev = 13.248/13.304/13.361/0.056 ms
+----
+
+Verify that exactly two Ethernet interfaces are configured and only one of those is active:
+
+[,shell]
+----
+node1:~ # ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 34:8a:b1:4b:16:e1 brd ff:ff:ff:ff:ff:ff
+    altname enp0s2
+    altname ens2
+    inet 192.168.122.50/24 brd 192.168.122.255 scope global noprefixroute eth0
+       valid_lft forever preferred_lft forever
+3: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 34:8a:b1:4b:16:e2 brd ff:ff:ff:ff:ff:ff
+    altname enp0s3
+    altname ens3
+
+node1:~ # nmcli -f NAME,UUID,TYPE,DEVICE,FILENAME con show
+NAME  UUID                                  TYPE      DEVICE  FILENAME
+eth0  dfd202f5-562f-5f07-8f2a-a7717756fb70  ethernet  eth0    /etc/NetworkManager/system-connections/eth0.nmconnection
+eth1  7e211aea-3d14-59cf-a4fa-be91dac5dbba  ethernet  --      /etc/NetworkManager/system-connections/eth1.nmconnection
+----
+
+You'll notice that the second interface is `eth1` instead of the predefined `eth3` in our desired networking state.
+This is the case because the NetworkManager Configurator (_nmc_) is able to detect that the OS has given a different name for the NIC with MAC address `34:8a:b1:4b:16:e2` and it adjusts its settings accordingly.
+
+Verify this has indeed happened by inspecting the Combustion phase of the provisioning:
+
+[,shell]
+----
+node1:~ # journalctl -u combustion | grep nmc
+Apr 23 09:20:19 localhost.localdomain combustion[1360]: [2024-04-23T09:20:19Z INFO  nmc::apply_conf] Identified host: node1.suse.com
+Apr 23 09:20:19 localhost.localdomain combustion[1360]: [2024-04-23T09:20:19Z INFO  nmc::apply_conf] Set hostname: node1.suse.com
+Apr 23 09:20:19 localhost.localdomain combustion[1360]: [2024-04-23T09:20:19Z INFO  nmc::apply_conf] Processing interface 'eth0'...
+Apr 23 09:20:19 localhost.localdomain combustion[1360]: [2024-04-23T09:20:19Z INFO  nmc::apply_conf] Processing interface 'eth3'...
+Apr 23 09:20:19 localhost.localdomain combustion[1360]: [2024-04-23T09:20:19Z INFO  nmc::apply_conf] Using interface name 'eth1' instead of the preconfigured 'eth3'
+Apr 23 09:20:19 localhost.localdomain combustion[1360]: [2024-04-23T09:20:19Z INFO  nmc] Successfully applied config
+----
