@@ -65,7 +65,7 @@ The EIB container image is publicly available and can be downloaded from the SUS
 podman pull registry.suse.com/edge/edge-image-builder:1.0.1
 ----
 
-=== Creating the image configuration directory
+=== Creating the image configuration directory [[config_dir_creation]]
 
 Let's start with creating the configuration directory:
 
@@ -128,7 +128,7 @@ The configuration directory at this point should look like the following:
     └── SLE-Micro.x86_64-5.5.0-Default-GM.raw
 ----
 
-=== Defining the network configurations
+=== Defining the network configurations [[default_network_definition]]
 
 The desired network configurations are not part of the image definition file that we just created.
 We'll now populate those under the special `network/` directory. Let's create it:
@@ -698,4 +698,170 @@ Apr 23 12:15:33 localhost.localdomain NetworkManager[704]: <info>  [1713874533.1
 localhost:~ # nmcli -f NAME,UUID,TYPE,DEVICE,FILENAME con show
 NAME              UUID                                  TYPE      DEVICE  FILENAME
 Wired Connection  300ed658-08d4-4281-9f8c-d1b8882d29b9  ethernet  eth0    /var/run/NetworkManager/system-connections/default_connection.nmconnection
+----
+
+=== Custom network configurations
+
+We have already covered the default network configuration for Edge Image Builder which relies on the NetworkManager Configurator.
+However, there is also the option to modify it via a custom script. Whilst this option is very flexible and is not MAC address dependant,
+its limitation stems from the fact that using it is much less convenient when bootstrapping multiple nodes with a single image.
+
+> NOTE: It is recommended to use the default network configuration via files describing the desired network states under the `/network` directory.
+Only opt for custom scripting when that behaviour is not applicable to your use case.
+
+We will build and provision an edge node using different configuration structure. Follow all steps starting from <<config_dir_creation>> up until <<default_network_definition>>.
+
+In this example, we will create a custom script which applies static configuration for the `eth0` interface on all provisioned nodes,
+as well as removing and disabling the automatically created wired connections by NetworkManager.
+
+Let's start by storing the connection file in the `/custom/files` directory:
+
+[,shell]
+----
+mkdir -p custom/files
+
+cat << EOF > custom/files/eth0.nmconnection
+[connection]
+autoconnect=true
+autoconnect-slaves=-1
+autoconnect-retries=1
+id=eth0
+interface-name=eth0
+type=802-3-ethernet
+uuid=dfd202f5-562f-5f07-8f2a-a7717756fb70
+wait-device-timeout=60000
+
+[ipv4]
+dhcp-timeout=2147483647
+method=auto
+
+[ipv6]
+addr-gen-mode=eui64
+dhcp-timeout=2147483647
+method=disabled
+EOF
+----
+
+Now that the static configuration is created, we will also create our custom network script:
+
+[,shell]
+----
+mkdir -p network
+
+cat << EOF > network/configure-network.sh
+#!/bin/bash
+set -eux
+
+# Remove and disable wired connections
+mkdir -p /etc/NetworkManager/conf.d/
+printf "[main]\nno-auto-default=*\n" > /etc/NetworkManager/conf.d/no-auto-default.conf
+rm -f /var/run/NetworkManager/system-connections/* || true
+
+# Copy pre-configured network configuration files into NetworkManager
+mkdir -p /etc/NetworkManager/system-connections/
+cp eth0.nmconnection /etc/NetworkManager/system-connections/
+chmod 600 /etc/NetworkManager/system-connections/*.nmconnection
+EOF
+
+chmod a+x network/configure-network.sh
+----
+
+> NOTE: The nmc binary will still be included by default, so it can also be used in the `configure-network.sh` script if necessary.
+
+[WARNING]
+====
+The custom script must always be provided under `/network/configure-network.sh` in the configuration directory. If present, all other files will be ignored.
+It is NOT possible to configure a network by working with both static configurations in YAML format and a custom script simultaneously.
+====
+
+The configuration directory at this point should look like the following:
+
+[,console]
+----
+├── definition.yaml
+├── network/
+│   └── configure-network.sh
+└── base-images/
+    └── SLE-Micro.x86_64-5.5.0-Default-GM.raw
+----
+
+Let's build the image:
+
+[,shell]
+----
+podman run --rm -it -v $CONFIG_DIR:/eib registry.suse.com/edge/edge-image-builder:1.0.1 build --definition-file definition.yaml
+----
+
+Once the image is successfully built, let's create a virtual machine using it:
+
+[,shell]
+----
+virt-install --name node1 --ram 10000 --vcpus 6 --disk path=$CONFIG_DIR/modified-image.raw,format=raw --osinfo detect=on,name=sle-unknown --graphics none --console pty,target_type=serial --network default --virt-type kvm --import
+----
+
+The provisioning process might take a few minutes. Once it's finished, log in to the system with the provided credentials.
+
+Verify that the routing is properly configured:
+
+[,shell]
+----
+localhost:~ # ip r
+default via 192.168.122.1 dev eth0 proto dhcp src 192.168.122.185 metric 100
+192.168.122.0/24 dev eth0 proto kernel scope link src 192.168.122.185 metric 100
+----
+
+Verify that Internet connection is available:
+
+[,shell]
+----
+localhost:~ # ping google.com
+PING google.com (142.250.72.78) 56(84) bytes of data.
+64 bytes from den16s09-in-f14.1e100.net (142.250.72.78): icmp_seq=1 ttl=56 time=13.6 ms
+64 bytes from den16s09-in-f14.1e100.net (142.250.72.78): icmp_seq=2 ttl=56 time=13.6 ms
+^C
+--- google.com ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1001ms
+rtt min/avg/max/mdev = 13.592/13.599/13.606/0.007 ms
+----
+
+Verify that an Ethernet interface is statically configured using our connection file and is active:
+
+[,shell]
+----
+localhost:~ # ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 52:54:00:31:d0:1b brd ff:ff:ff:ff:ff:ff
+    altname enp0s2
+    altname ens2
+    inet 192.168.122.185/24 brd 192.168.122.255 scope global dynamic noprefixroute eth0
+
+localhost:~ # nmcli -f NAME,UUID,TYPE,DEVICE,FILENAME con show
+NAME  UUID                                  TYPE      DEVICE  FILENAME
+eth0  dfd202f5-562f-5f07-8f2a-a7717756fb70  ethernet  eth0    /etc/NetworkManager/system-connections/eth0.nmconnection
+
+localhost:~ # cat  /etc/NetworkManager/system-connections/eth0.nmconnection
+[connection]
+autoconnect=true
+autoconnect-slaves=-1
+autoconnect-retries=1
+id=eth0
+interface-name=eth0
+type=802-3-ethernet
+uuid=dfd202f5-562f-5f07-8f2a-a7717756fb70
+wait-device-timeout=60000
+
+[ipv4]
+dhcp-timeout=2147483647
+method=auto
+
+[ipv6]
+addr-gen-mode=eui64
+dhcp-timeout=2147483647
+method=disabled
 ----
