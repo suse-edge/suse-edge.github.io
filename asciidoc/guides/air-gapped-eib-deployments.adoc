@@ -18,13 +18,21 @@ It's important to note that the <<components-rancher,Rancher>> deployment that w
 
 Further information about <<components-rancher,Rancher>> and <<components-neuvector,NeuVector>> can be found in the links to their respective guides.
 
+[WARNING]
+====
+EIB will parse and pre-download all images referenced in the provided Helm charts and Kubernetes manifests. However, some of those may be attempting to pull container images and create Kubernetes resources based on those at runtime. In these cases we have to manually specify the necessary images in the definition file if we want to set up a completely airgapped environment.
+====
+
 == Prerequisites
 
 If you're following this guide, it's assumed that you are already familiar with <<components-eib,Edge Image Builder(EIB)>>, if not, please follow the EIB <<quickstart-eib,quick start guide>> to familiarize yourself with the process.
 
 == Libvirt Network Configuration
 
-> NOTE: To demo the air-gapped deployment, this guide will be done using a simulated air-gapped libvirt network and the following configuration will be tailored to that. For your own deployments, you may have to modify the `host1.local.yaml` configuration that will be introduced in the next step.
+[NOTE] 
+====
+To demo the air-gapped deployment, this guide will be done using a simulated air-gapped libvirt network and the following configuration will be tailored to that. For your own deployments, you may have to modify the `host1.local.yaml` configuration that will be introduced in the next step.
+====
 
 If you would like to use the same libvirt network configuration, the steps for it are as follows:
 
@@ -56,17 +64,19 @@ This guide features both Rancher and NeuVector deployments, but the base directo
 For simplicity, setting the variable `$CONFIG_DIR` to the full path of where you want the configuration directory is recommended, e.g. `CONFIG_DIR=$HOME/config`.
 
 We will first create the necessary directories:
-```
+[,shell]
+----
 mkdir -p $CONFIG_DIR/base-images
 mkdir -p $CONFIG_DIR/network
 mkdir -p $CONFIG_DIR/kubernetes/helm/values
-```
+----
 
 Make sure to add whichever base image you plan to use into the `base-images` directory. This guide will focus on the Self Install ISO found https://www.suse.com/download/sle-micro/[here].
 
-```
+[,shell]
+----
 cp SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso $CONFIG_DIR/base-images/slemicro.iso
-```
+----
 
 Let's create a file containing the desired network configuration:
 
@@ -106,7 +116,7 @@ interfaces:
 EOF
 ----
 
-This gives the machine that deploys the CRB image a static IP of `192.168.100.50`.
+This configures a single ethernet interface with a static IP of `192.168.100.50`.
 
 The resulting file structure should now look like:
 [,console]
@@ -122,16 +132,10 @@ The resulting file structure should now look like:
 
 == Rancher Installation Using Edge Image Builder
 
-[WARNING]
-====
-EIB will parse and pre-download all images referenced in the provided Helm charts and Kubernetes manifests. However, some of those may be attempting to pull container images and create Kubernetes resources based on those at runtime. In these cases we have to manually specify the necessary images in the definition file if we want to set up a completely airgapped environment.
-====
-
 https://github.com/rancher/rancher/releases/tag/v2.8.3[Rancher v2.8.3 release assets] contains `rancher-images.txt` which lists all of the images required by Rancher for an air-gapped installation.
 
 There are about 602 container images here which means that the resulting CRB image will be roughly 28GB+. For our Rancher configuration, we will strip away any images not necessary. From there, you can add back any images you may need for your deployments.
 
-The stripped down images list can be added to the EIB definition file:\
 We will create the EIB definition file and include the stripped down images list:
 [,console]
 ----
@@ -156,7 +160,7 @@ kubernetes:
     charts:
       - name: rancher
         version: 2.8.3
-        repositoryName: rancher-stable
+        repositoryName: rancher-prime
         valuesFile: rancher-values.yaml
         targetNamespace: cattle-system
         createNamespace: true
@@ -170,91 +174,91 @@ kubernetes:
     repositories:
       - name: jetstack
         url: https://charts.jetstack.io
-      - name: rancher-stable
-        url: https://releases.rancher.com/server-charts/stable
+      - name: rancher-prime
+        url:  https://charts.rancher.com/server-charts/prime
 embeddedArtifactRegistry:
   images:
-    - name: rancher/backup-restore-operator:v4.0.1
-    - name: rancher/calico-cni:v3.27.0-rancher1
-    - name: rancher/cis-operator:v1.0.13
-    - name: rancher/coreos-kube-state-metrics:v1.9.7
-    - name: rancher/coreos-prometheus-config-reloader:v0.38.1
-    - name: rancher/coreos-prometheus-operator:v0.38.1
-    - name: rancher/flannel-cni:v0.3.0-rancher9
-    - name: rancher/fleet-agent:v0.9.2
-    - name: rancher/fleet:v0.9.2
-    - name: rancher/gitjob:v0.9.4
-    - name: rancher/grafana-grafana:7.1.5
-    - name: rancher/hardened-calico:v3.27.2-build20240308
-    - name: rancher/hardened-cluster-autoscaler:v1.8.10-build20240124
-    - name: rancher/hardened-cni-plugins:v1.4.0-build20240122
-    - name: rancher/hardened-coredns:v1.11.1-build20240305
-    - name: rancher/hardened-dns-node-cache:1.22.28-build20240125
-    - name: rancher/hardened-etcd:v3.5.9-k3s1-build20230802
-    - name: rancher/hardened-flannel:v0.24.3-build20240307
-    - name: rancher/hardened-k8s-metrics-server:v0.6.3-build20231009
-    - name: rancher/hardened-kubernetes:v1.28.8-rke2r1-build20240315
-    - name: rancher/hardened-multus-cni:v4.0.2-build20240208
-    - name: rancher/hardened-node-feature-discovery:v0.14.1-build20230926
-    - name: rancher/hardened-whereabouts:v0.6.3-build20240208
-    - name: rancher/helm-project-operator:v0.2.1
-    - name: rancher/istio-kubectl:1.5.10
-    - name: rancher/jimmidyson-configmap-reload:v0.3.0
-    - name: rancher/k3s-upgrade:v1.28.8-k3s1
-    - name: rancher/klipper-helm:v0.8.3-build20240228
-    - name: rancher/klipper-lb:v0.4.7
-    - name: rancher/kube-api-auth:v0.2.1
-    - name: rancher/kubectl:v1.28.3
-    - name: rancher/library-nginx:1.19.2-alpine
-    - name: rancher/local-path-provisioner:v0.0.26
-    - name: rancher/machine:v0.15.0-rancher110
-    - name: rancher/mirrored-cluster-api-controller:v1.4.4
-    - name: rancher/nginx-ingress-controller:nginx-1.9.6-rancher1
-    - name: rancher/pause:3.6
-    - name: rancher/prom-alertmanager:v0.21.0
-    - name: rancher/prometheus-auth:v0.2.2
-    - name: rancher/prometheus-federator:v0.3.4
-    - name: rancher/prom-node-exporter:v1.0.1
-    - name: rancher/prom-prometheus:v2.18.2
-    - name: rancher/pushprox-client:v0.1.0-rancher2-client
-    - name: rancher/pushprox-proxy:v0.1.0-rancher2-proxy
-    - name: rancher/rancher-agent:v2.8.3
-    - name: rancher/rancher-csp-adapter:v3.0.1
-    - name: rancher/rancher:v2.8.3
-    - name: rancher/rancher-webhook:v0.4.3
-    - name: rancher/rke2-cloud-provider:v1.28.2-build20231016
-    - name: rancher/rke2-runtime:v1.28.8-rke2r1
-    - name: rancher/rke2-upgrade:v1.28.8-rke2r1
-    - name: rancher/rke-tools:v0.1.96
-    - name: rancher/security-scan:v0.2.14
-    - name: rancher/shell:v0.1.23
-    - name: rancher/system-agent-installer-k3s:v1.28.8-k3s1
-    - name: rancher/system-agent-installer-rke2:v1.28.8-rke2r1
-    - name: rancher/system-agent:v0.3.6-suc
-    - name: rancher/system-upgrade-controller:v0.13.1
-    - name: rancher/ui-plugin-catalog:1.1.4
-    - name: rancher/ui-plugin-operator:v0.1.1
-    - name: rancher/webhook-receiver:v0.2.5
-    - name: rancher/kubectl:v1.20.2
+    - name: registry.rancher.com/rancher/backup-restore-operator:v4.0.1
+    - name: registry.rancher.com/rancher/calico-cni:v3.27.0-rancher1
+    - name: registry.rancher.com/rancher/cis-operator:v1.0.13
+    - name: registry.rancher.com/rancher/coreos-kube-state-metrics:v1.9.7
+    - name: registry.rancher.com/rancher/coreos-prometheus-config-reloader:v0.38.1
+    - name: registry.rancher.com/rancher/coreos-prometheus-operator:v0.38.1
+    - name: registry.rancher.com/rancher/flannel-cni:v0.3.0-rancher9
+    - name: registry.rancher.com/rancher/fleet-agent:v0.9.2
+    - name: registry.rancher.com/rancher/fleet:v0.9.2
+    - name: registry.rancher.com/rancher/gitjob:v0.9.4
+    - name: registry.rancher.com/rancher/grafana-grafana:7.1.5
+    - name: registry.rancher.com/rancher/hardened-calico:v3.27.2-build20240308
+    - name: registry.rancher.com/rancher/hardened-cluster-autoscaler:v1.8.10-build20240124
+    - name: registry.rancher.com/rancher/hardened-cni-plugins:v1.4.0-build20240122
+    - name: registry.rancher.com/rancher/hardened-coredns:v1.11.1-build20240305
+    - name: registry.rancher.com/rancher/hardened-dns-node-cache:1.22.28-build20240125
+    - name: registry.rancher.com/rancher/hardened-etcd:v3.5.9-k3s1-build20230802
+    - name: registry.rancher.com/rancher/hardened-flannel:v0.24.3-build20240307
+    - name: registry.rancher.com/rancher/hardened-k8s-metrics-server:v0.6.3-build20231009
+    - name: registry.rancher.com/rancher/hardened-kubernetes:v1.28.8-rke2r1-build20240315
+    - name: registry.rancher.com/rancher/hardened-multus-cni:v4.0.2-build20240208
+    - name: registry.rancher.com/rancher/hardened-node-feature-discovery:v0.14.1-build20230926
+    - name: registry.rancher.com/rancher/hardened-whereabouts:v0.6.3-build20240208
+    - name: registry.rancher.com/rancher/helm-project-operator:v0.2.1
+    - name: registry.rancher.com/rancher/istio-kubectl:1.5.10
+    - name: registry.rancher.com/rancher/jimmidyson-configmap-reload:v0.3.0
+    - name: registry.rancher.com/rancher/k3s-upgrade:v1.28.8-k3s1
+    - name: registry.rancher.com/rancher/klipper-helm:v0.8.3-build20240228
+    - name: registry.rancher.com/rancher/klipper-lb:v0.4.7
+    - name: registry.rancher.com/rancher/kube-api-auth:v0.2.1
+    - name: registry.rancher.com/rancher/kubectl:v1.28.3
+    - name: registry.rancher.com/rancher/library-nginx:1.19.2-alpine
+    - name: registry.rancher.com/rancher/local-path-provisioner:v0.0.26
+    - name: registry.rancher.com/rancher/machine:v0.15.0-rancher110
+    - name: registry.rancher.com/rancher/mirrored-cluster-api-controller:v1.4.4
+    - name: registry.rancher.com/rancher/nginx-ingress-controller:nginx-1.9.6-rancher1
+    - name: registry.rancher.com/rancher/pause:3.6
+    - name: registry.rancher.com/rancher/prom-alertmanager:v0.21.0
+    - name: registry.rancher.com/rancher/prometheus-auth:v0.2.2
+    - name: registry.rancher.com/rancher/prometheus-federator:v0.3.4
+    - name: registry.rancher.com/rancher/prom-node-exporter:v1.0.1
+    - name: registry.rancher.com/rancher/prom-prometheus:v2.18.2
+    - name: registry.rancher.com/rancher/pushprox-client:v0.1.0-rancher2-client
+    - name: registry.rancher.com/rancher/pushprox-proxy:v0.1.0-rancher2-proxy
+    - name: registry.rancher.com/rancher/rancher-agent:v2.8.3
+    - name: registry.rancher.com/rancher/rancher-csp-adapter:v3.0.1
+    - name: registry.rancher.com/rancher/rancher:v2.8.3
+    - name: registry.rancher.com/rancher/rancher-webhook:v0.4.3
+    - name: registry.rancher.com/rancher/rke2-cloud-provider:v1.28.2-build20231016
+    - name: registry.rancher.com/rancher/rke2-runtime:v1.28.8-rke2r1
+    - name: registry.rancher.com/rancher/rke2-upgrade:v1.28.8-rke2r1
+    - name: registry.rancher.com/rancher/rke-tools:v0.1.96
+    - name: registry.rancher.com/rancher/security-scan:v0.2.14
+    - name: registry.rancher.com/rancher/shell:v0.1.23
+    - name: registry.rancher.com/rancher/system-agent-installer-k3s:v1.28.8-k3s1
+    - name: registry.rancher.com/rancher/system-agent-installer-rke2:v1.28.8-rke2r1
+    - name: registry.rancher.com/rancher/system-agent:v0.3.6-suc
+    - name: registry.rancher.com/rancher/system-upgrade-controller:v0.13.1
+    - name: registry.rancher.com/rancher/ui-plugin-catalog:1.1.4
+    - name: registry.rancher.com/rancher/ui-plugin-operator:v0.1.1
+    - name: registry.rancher.com/rancher/webhook-receiver:v0.2.5
+    - name: registry.rancher.com/rancher/kubectl:v1.20.2
 ----
 
 This definition file sets the username/password of the CRB image to `root/eib` respectively. Additionally, it configures RKE2 version `v1.28.8+rke2r1` with the Rancher and cert-manager Helm charts. From here, you can customize the deployment for your needs by appending any additional images you require to the `embeddedArtifactRegistry`. As compared to the 602 container images from before, the slimmed down version only contains 62 container images which makes the new CRB image only about 7GB.
 
-We also need to create the `rancher-values.yaml` to configure Rancher in Helm:
+We also need to create a Helm values file for Rancher:
 [,shell]
 ----
 cat << EOF > $CONFIG_DIR/kubernetes/helm/values/rancher-values.yaml
 hostname: 192.168.100.50.sslip.io
 replicas: 1
 bootstrapPassword: "adminadminadmin"
-systemDefaultRegistry: docker.io
+systemDefaultRegistry: registry.rancher.com
 useBundledSystemChart: true
 EOF
 ----
 
 [NOTE]
 ====
-This sets the Rancher bootstrap password to `adminadminadmin`. Additionally, setting the `systemDefaultRegistry` to `docker.io` allows Rancher to automatically look for images in the embedded artifact registry started within the CRB image at boot.
+This sets the Rancher bootstrap password to `adminadminadmin`. Additionally, setting the `systemDefaultRegistry` to `registry.rancher.com` allows Rancher to automatically look for images in the embedded artifact registry started within the CRB image at boot.
 ====
 
 To build the image:
@@ -446,3 +450,5 @@ kube-system   job.batch/helm-install-rke2-snapshot-validation-webhook   1/1     
 ----
 
 And when we go to `https://192.168.100.50.sslip.io` and log in with the `adminadminadmin` password that we set earlier, we are greeted with the Rancher dashboard:
+
+image::air-gapped-rancher.png[]
