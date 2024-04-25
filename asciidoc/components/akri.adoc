@@ -1,0 +1,105 @@
+[#components-akri]
+= Akri
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Akri is a CNCF-Sandbox project that aims to discover leaf devices to present those as Kubernetes native resource.
+It also allows scheduling a pod or a job for each discovered device.
+Devices can be node-local or networked, and can use a wide variety of protocols.
+
+Akri's upstream documentation is available at: https://docs.akri.sh
+
+== How does SUSE Edge use Akri?
+
+[WARNING]
+Akri is currently tech-preview in the SUSE Edge stack.
+
+Akri is available as part of the Edge Stack whenever there is a need to discover and schedule workload against leaf devices.
+
+=== Installing Akri
+Akri is available as a Helm chart within the Edge Helm repository.
+The recommended way of configuring Akri is by using the given Helm chart to deploy the different components (agent, controller, discovery-handlers), and then use your prefered deployment mechanism to deploy Akri's Configuration CRDs.
+
+=== Configuring Akri
+Akri is configured using a `akri.sh/Configuration` object, this object takes in all information about how to discover the devices, as well as what to do when a matching one is discovered.
+
+Here is an example configuration breakdown with all fields explained:
+[,yaml]
+----
+apiVersion: akri.sh/v0
+kind: Configuration
+metadata:
+  name: sample-configuration
+spec:
+----
+
+This part describes the configuration of the discovery handler, you have to specify its name (the handlers available as part of akri's chart are `udev`, `opcua`, `onvif`).
+The `discoveryDetails` is handler specific, refer to the handler's documentation on how to configure it.
+[,yaml]
+----
+  discoveryHandler:
+    name: debugEcho
+    discoveryDetails: |+
+      descriptions:
+        - "foo"
+        - "bar"
+----
+This section defines the workload to be deployed for every discovered device.
+The example shows a minimal version of a `Pod` configuration in `brokerPodSpec`, all usual fields of a Pod's spec can be used here.
+It also shows the akri specific syntax to request the device in the `resources` section.
+
+You can alternatively use a Job instead of a Pod, using the `brokerJobSpec` key instead, and providing the spec part of a Job to it.
+[,yaml]
+----
+  brokerSpec:
+    brokerPodSpec:
+      containers:
+      - name: broker-container
+        image: rancher/hello-world
+        resources:
+          requests:
+            "{{PLACEHOLDER}}" : "1"
+          limits:
+            "{{PLACEHOLDER}}" : "1"
+----
+These two sections show how to configure akri to deploy a service per broker (`instanceService`), or pointing to all brokers (`configurationService`).
+These are containing all elements pertaining to a usual Service.
+[,yaml]
+----
+  instanceServiceSpec:
+    type: ClusterIp
+    ports:
+    - name: http
+      port: 80
+      protocol: tcp
+      targetPort: 80
+  configurationServiceSpec:
+    type: ClusterIp
+    ports:
+    - name: https
+      port: 443
+      protocol: tcp
+      targetPort: 443
+----
+
+The `brokerProperties` field is a key/value store that will be exposed as additional environment variables to any pod requesting a discovered device.
+
+The capacity is the allowed number of concurrent users of a discovered device.
+[,yaml]
+----
+  brokerProperties:
+    key: value
+  capacity: 1
+----
+
+=== Writing and deploying additional Discovery Handlers
+
+In case the protocol used by your device isn't covered by an existing discovery handler, you can write your own using https://docs.akri.sh/development/handler-development[this guide]
