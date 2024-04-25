@@ -25,14 +25,16 @@ of infrastructure resources across multiple infrastructure providers via a broad
 This method is useful for scenarios where the target hardware supports out-of-band management, and a fully automated
 infrastructure management flow is desired.
 
-This method provides declarative APIs that enable inventory and state management of bare-metal servers, including
-automated inspection, cleaning and provisioning/deprovisioning.
+A management cluster is configured to provide declarative APIs that enable inventory and state management of downstream
+cluster bare-metal servers, including automated inspection, cleaning and provisioning/deprovisioning.
 
 == High-level architecture
 
-TODO diagram
+image::quickstart-metal3-architecture.png[]
 
 == Prerequisites
+
+There are also some specific constraints related to the downstream cluster server hardware and networking:
 
 * Management cluster
  ** Must have network connectivity to the target server management/BMC API
@@ -44,11 +46,9 @@ TODO diagram
  ** Must support deployment via virtual media (PXE is not currently supported)
  ** Must have network connectivity to the management cluster for access to the Metal^3^ provisioning APIs
 
-TODO we need a more detailed support matrix of vendors and BMC firmware versions.
+=== Setup Management Cluster
 
-=== Set up bootstrap cluster
-
-The basic steps to install and use Metal^3^ are:
+The basic steps to install a management cluster and use Metal^3^ are:
 
 . Install an RKE2 management cluster
 . Install Rancher
@@ -57,6 +57,10 @@ The basic steps to install and use Metal^3^ are:
 . Install CAPI dependencies
 . Register BareMetalHost CRs to define the bare-metal inventory
 . Create a downstream cluster by defining CAPI resources
+
+This guide assumes an existing RKE2 cluster and Rancher (including cert-manager) has been installed, for example by following the <<quickstart-eib, Edge Image Builder quick start guide>>.
+
+TIP: The steps here can also be fully automated as described in the <<atip-management-cluster, ATIP management cluster documentation>>.
 
 === Installing Metal^3^ dependencies
 
@@ -71,13 +75,14 @@ An additional IP is required, which is managed by https://metallb.universe.tf/[M
 consistent endpoint for the Metal^3^ management services.
 This IP must be part of the control plane subnet and reserved for static configuration (not part of any DHCP pool).
 
+TIP: If the management cluster is a single node, the requirement for an additional floating IP managed via MetalLB can be avoided, see <<Single-node configuration, Single-node configuration>>
+
 . First, we install MetalLB:
 +
 [,bash]
 ----
-helm repo add suse-edge https://suse-edge.github.io/charts
 helm install \
-  metallb suse-edge/metallb \
+  metallb oci://registry.suse.com/edge/metallb-chart \
   --namespace metallb-system \
   --create-namespace
 ----
@@ -124,7 +129,7 @@ EOF
 [,bash]
 ----
 helm install \
-  metal3 suse-edge/metal3 \
+  metal3 oci://registry.suse.com/edge/metal3-chart \
   --namespace metal3-system \
   --create-namespace \
   --set global.ironicIP="${STATIC_IRONIC_IP}"
@@ -140,6 +145,8 @@ baremetal-operator-controller-manager-85756794b-fz98d   2/2     Running   0     
 metal3-metal3-ironic-677bc5c8cc-55shd                   4/4     Running   0          15m
 metal3-metal3-mariadb-7c7d6fdbd8-64c7l                  1/1     Running   0          15m
 ----
+
+WARNING: Do not proceed to the following steps until all pods in the `metal3-system` namespace are running
 
 === Installing cluster API dependencies
 
@@ -169,11 +176,11 @@ mkdir ~/.cluster-api
 cat >  ~/.cluster-api/clusterctl.yaml <<EOF
 images:
   all:
-    repository: registry.opensuse.org/isv/suse/edge/clusterapi/containerfile/suse
+    repository: registry.suse.com/edge
 EOF
 ----
 
-Install https://cluster-api.sigs.k8s.io/user/quick-start.html#install-clusterctl[clusterctl] 1.6.x, after which we will install the core, infrastructure, bootstrap and control-plane providers as follows:
+Install https://cluster-api.sigs.k8s.io/user/quick-start.html#install-clusterctl[clusterctl] 1.6.x, after which we will install the core, infrastructure, bootstrap and control plane providers as follows:
 
 [,bash]
 ----
@@ -223,6 +230,71 @@ Note the following:
  ** `idrac-virtualmedia://<IP ADDRESS>/redfish/v1/Systems/System.Embedded.1`: Dell iDRAC
 * See the https://github.com/metal3-io/baremetal-operator/blob/main/docs/api.md[Upstream API docs] for more details on the BareMetalHost API
 
+==== Configuring Static IPs
+
+The BareMetalHost example above assumes DHCP provides the controlplane network configuration, but for scenarios where manual configuration
+is needed such as static IPs it is possible to provide additional configuration, for example:
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: controlplane-0-networkdata
+type: Opaque
+stringData:
+  networkData: |
+    interfaces:
+    - name: enp1s0
+      type: ethernet
+      state: up
+      mac-address: "00:f3:65:8a:a3:b0"
+      ipv4:
+        address:
+        - ip:  192.168.125.200
+          prefix-length: 24
+        enabled: true
+        dhcp: false
+    dns-resolver:
+      config:
+        server:
+        - 192.168.125.1
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-address: 192.168.125.1
+        next-hop-interface: enp1s0
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: controlplane-0
+  labels:
+    cluster-role: control-plane
+spec:
+  preprovisioningNetworkDataName: controlplane-0-networkdata
+# Remaining content as in previous example
+----
+
+==== BareMetalHost preparation
+
+After creating the BareMetalHost resource and associated secrets as described above, a host preparation workflow is triggered:
+
+* A ramdisk image is booted by virtualmedia attachment to the target host BMC
+* The ramdisk inspects hardware details, and prepares the host for provisioning (for example by cleaning disks of previous data)
+* On completion of this process, hardware details in the BareMetalHost `status.hardware` field are updated and can be verified
+
+This process can take several minutes, but when completed you should see the BareMetalHost state become `available`:
+
+[,bash]
+----
+% kubectl get baremetalhost
+NAME             STATE       CONSUMER   ONLINE   ERROR   AGE
+controlplane-0   available              true             9m44s
+worker-0         available              true             9m44s
+----
+
+
 === Creating downstream clusters
 
 We now create Cluster API resources which define the downstream cluster, and Machine resources which will cause the BareMetalHost resources to
@@ -230,29 +302,291 @@ be provisioned, then bootstrapped to form an RKE2 cluster.
 
 === Control plane deployment
 
-TODO
+To deploy the controlplane we define a yaml manifest similar to the one below, which contains the following resources:
+
+* Cluster resource defines the cluster name, networks, and type of controlplane/infrastructure provider (in this case RKE2/Metal3)
+* Metal3Cluster defines the controlplane endpoint (host IP for single-node, LoadBalancer endpoint for multi-node, this example assumes single-node)
+* RKE2ControlPlane defines the RKE2 version and any additional configuration needed during cluster bootstrapping
+* Metal3MachineTemplate defines the OS Image to be applied to the BareMetalHost resources, and the hostSelector defines which BareMetalHosts to consume
+* Metal3DataTemplate defines additional metaData to be passed to the BareMetalHost (note networkData is not currently supported in the Edge solution)
+
+Note for simplicity this example assumes a single-node controlplane, where the BareMetalHost is configured with an IP of `192.168.125.200` - for more
+advanced multi-node examples please see the <<atip-automated-provisioning, ATIP documentation>>
+
+[,yaml]
+----
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: sample-cluster
+  namespace: default
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks:
+        - 192.168.0.0/18
+    services:
+      cidrBlocks:
+        - 10.96.0.0/12
+  controlPlaneRef:
+    apiVersion: controlplane.cluster.x-k8s.io/v1alpha1
+    kind: RKE2ControlPlane
+    name: sample-cluster
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: Metal3Cluster
+    name: sample-cluster
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3Cluster
+metadata:
+  name: sample-cluster
+  namespace: default
+spec:
+  controlPlaneEndpoint:
+    host: 192.168.125.200
+    port: 6443
+  noCloudProvider: true
+---
+apiVersion: controlplane.cluster.x-k8s.io/v1alpha1
+kind: RKE2ControlPlane
+metadata:
+  name: sample-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: Metal3MachineTemplate
+    name: sample-cluster-controlplane
+  replicas: 1
+  agentConfig:
+    format: ignition
+    kubelet:
+      extraArgs:
+        - provider-id=metal3://BAREMETALHOST_UUID
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+            - name: rke2-preinstall.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=rke2-preinstall
+                Wants=network-online.target
+                Before=rke2-install.service
+                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStartPost=/bin/sh -c "umount /mnt"
+                [Install]
+                WantedBy=multi-user.target
+    version: v1.28.8+rke2r1
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: sample-cluster-controlplane
+  namespace: default
+spec:
+  template:
+    spec:
+      dataTemplate:
+        name: sample-cluster-controlplane-template
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+      image:
+        checksum: http://imagecache.local:8080/SLE-Micro-eib-output.raw.sha256
+        checksumType: sha256
+        format: raw
+        url: http://imagecache.local:8080/SLE-Micro-eib-output.raw
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3DataTemplate
+metadata:
+  name: sample-cluster-controlplane-template
+  namespace: default
+spec:
+  clusterName: sample-cluster
+  metaData:
+    objectNames:
+      - key: name
+        object: machine
+      - key: local-hostname
+        object: machine
+      - key: local_hostname
+        object: machine
+----
 
 === Worker/Compute deployment
 
-TODO
+Similar to the controlplane we define a yaml manifest, which contains the following resources:
 
-== Next steps
+* MachineDeployment defines the number of replicas (hosts) and the bootstrap/infrastructure provider (in this case RKE2/Metal3)
+* RKE2ConfigTemplate describes the RKE2 version and first-boot configuration for agent host bootstrapping
+* Metal3MachineTemplate defines the OS Image to be applied to the BareMetalHost resources, and the hostSelector defines which BareMetalHosts to consume
+* Metal3DataTemplate defines additional metaData to be passed to the BareMetalHost (note networkData is not currently supported in the Edge solution)
 
-TODO
+[,yaml]
+----
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: MachineDeployment
+metadata:
+  labels:
+    cluster.x-k8s.io/cluster-name: sample-cluster
+  name: sample-cluster
+  namespace: default
+spec:
+  clusterName: sample-cluster
+  replicas: 1
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: sample-cluster
+  template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/cluster-name: sample-cluster
+    spec:
+      bootstrap:
+        configRef:
+          apiVersion: bootstrap.cluster.x-k8s.io/v1alpha1
+          kind: RKE2ConfigTemplate
+          name: sample-cluster-workers
+      clusterName: sample-cluster
+      infrastructureRef:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+        kind: Metal3MachineTemplate
+        name: sample-cluster-workers
+      nodeDrainTimeout: 0s
+      version: v1.28.8+rke2r1
+---
+apiVersion: bootstrap.cluster.x-k8s.io/v1alpha1
+kind: RKE2ConfigTemplate
+metadata:
+  name: sample-cluster-workers
+  namespace: default
+spec:
+  template:
+    spec:
+      agentConfig:
+        format: ignition
+        version: v1.28.8+rke2r1
+        kubelet:
+          extraArgs:
+            - provider-id=metal3://BAREMETALHOST_UUID
+        additionalUserData:
+          config: |
+            variant: fcos
+            version: 1.4.0
+            systemd:
+              units:
+                - name: rke2-preinstall.service
+                  enabled: true
+                  contents: |
+                    [Unit]
+                    Description=rke2-preinstall
+                    Wants=network-online.target
+                    Before=rke2-install.service
+                    ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                    [Service]
+                    Type=oneshot
+                    User=root
+                    ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                    ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                    ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                    ExecStartPost=/bin/sh -c "umount /mnt"
+                    [Install]
+                    WantedBy=multi-user.target
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: sample-cluster-workers
+  namespace: default
+spec:
+  template:
+    spec:
+      dataTemplate:
+        name: sample-cluster-workers-template
+      hostSelector:
+        matchLabels:
+          cluster-role: worker
+      image:
+        checksum: http://imagecache.local:8080/SLE-Micro-eib-output.raw.sha256
+        checksumType: sha256
+        format: raw
+        url: http://imagecache.local:8080/SLE-Micro-eib-output.raw
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3DataTemplate
+metadata:
+  name: sample-cluster-workers-template
+  namespace: default
+spec:
+  clusterName: sample-cluster
+  metaData:
+    objectNames:
+      - key: name
+        object: machine
+      - key: local-hostname
+        object: machine
+      - key: local_hostname
+        object: machine
+----
+
+== Known issues
+
+* The upstream https://github.com/metal3-io/ip-address-manager[IP Address Management controller] is currently not supported, because it's not yet compatible with our choice of network configuration tooling and first-boot toolchain in SLEMicro.
+* Relatedly, the IPAM resources and Metal3DataTemplate networkData fields are not currently supported.
+* Only deployment via redfish-virtualmedia is currently supported.
+* Deployed clusters are not currently imported into Rancher
+* Due to disabling the Rancher embedded CAPI controller, a management cluster configured for Metal^3^ as described above cannot also be used for other cluster provisioning methods such as <<components-elemental, Elemental>>
 
 == Planned changes
 
-TODO
+* Deployed clusters imported into Rancher, this is planned via https://turtles.docs.rancher.com/[Rancher Turtles] in future
+* Aligning with Rancher Turtles is also expected to remove the requirement to disable the Rancher embedded CAPI, so other cluster methods should be possible via the management cluster.
+* Enable support of the IPAM resources and configuration via networkData fields
 
 == Additional resources
 
-TODO
+The <<atip, ATIP Documentation>> has examples of more advanced usage of Metal^3^ for telco use-cases.
 
-=== Single-node configuration (experimental/unsupported)
+=== Single-node configuration
 
-For test/PoC environments where the management cluster is a single node, it is possible to avoid the requirement for an additional IP.
+For test/PoC environments where the management cluster is a single node, it is possible to avoid the requirement for an additional floating IP managed via MetalLB.
 
-In this mode, the endpoint for the management cluster APIs is the IP of the management cluster, thus it should be reserved when using DHCP
-or statically configured.
+In this mode, the endpoint for the management cluster APIs is the IP of the management cluster, therefore it should be reserved when using DHCP
+or statically configured to ensure the management cluster IP does not change - referred to as `<MANAGEMENT_CLUSTER_IP>` below.
 
-TODO example of how to do this with NodePort, if we want to include it in the docs?
+To enable this scenario the metal3 chart values required are as follows:
+
+[,yaml]
+----
+global:
+  ironicIP: <MANAGEMENT_CLUSTER_IP>
+metal3-ironic:
+  service:
+    type: NodePort
+----
+
+=== Disabling TLS for virtualmedia ISO attachment
+
+Some server vendors verify the SSL connection when attaching virtual-media ISO images to the BMC, which can cause a problem because the generated
+certs for the Metal3 deployment are self-signed, to work around this issue it's possible to disable TLS only for the virtualmedia disk attachment
+with metal3 chart values as follows:
+
+[,yaml]
+----
+global:
+  enable_vmedia_tls: false
+----
+
+An alternative solution is to configure the BMCs with the CA cert - see `kubectl get secret -n metal3-system ironic-vmedia-cert -o yaml`
