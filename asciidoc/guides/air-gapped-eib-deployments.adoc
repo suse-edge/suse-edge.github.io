@@ -1,0 +1,651 @@
+= Air-gapped deployments with Edge Image Builder
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+== Intro
+
+This guide will show how to deploy Rancher and NeuVector completely air-gapped on SLE Micro 5.5+ utilizing <<components-eib,Edge Image Builder(EIB)>>. With this, you'll be able to boot into a customized, ready to boot (CRB) image created by EIB and have Rancher and/or NeuVector deployed on a RKE2/K3s cluster without an internet connection or any manual steps. This configuration is highly desirable for customers that want to pre-bake all artifacts required for deployment into the CRB image so that the artifacts are immediately available on boot. This guide will explain configuring EIB and verifying the Rancher/NeuVector deployments.
+
+It's important to note that the <<components-rancher,Rancher>> deployment that will be demonstrated will be highly slimmed down for demonstration purposes. For your actual deployments, additional artifacts may be necessary depending on your configuration. This guide will demonstrate the process of adding artifacts on an as-needed basis.
+
+Further information about <<components-rancher,Rancher>> and <<components-neuvector,NeuVector>> can be found in the links to their respective guides.
+
+== Prerequisites
+
+If you're following this guide, it's assumed that you are already familiar with <<components-eib,Edge Image Builder(EIB)>>, if not, please follow the EIB <<quickstart-eib,quick start guide>> to familiarize yourself with the process.
+
+== Libvirt Network Configuration
+
+To demo the air-gapped deployment, this guide will be done using a simulated air-gapped libvirt network and the following configuration will be tailored to that. For your own deployments, you may have to modify the `host1.local.yaml` that will be introduced in the next step.
+
+If you would like to use the same libvirt network configuration, the steps for it are as follows:
+
+[,console]
+----
+cat << EOF > isolatednetwork.xml
+<network>
+  <name>isolatednetwork</name>
+  <bridge name='virbr1' stp='on' delay='0'/>
+  <ip address='192.168.100.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.100.2' end='192.168.100.254'/>
+    </dhcp>
+  </ip>
+</network>
+EOF
+----
+
+[,console]
+----
+virsh net-define isolatednetwork.xml
+virsh net-start isolatednetwork
+----
+
+== Base EIB Directory Configuration
+
+This guide features both Rancher and NeuVector deployments, but the base directory configuration for each will be the same, so we will set that up here.
+
+For simplicity, setting the variable `$EIB` to the full path of where you want the configuration directory is recommended, e.g. `EIB=/home/user/eib/config`.
+
+We will first create the necessary directories:
+```
+mkdir -p $EIB/base-images
+mkdir -p $EIB/network
+mkdir -p $EIB/kubernetes/helm/values
+```
+
+Make sure to add whichever base image you plan to use into the `base-images` directory. This guide will focus on the Self Install ISO.
+
+```
+cp SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso $EIB/base-images/slemicro.iso
+```
+
+Within the `network` directory, create a file named `host1.local.yaml` containing the following:
+
+[,console]
+----
+cat << EOF > $EIB/network/host1.local.yaml
+routes:
+  config:
+  - destination: 0.0.0.0/0
+    metric: 100
+    next-hop-address: 192.168.100.1
+    next-hop-interface: eth0
+    table-id: 254
+  - destination: 192.168.100.0/24
+    metric: 100
+    next-hop-address:
+    next-hop-interface: eth0
+    table-id: 254
+dns-resolver:
+  config:
+    server:
+    - 192.168.100.1
+    - 8.8.8.8
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mac-address: 34:8A:B1:4B:16:E7
+  ipv4:
+    address:
+    - ip: 192.168.100.50
+      prefix-length: 24
+    dhcp: false
+    enabled: true
+  ipv6:
+    enabled: false
+EOF
+----
+
+This gives the machine that we will deploy a static IP of `192.168.100.50` which will simplify the Rancher deployment.
+
+For the base EIB image definition, we will use:
+
+[,console]
+----
+cat << EOF > $EIB/eib-iso-definition.yaml
+apiVersion: 1.0
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: \$6\$jHugJNNd3HElGsUZ\$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+      createHomeDir: true
+kubernetes:
+  version: v1.28.7+rke2r1
+  network:
+    apiVIP: 192.168.100.151
+  nodes:
+    - hostname: host1.suse.com
+      type: server
+EOF
+----
+
+[NOTE]
+====
+This creates a root user with the password `eib` that we can use to log in. Additionally, the `cat` command includes a backslash before each `$`, this is to make sure the command doesn't try to interpret `$`. If you were to copy this into the file directly, you must remove each `\` before each `$`.
+====
+
+The resulting file structure should now look like:
+[,console]
+----
+├── eib-iso-definition.yaml
+├── kubernetes/
+│   └ helm/
+│     └ values/
+├── base-images/
+│   └ slemicro.iso
+└── network/  
+    └ host1.local.yaml
+----
+
+== Rancher Installation Using Edge Image Builder
+
+While EIB typically completely air-gaps user manifests and Helm charts automatically, in the case where the user provided Helm charts/manifests side load images, manually defining the necessary images may be required. This is true for the case of Rancher.
+
+Let's begin by adding the Rancher Helm chart to the EIB image definition as well as the additional components it needs such as `cert-manager`:
+[,console]
+----
+apiVersion: 1.0
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+      createHomeDir: true
+kubernetes:
+  version: v1.28.7+rke2r1
+  network:
+    apiVIP: 192.168.100.151
+  nodes:
+    - hostname: host1.suse.com
+      type: server
+  manifests:
+    urls:
+    - https://github.com/cert-manager/cert-manager/releases/download/v1.14.2/cert-manager.crds.yaml
+  helm:
+    charts:
+      - name: rancher
+        version: 2.8.3
+        repositoryName: rancher-stable
+        valuesFile: rancher-values.yaml
+        targetNamespace: cattle-system
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: cert-manager
+        installationNamespace: kube-system
+        createNamespace: true
+        repositoryName: jetstack
+        targetNamespace: cert-manager
+        version: 1.14.2
+    repositories:
+      - name: jetstack
+        url: https://charts.jetstack.io
+      - name: rancher-stable
+        url: https://releases.rancher.com/server-charts/stable
+----
+
+We also need to create the `rancher-values.yaml` to configure Rancher in Helm:
+[,console]
+----
+cat << EOF > $EIB/kubernetes/helm/values/rancher-values.yaml
+hostname: 192.168.100.50.sslip.io
+replicas: 1
+bootstrapPassword: "adminadminadmin"
+systemDefaultRegistry: docker.io
+useBundledSystemChart: true
+EOF
+----
+
+[NOTE]
+====
+This sets the Rancher bootstrap password to `adminadminadmin`. Additionally, setting the `systemDefaultRegistry` to `docker.io` allows Rancher to automatically look for images in the embedded artifact registry started within the CRB image at boot.
+====
+
+To air-gap Rancher, we first need all of the images required by Rancher. For v2.8.3, this can be done by downloading the rancher-images.txt found in the https://github.com/rancher/rancher/releases/tag/v2.8.3[Rancher v2.8.3 release].
+
+[,console]
+----
+wget https://github.com/rancher/rancher/releases/download/v2.8.3/rancher-images.txt
+----
+
+Within this file is every image used by Rancher for a full deployment. There are about 602 container images here which means that the resulting CRB image will be roughly 28GB+. In the following steps, we will significantly strip down the Rancher deployment. From there, you can add back any images you may need for your deployments.
+
+[NOTE]
+====
+The instructions for stripping down the Rancher deployment are highly influenced from the https://github.com/clemenko/rke_airgap_install/blob/main/hauler_all_the_things.sh[hauler air-gap all things script found here].
+====
+
+After downloading the file, we will make a copy of it to keep unmodified:
+[,console]
+----
+cp rancher-images.txt rancher-images.txt.backup
+----
+
+From here, we remove a significant number of images that are not necessary for the barebones Rancher deployment using `sed`:
+[,console]
+----
+sed -E '/neuvector|minio|gke|aks|eks|sriov|harvester|mirrored|longhorn|thanos|tekton|istio|hyper|jenkins|windows/d' rancher-images.txt > cleaned-rancher-images.txt
+----
+
+In doing that, `sed` may remove `kubectl` and `capi` images, so we'll `grep` those from the backup and append them to `cleaned-rancher-images.txt`
+[,console]
+----
+grep cluster-api rancher-images.txt.backup >> cleaned-rancher-images.txt
+grep kubectl rancher-images.txt.backup >> cleaned-rancher-images.txt
+----
+
+Next, we'll sort `cleaned-rancher-images.txt` by version and save only the latest versions of each image into `rancher-images-version-sorted.txt`:
+[,shell]
+----
+for i in $(cat cleaned-rancher-images.txt|awk -F: '{print $1}'); do 
+  grep -w "$i" cleaned-rancher-images.txt | sort -Vr| head -1 >> rancher-images-version-sorted.txt
+done
+----
+
+In case there are any duplicate images, we will run `sort -u`, and we will also add back `rancher/kubectl:v1.20.2` as the deployment requires it:
+[,console]
+----
+sort -u rancher-images-version-sorted.txt > slim-rancher-images.txt
+echo "rancher/kubectl:v1.20.2" >> slim-rancher-images.txt
+----
+
+
+Lastly, we'll echo out the images in an EIB usable format:
+[,console]
+----
+for i in $(cat slim-rancher-images.txt); do echo "    - name: "$i; done
+----
+
+The output should look like:
+[,console]
+----
+    - name: rancher/backup-restore-operator:v4.0.1
+    - name: rancher/calico-cni:v3.27.0-rancher1
+    - name: rancher/cis-operator:v1.0.13
+    - name: rancher/coreos-kube-state-metrics:v1.9.7
+    - name: rancher/coreos-prometheus-config-reloader:v0.38.1
+    - name: rancher/coreos-prometheus-operator:v0.38.1
+    - name: rancher/flannel-cni:v0.3.0-rancher9
+    - name: rancher/fleet-agent:v0.9.2
+    - name: rancher/fleet:v0.9.2
+    - name: rancher/gitjob:v0.9.4
+    - name: rancher/grafana-grafana:7.1.5
+    - name: rancher/hardened-calico:v3.27.2-build20240308
+    - name: rancher/hardened-cluster-autoscaler:v1.8.10-build20240124
+    - name: rancher/hardened-cni-plugins:v1.4.0-build20240122
+    - name: rancher/hardened-coredns:v1.11.1-build20240305
+    - name: rancher/hardened-dns-node-cache:1.22.28-build20240125
+    - name: rancher/hardened-etcd:v3.5.9-k3s1-build20230802
+    - name: rancher/hardened-flannel:v0.24.3-build20240307
+    - name: rancher/hardened-k8s-metrics-server:v0.6.3-build20231009
+    - name: rancher/hardened-kubernetes:v1.28.8-rke2r1-build20240315
+    - name: rancher/hardened-multus-cni:v4.0.2-build20240208
+    - name: rancher/hardened-node-feature-discovery:v0.14.1-build20230926
+    - name: rancher/hardened-whereabouts:v0.6.3-build20240208
+    - name: rancher/helm-project-operator:v0.2.1
+    - name: rancher/istio-kubectl:1.5.10
+    - name: rancher/jimmidyson-configmap-reload:v0.3.0
+    - name: rancher/k3s-upgrade:v1.28.8-k3s1
+    - name: rancher/klipper-helm:v0.8.3-build20240228
+    - name: rancher/klipper-lb:v0.4.7
+    - name: rancher/kube-api-auth:v0.2.1
+    - name: rancher/kubectl:v1.28.3
+    - name: rancher/library-nginx:1.19.2-alpine
+    - name: rancher/local-path-provisioner:v0.0.26
+    - name: rancher/machine:v0.15.0-rancher110
+    - name: rancher/mirrored-cluster-api-controller:v1.4.4
+    - name: rancher/nginx-ingress-controller:nginx-1.9.6-rancher1
+    - name: rancher/pause:3.6
+    - name: rancher/prom-alertmanager:v0.21.0
+    - name: rancher/prometheus-auth:v0.2.2
+    - name: rancher/prometheus-federator:v0.3.4
+    - name: rancher/prom-node-exporter:v1.0.1
+    - name: rancher/prom-prometheus:v2.18.2
+    - name: rancher/pushprox-client:v0.1.0-rancher2-client
+    - name: rancher/pushprox-proxy:v0.1.0-rancher2-proxy
+    - name: rancher/rancher-agent:v2.8.3
+    - name: rancher/rancher-csp-adapter:v3.0.1
+    - name: rancher/rancher:v2.8.3
+    - name: rancher/rancher-webhook:v0.4.3
+    - name: rancher/rke2-cloud-provider:v1.28.2-build20231016
+    - name: rancher/rke2-runtime:v1.28.8-rke2r1
+    - name: rancher/rke2-upgrade:v1.28.8-rke2r1
+    - name: rancher/rke-tools:v0.1.96
+    - name: rancher/security-scan:v0.2.14
+    - name: rancher/shell:v0.1.23
+    - name: rancher/system-agent-installer-k3s:v1.28.8-k3s1
+    - name: rancher/system-agent-installer-rke2:v1.28.8-rke2r1
+    - name: rancher/system-agent:v0.3.6-suc
+    - name: rancher/system-upgrade-controller:v0.13.1
+    - name: rancher/ui-plugin-catalog:1.1.4
+    - name: rancher/ui-plugin-operator:v0.1.1
+    - name: rancher/webhook-receiver:v0.2.5
+    - name: rancher/kubectl:v1.20.2
+----
+
+As compared to the 602 container images from before, the slimmed down version only contains 62 container images which makes the new CRB image only about 7GB. A significant difference.
+
+We can now add those images to the EIB image definition to be embedded into the CRB image:
+[,console]
+----
+apiVersion: 1.0
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+      createHomeDir: true
+kubernetes:
+  version: v1.28.7+rke2r1
+  network:
+    apiVIP: 192.168.100.151
+  nodes:
+    - hostname: host1.suse.com
+      type: server
+  manifests:
+    urls:
+    - https://github.com/cert-manager/cert-manager/releases/download/v1.14.2/cert-manager.crds.yaml
+  helm:
+    charts:
+      - name: rancher
+        version: 2.8.3
+        repositoryName: rancher-stable
+        valuesFile: rancher-values.yaml
+        targetNamespace: cattle-system
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: cert-manager
+        installationNamespace: kube-system
+        createNamespace: true
+        repositoryName: jetstack
+        targetNamespace: cert-manager
+        version: 1.14.2
+    repositories:
+      - name: jetstack
+        url: https://charts.jetstack.io
+      - name: rancher-stable
+        url: https://releases.rancher.com/server-charts/stable
+embeddedArtifactRegistry:
+  images:
+    - name: rancher/backup-restore-operator:v4.0.1
+    - name: rancher/calico-cni:v3.27.0-rancher1
+    - name: rancher/cis-operator:v1.0.13
+    - name: rancher/coreos-kube-state-metrics:v1.9.7
+    - name: rancher/coreos-prometheus-config-reloader:v0.38.1
+    - name: rancher/coreos-prometheus-operator:v0.38.1
+    - name: rancher/flannel-cni:v0.3.0-rancher9
+    - name: rancher/fleet-agent:v0.9.2
+    - name: rancher/fleet:v0.9.2
+    - name: rancher/gitjob:v0.9.4
+    - name: rancher/grafana-grafana:7.1.5
+    - name: rancher/hardened-calico:v3.27.2-build20240308
+    - name: rancher/hardened-cluster-autoscaler:v1.8.10-build20240124
+    - name: rancher/hardened-cni-plugins:v1.4.0-build20240122
+    - name: rancher/hardened-coredns:v1.11.1-build20240305
+    - name: rancher/hardened-dns-node-cache:1.22.28-build20240125
+    - name: rancher/hardened-etcd:v3.5.9-k3s1-build20230802
+    - name: rancher/hardened-flannel:v0.24.3-build20240307
+    - name: rancher/hardened-k8s-metrics-server:v0.6.3-build20231009
+    - name: rancher/hardened-kubernetes:v1.28.8-rke2r1-build20240315
+    - name: rancher/hardened-multus-cni:v4.0.2-build20240208
+    - name: rancher/hardened-node-feature-discovery:v0.14.1-build20230926
+    - name: rancher/hardened-whereabouts:v0.6.3-build20240208
+    - name: rancher/helm-project-operator:v0.2.1
+    - name: rancher/istio-kubectl:1.5.10
+    - name: rancher/jimmidyson-configmap-reload:v0.3.0
+    - name: rancher/k3s-upgrade:v1.28.8-k3s1
+    - name: rancher/klipper-helm:v0.8.3-build20240228
+    - name: rancher/klipper-lb:v0.4.7
+    - name: rancher/kube-api-auth:v0.2.1
+    - name: rancher/kubectl:v1.28.3
+    - name: rancher/library-nginx:1.19.2-alpine
+    - name: rancher/local-path-provisioner:v0.0.26
+    - name: rancher/machine:v0.15.0-rancher110
+    - name: rancher/mirrored-cluster-api-controller:v1.4.4
+    - name: rancher/nginx-ingress-controller:nginx-1.9.6-rancher1
+    - name: rancher/pause:3.6
+    - name: rancher/prom-alertmanager:v0.21.0
+    - name: rancher/prometheus-auth:v0.2.2
+    - name: rancher/prometheus-federator:v0.3.4
+    - name: rancher/prom-node-exporter:v1.0.1
+    - name: rancher/prom-prometheus:v2.18.2
+    - name: rancher/pushprox-client:v0.1.0-rancher2-client
+    - name: rancher/pushprox-proxy:v0.1.0-rancher2-proxy
+    - name: rancher/rancher-agent:v2.8.3
+    - name: rancher/rancher-csp-adapter:v3.0.1
+    - name: rancher/rancher:v2.8.3
+    - name: rancher/rancher-webhook:v0.4.3
+    - name: rancher/rke2-cloud-provider:v1.28.2-build20231016
+    - name: rancher/rke2-runtime:v1.28.8-rke2r1
+    - name: rancher/rke2-upgrade:v1.28.8-rke2r1
+    - name: rancher/rke-tools:v0.1.96
+    - name: rancher/security-scan:v0.2.14
+    - name: rancher/shell:v0.1.23
+    - name: rancher/system-agent-installer-k3s:v1.28.8-k3s1
+    - name: rancher/system-agent-installer-rke2:v1.28.8-rke2r1
+    - name: rancher/system-agent:v0.3.6-suc
+    - name: rancher/system-upgrade-controller:v0.13.1
+    - name: rancher/ui-plugin-catalog:1.1.4
+    - name: rancher/ui-plugin-operator:v0.1.1
+    - name: rancher/webhook-receiver:v0.2.5
+    - name: rancher/kubectl:v1.20.2
+----
+
+[NOTE]
+====
+From here, you can customize the deployment for your needs by appending any additional images you require to the `embeddedArtifactRegistry`.
+====
+
+To build the image:
+[,console]
+----
+podman run --rm -it --privileged -v $EIB:/eib \
+registry.opensuse.org/isv/suse/edge/edgeimagebuilder/containerfile/suse/edge-image-builder:1.0.1 \
+build --definition-file eib-iso-definition.yaml
+----
+
+The output should look like:
+[,console]
+----
+Generating image customization components...
+Identifier ................... [SUCCESS]
+Custom Files ................. [SKIPPED]
+Time ......................... [SKIPPED]
+Network ...................... [SUCCESS]
+Groups ....................... [SKIPPED]
+Users ........................ [SUCCESS]
+Proxy ........................ [SKIPPED]
+Rpm .......................... [SKIPPED]
+Systemd ...................... [SKIPPED]
+Elemental .................... [SKIPPED]
+Suma ......................... [SKIPPED]
+Downloading file: dl-manifest-1.yaml 100% |███████████████████████████████████████████████████████████████████████████████████████| (437/437 kB, 17 MB/s)        
+Populating Embedded Artifact Registry... 100% |███████████████████████████████████████████████████████████████████████████████████| (69/69, 26 it/min)           
+Embedded Artifact Registry ... [SUCCESS]
+Keymap ....................... [SUCCESS]
+Configuring Kubernetes component...
+The Kubernetes CNI is not explicitly set, defaulting to 'cilium'.
+Downloading file: rke2_installer.sh
+Downloading file: rke2-images-core.linux-amd64.tar.zst 100% |████████████████████████████████████████████████████████████████████| (780/780 MB, 115 MB/s)        
+Downloading file: rke2-images-cilium.linux-amd64.tar.zst 100% |██████████████████████████████████████████████████████████████████| (367/367 MB, 108 MB/s)        
+Downloading file: rke2.linux-amd64.tar.gz 100% |███████████████████████████████████████████████████████████████████████████████████| (34/34 MB, 117 MB/s)        
+Downloading file: sha256sum-amd64.txt 100% |██████████████████████████████████████████████████████████████████████████████████████| (3.9/3.9 kB, 34 MB/s)        
+Downloading file: dl-manifest-1.yaml 100% |██████████████████████████████████████████████████████████████████████████████████████| (437/437 kB, 106 MB/s)        
+Kubernetes ................... [SUCCESS]
+Certificates ................. [SKIPPED]
+Building ISO image...
+Kernel Params ................ [SKIPPED]
+Image build complete!
+----
+
+If you run into any issues, please see the https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md[documentation] for Edge Image Builder for the process of building, testing, and debugging the build and deployment process.
+
+Once the image has been booted and everything has been deployed, we can run:
+[,console]
+----
+kubectl get all -A
+----
+
+The output should look like this, showing that everything has been successfully deployed:
+[,console]
+----
+NAMESPACE                         NAME                                                        READY   STATUS      RESTARTS   AGE
+cattle-fleet-local-system         pod/fleet-agent-68f4d5d5f7-tdlk7                            1/1     Running     0          34s
+cattle-fleet-system               pod/fleet-controller-85564cc978-pbtvk                       1/1     Running     0          5m51s
+cattle-fleet-system               pod/gitjob-9dc58fb5b-7cwsw                                  1/1     Running     0          5m51s
+cattle-provisioning-capi-system   pod/capi-controller-manager-5c57b4b8f7-wlp5k                1/1     Running     0          4m52s
+cattle-system                     pod/helm-operation-4fk5c                                    0/2     Completed   0          37s
+cattle-system                     pod/helm-operation-6zgbq                                    0/2     Completed   0          4m54s
+cattle-system                     pod/helm-operation-cjds5                                    0/2     Completed   0          5m37s
+cattle-system                     pod/helm-operation-kt5c2                                    0/2     Completed   0          5m21s
+cattle-system                     pod/helm-operation-ppgtw                                    0/2     Completed   0          5m30s
+cattle-system                     pod/helm-operation-tvcwk                                    0/2     Completed   0          5m54s
+cattle-system                     pod/helm-operation-wpxd4                                    0/2     Completed   0          53s
+cattle-system                     pod/rancher-58575f9575-svrg2                                1/1     Running     0          6m34s
+cattle-system                     pod/rancher-webhook-5c6556f7ff-vgmkt                        1/1     Running     0          5m19s
+cert-manager                      pod/cert-manager-6c69f9f796-fkm8f                           1/1     Running     0          7m14s
+cert-manager                      pod/cert-manager-cainjector-584f44558c-wg7p6                1/1     Running     0          7m14s
+cert-manager                      pod/cert-manager-webhook-76f9945d6f-lv2nv                   1/1     Running     0          7m14s
+endpoint-copier-operator          pod/endpoint-copier-operator-58964b659b-l64dk               1/1     Running     0          7m16s
+endpoint-copier-operator          pod/endpoint-copier-operator-58964b659b-z9t9d               1/1     Running     0          7m16s
+kube-system                       pod/cilium-fht55                                            1/1     Running     0          7m32s
+kube-system                       pod/cilium-operator-558bbf6cfd-gwfwf                        1/1     Running     0          7m32s
+kube-system                       pod/cilium-operator-558bbf6cfd-qsxb5                        0/1     Pending     0          7m32s
+kube-system                       pod/cloud-controller-manager-host1.local                    1/1     Running     0          7m21s
+kube-system                       pod/etcd-host1.local                                        1/1     Running     0          7m8s
+kube-system                       pod/helm-install-cert-manager-fvbtt                         0/1     Completed   0          8m12s
+kube-system                       pod/helm-install-endpoint-copier-operator-5kkgw             0/1     Completed   0          8m12s
+kube-system                       pod/helm-install-metallb-zfphb                              0/1     Completed   0          8m12s
+kube-system                       pod/helm-install-rancher-nc4nt                              0/1     Completed   2          8m12s
+kube-system                       pod/helm-install-rke2-cilium-7wq87                          0/1     Completed   0          8m12s
+kube-system                       pod/helm-install-rke2-coredns-nl4gc                         0/1     Completed   0          8m12s
+kube-system                       pod/helm-install-rke2-ingress-nginx-svjqd                   0/1     Completed   0          8m12s
+kube-system                       pod/helm-install-rke2-metrics-server-gqgqz                  0/1     Completed   0          8m12s
+kube-system                       pod/helm-install-rke2-snapshot-controller-crd-r6b5p         0/1     Completed   0          8m12s
+kube-system                       pod/helm-install-rke2-snapshot-controller-ss9v4             0/1     Completed   1          8m12s
+kube-system                       pod/helm-install-rke2-snapshot-validation-webhook-vlkpn     0/1     Completed   0          8m12s
+kube-system                       pod/kube-apiserver-host1.local                              1/1     Running     0          7m29s
+kube-system                       pod/kube-controller-manager-host1.local                     1/1     Running     0          7m30s
+kube-system                       pod/kube-proxy-host1.local                                  1/1     Running     0          7m30s
+kube-system                       pod/kube-scheduler-host1.local                              1/1     Running     0          7m42s
+kube-system                       pod/rke2-coredns-rke2-coredns-6c8d9bb6d-qlwc8               1/1     Running     0          7m31s
+kube-system                       pod/rke2-coredns-rke2-coredns-autoscaler-55fb4bbbcf-j5r2z   1/1     Running     0          7m31s
+kube-system                       pod/rke2-ingress-nginx-controller-4h2mm                     1/1     Running     0          7m3s
+kube-system                       pod/rke2-metrics-server-544c8c66fc-lsrc6                    1/1     Running     0          7m15s
+kube-system                       pod/rke2-snapshot-controller-59cc9cd8f4-4wx75               1/1     Running     0          7m14s
+kube-system                       pod/rke2-snapshot-validation-webhook-54c5989b65-5kp2x       1/1     Running     0          7m15s
+metallb-system                    pod/metallb-controller-5895d8446d-z54lm                     1/1     Running     0          7m15s
+metallb-system                    pod/metallb-speaker-fxwgk                                   1/1     Running     0          7m15s
+
+NAMESPACE                         NAME                                              TYPE           CLUSTER-IP      EXTERNAL-IP       PORT(S)
+         AGE
+cattle-fleet-system               service/gitjob                                    ClusterIP      10.43.30.8      <none>            80/TCP
+         5m51s
+cattle-provisioning-capi-system   service/capi-webhook-service                      ClusterIP      10.43.7.100     <none>            443/TCP
+         4m52s
+cattle-system                     service/rancher                                   ClusterIP      10.43.100.229   <none>            80/TCP,443/TCP
+         6m34s
+cattle-system                     service/rancher-webhook                           ClusterIP      10.43.121.133   <none>            443/TCP
+         5m19s
+cert-manager                      service/cert-manager                              ClusterIP      10.43.140.65    <none>            9402/TCP
+         7m14s
+cert-manager                      service/cert-manager-webhook                      ClusterIP      10.43.108.158   <none>            443/TCP
+         7m14s
+default                           service/kubernetes                                ClusterIP      10.43.0.1       <none>            443/TCP
+         8m26s
+default                           service/kubernetes-vip                            LoadBalancer   10.43.138.138   192.168.100.151   9345:31006/TCP,6443:31599/TCP   8m21s
+kube-system                       service/cilium-agent                              ClusterIP      None            <none>            9964/TCP
+         7m32s
+kube-system                       service/rke2-coredns-rke2-coredns                 ClusterIP      10.43.0.10      <none>            53/UDP,53/TCP
+         7m31s
+kube-system                       service/rke2-ingress-nginx-controller-admission   ClusterIP      10.43.157.19    <none>            443/TCP
+         7m3s
+kube-system                       service/rke2-metrics-server                       ClusterIP      10.43.4.123     <none>            443/TCP
+         7m15s
+kube-system                       service/rke2-snapshot-validation-webhook          ClusterIP      10.43.91.161    <none>            443/TCP
+         7m16s
+metallb-system                    service/metallb-webhook-service                   ClusterIP      10.43.71.192    <none>            443/TCP
+         7m15s
+
+NAMESPACE        NAME                                           DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR            AGE
+kube-system      daemonset.apps/cilium                          1         1         1       1            1           kubernetes.io/os=linux   7m32s
+kube-system      daemonset.apps/rke2-ingress-nginx-controller   1         1         1       1            1           kubernetes.io/os=linux   7m3s
+metallb-system   daemonset.apps/metallb-speaker                 1         1         1       1            1           kubernetes.io/os=linux   7m15s
+
+NAMESPACE                         NAME                                                   READY   UP-TO-DATE   AVAILABLE   AGE
+cattle-fleet-local-system         deployment.apps/fleet-agent                            1/1     1            1           34s
+cattle-fleet-system               deployment.apps/fleet-controller                       1/1     1            1           5m51s
+cattle-fleet-system               deployment.apps/gitjob                                 1/1     1            1           5m51s
+cattle-provisioning-capi-system   deployment.apps/capi-controller-manager                1/1     1            1           4m52s
+cattle-system                     deployment.apps/rancher                                1/1     1            1           6m34s
+cattle-system                     deployment.apps/rancher-webhook                        1/1     1            1           5m19s
+cert-manager                      deployment.apps/cert-manager                           1/1     1            1           7m14s
+cert-manager                      deployment.apps/cert-manager-cainjector                1/1     1            1           7m14s
+cert-manager                      deployment.apps/cert-manager-webhook                   1/1     1            1           7m14s
+endpoint-copier-operator          deployment.apps/endpoint-copier-operator               2/2     2            2           7m16s
+kube-system                       deployment.apps/cilium-operator                        1/2     2            1           7m32s
+kube-system                       deployment.apps/rke2-coredns-rke2-coredns              1/1     1            1           7m31s
+kube-system                       deployment.apps/rke2-coredns-rke2-coredns-autoscaler   1/1     1            1           7m31s
+kube-system                       deployment.apps/rke2-metrics-server                    1/1     1            1           7m15s
+kube-system                       deployment.apps/rke2-snapshot-controller               1/1     1            1           7m14s
+kube-system                       deployment.apps/rke2-snapshot-validation-webhook       1/1     1            1           7m15s
+metallb-system                    deployment.apps/metallb-controller                     1/1     1            1           7m15s
+
+NAMESPACE                         NAME                                                              DESIRED   CURRENT   READY   AGE
+cattle-fleet-local-system         replicaset.apps/fleet-agent-68f4d5d5f7                            1         1         1       34s
+cattle-fleet-system               replicaset.apps/fleet-controller-85564cc978                       1         1         1       5m51s
+cattle-fleet-system               replicaset.apps/gitjob-9dc58fb5b                                  1         1         1       5m51s
+cattle-provisioning-capi-system   replicaset.apps/capi-controller-manager-5c57b4b8f7                1         1         1       4m52s
+cattle-system                     replicaset.apps/rancher-58575f9575                                1         1         1       6m34s
+cattle-system                     replicaset.apps/rancher-webhook-5c6556f7ff                        1         1         1       5m19s
+cert-manager                      replicaset.apps/cert-manager-6c69f9f796                           1         1         1       7m14s
+cert-manager                      replicaset.apps/cert-manager-cainjector-584f44558c                1         1         1       7m14s
+cert-manager                      replicaset.apps/cert-manager-webhook-76f9945d6f                   1         1         1       7m14s
+endpoint-copier-operator          replicaset.apps/endpoint-copier-operator-58964b659b               2         2         2       7m16s
+kube-system                       replicaset.apps/cilium-operator-558bbf6cfd                        2         2         1       7m32s
+kube-system                       replicaset.apps/rke2-coredns-rke2-coredns-6c8d9bb6d               1         1         1       7m31s
+kube-system                       replicaset.apps/rke2-coredns-rke2-coredns-autoscaler-55fb4bbbcf   1         1         1       7m31s
+kube-system                       replicaset.apps/rke2-metrics-server-544c8c66fc                    1         1         1       7m15s
+kube-system                       replicaset.apps/rke2-snapshot-controller-59cc9cd8f4               1         1         1       7m14s
+kube-system                       replicaset.apps/rke2-snapshot-validation-webhook-54c5989b65       1         1         1       7m15s
+metallb-system                    replicaset.apps/metallb-controller-5895d8446d                     1         1         1       7m15s
+
+NAMESPACE     NAME                                                      COMPLETIONS   DURATION   AGE
+kube-system   job.batch/helm-install-cert-manager                       1/1           85s        8m21s
+kube-system   job.batch/helm-install-endpoint-copier-operator           1/1           59s        8m21s
+kube-system   job.batch/helm-install-metallb                            1/1           60s        8m21s
+kube-system   job.batch/helm-install-rancher                            1/1           100s       8m21s
+kube-system   job.batch/helm-install-rke2-cilium                        1/1           44s        8m18s
+kube-system   job.batch/helm-install-rke2-coredns                       1/1           45s        8m18s
+kube-system   job.batch/helm-install-rke2-ingress-nginx                 1/1           76s        8m16s
+kube-system   job.batch/helm-install-rke2-metrics-server                1/1           60s        8m16s
+kube-system   job.batch/helm-install-rke2-snapshot-controller           1/1           61s        8m15s
+kube-system   job.batch/helm-install-rke2-snapshot-controller-crd       1/1           60s        8m16s
+kube-system   job.batch/helm-install-rke2-snapshot-validation-webhook   1/1           60s        8m14s
+----
+
+And when we go to `https://192.168.100.50.sslip.io` and log in with the `adminadminadmin` password that we set earlier, we are greeted with the Rancher dashboard:
+
+image::air-gapped-rancher.png[]
