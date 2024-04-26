@@ -414,24 +414,25 @@ NOTE: You need to reboot to make this package available to your applications. Th
 
 == Bringing it together via Edge Image Builder
 
-Okay, so you have demonstrated full functionality of your applications and GPUs on SLE Micro and you now want to use https://github.com/suse-edge/edge-image-builder[SUSE Edge Image Builder] to provide it all together via a deployable/consumable ISO or RAW disk image. This guide does not explain how to use Edge Image Builder, but it provides the necessary configurations to achieve such a configuration. Below you can find an example of an image definition, along with the necessary Kubernetes configuration files, to ensure that all the required components are deployed out of the box. Here is the directory structure of the Edge Image Builder directory for the example shown below:
+Okay, so you have demonstrated full functionality of your applications and GPUs on SLE Micro and you now want to use <<components-eib>> to provide it all together via a deployable/consumable ISO or RAW disk image. This guide does not explain how to use Edge Image Builder, but it provides the necessary configurations to build such image. Below you can find an example of an image definition, along with the necessary Kubernetes configuration files, to ensure that all the required components are deployed out of the box. Here is the directory structure of the Edge Image Builder directory for the example shown below:
 
 [,shell]
 ----
 .
 ├── base-images
-│   ├── SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM.install.iso
+│   └── SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso
 ├── eib-config-iso.yaml
 ├── kubernetes
 │   ├── config
 │   │   └── server.yaml
 │   ├── helm
-│   │   └── nvidia-device-plugin.yaml
+│   │   └── values
+│   │       └── nvidia-device-plugin.yaml
 │   └── manifests
 │       └── nvidia-runtime-class.yaml
-├── rpms
-│   ├── gpg-keys
-│   │   └── nvidia-container-toolkit.key
+└── rpms
+    └── gpg-keys
+        └── nvidia-container-toolkit.key
 ----
 
 Let us explore those files. First, here is a sample image definition for a single-node cluster running K3s that deploys the utilities and OpenGL packages, too (`eib-config-iso.yaml`):
@@ -442,7 +443,7 @@ apiVersion: 1.0
 image:
   arch: x86_64
   imageType: iso
-  baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM.install.iso
+  baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso
   outputImageName: deployimage.iso
 operatingSystem:
   time:
@@ -452,7 +453,6 @@ operatingSystem:
         - 2.suse.pool.ntp.org
   isoConfiguration:
     installDevice: /dev/sda
-    unattended: true
   users:
     - username: root
       encryptedPassword: $6$XcQN1xkuQKjWEtQG$WbhV80rbveDLJDz1c93K5Ga9JDjt3mF.ZUnhYtsS7uE52FR8mmT8Cnii/JPeFk9jzQO6eapESYZesZHO9EslD1
@@ -468,15 +468,27 @@ operatingSystem:
     sccRegistrationCode: <snip>
 kubernetes:
   version: v1.28.8+k3s1
+  helm:
+    charts:
+      - name: nvidia-device-plugin
+        version: v0.14.5
+        installationNamespace: kube-system
+        targetNamespace: nvidia-device-plugin
+        createNamespace: true
+        valuesFile: nvidia-device-plugin.yaml
+        repositoryName: nvidia
+    repositories:
+      - name: nvidia
+        url: https://nvidia.github.io/k8s-device-plugin
 ----
 
 NOTE: This is just an example. You may need to customize it to fit your requirements and expectations. Additionally, if using SLE Micro, you need to provide your own `sccRegistrationCode` to resolve package dependencies and pull the NVIDIA drivers.
 
-Besides this, we need to add additional components so they get loaded by Kubernetes at boot time. The EIB directory needs a `kubernetes` directory first, with subdirectories for the configuration, Helm charts and any additional manifests required:
+Besides this, we need to add additional components, so they get loaded by Kubernetes at boot time. The EIB directory needs a `kubernetes` directory first, with subdirectories for the configuration, Helm chart values and any additional manifests required:
 
 [,shell]
 ----
-mkdir -p kubernetes/config kubernetes/helm kubernetes/manifests
+mkdir -p kubernetes/config kubernetes/helm/values kubernetes/manifests
 ----
 
 Let us now set up the (optional) Kubernetes configuration by choosing a CNI (which defaults to Cilium if unselected) and enabling SELinux:
@@ -502,34 +514,15 @@ handler: nvidia
 EOF
 ----
 
-We use the built-in Helm Controller to deploy the NVIDIA Device Plugin through Kubernetes itself. We provide the configuration, and it is applied at boot:
+We use the built-in Helm Controller to deploy the NVIDIA Device Plugin through Kubernetes itself.
+Let's provide the runtime class in the values file for the chart:
 
 [,shell]
 ----
-cat << EOF > kubernetes/helm/nvidia-device-plugin.yaml
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: nvidia-device-plugin
----
-apiVersion: helm.cattle.io/v1
-kind: HelmChart
-metadata:
-  name: nvidia-device-plugin
-  namespace: nvidia-device-plugin
-spec:
-  repo: https://nvidia.github.io/k8s-device-plugin
-  chart: nvidia-device-plugin
-  targetNamespace: nvidia-device-plugin
-  version: v0.14.5
-  set:
-    runtimeClassName: nvidia
-    allowDefaultNamespace: "true"
+cat << EOF > kubernetes/helm/values/nvidia-device-plugin.yaml
+runtimeClassName: nvidia
 EOF
 ----
-
-NOTE: We use `allowDefaultNamespace: "true"` in the above example only for initial template parsing during the image build process so we can identify the required images that need to be pulled into the Embedded Registry for air-gapping purposes (default behavior for Edge). When the template is deployed at boot time, the `targetNamespace` is used instead.
 
 We need to grab the NVIDIA Container Toolkit RPM public key before proceeding:
 
@@ -543,8 +536,9 @@ All the required artifacts, including Kubernetes binary, container images, Helm 
 
 [,shell]
 ----
-podman run --rm --privileged -it -v /path/to/eib-files/:/eib eib:dev build \
-  -config-file eib-config-iso.yaml -config-dir /eib -build-dir /eib/_build
+podman run --rm --privileged -it -v /path/to/eib-files/:/eib \
+registry.suse.com/edge/edge-image-builder:1.0.1 \
+build --definition-file eib-config-iso.yaml
 ----
 
 For further instructions, please see the https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md[documentation] for Edge Image Builder.
