@@ -1,5 +1,5 @@
 [#atip-automated-provisioning]
-== Automated provisioning with Direct network provisioning
+== Automated Direct Network Provisioning
 
 ifdef::env-github[]
 :imagesdir: ../images/
@@ -14,27 +14,20 @@ endif::[]
 
 Direct network provisioning is a feature that allows you to automate the provisioning of downstream clusters. This feature is useful when you have many downstream clusters to provision, and you want to automate the process.
 
-The management cluster contains the following components:
+A <<atip-management-cluster,management cluster>> automates deployment of the following components:
 
 * `SUSE Linux Enterprise Micro RT` as the OS. Depending on the use case, configurations like networking, storage, users and kernel arguments can be customized.
 * `RKE2` as the Kubernetes cluster. The default `CNI` plug-in is `Cilium`. Depending on the use case, certain `CNI` plug-ins can be used, such as `Cilium+Multus`.
 * `Longhorn` as the storage solution.
 * `NeuVector` as the security solution.
-
-Depending on the use case, `MetalLB` can be used as the load balancer for the Kubernetes cluster to enable high availability on multi-node clusters.
-
-* `MetalLB` as the component to deploy multi-node clusters using a load balancer.
+* `MetalLB` can be used as the load balancer for highly available multi-node clusters.
 
 [NOTE]
 ====
 For more information about `SUSE Linux Enterprise Micro`, see <<components-slmicro>>
-
 For more information about `RKE2`, see <<components-rke2>>
-
 For more information about `Longhorn`, see <<components-longhorn>>
-
 For more information about `NeuVector`, see <<components-neuvector>>
-
 ====
 
 The following sections describe the different direct network provisioning workflows and some additional features that can be added to the provisioning process:
@@ -51,17 +44,26 @@ The following sections describe the different direct network provisioning workfl
 
 * xref:atip-private-registry[]
 
-
 [#eib-edge-image]
-=== Generating the downstream image using EIB
+=== Prepare Downstream Cluster Image
 
-Using `Edge Image Builder` to create the image to be used in the downstream clusters, a lot of configurations can be customized. But in this guide, we cover the minimal configurations necessary to set up the downstream cluster.
-Edge Image Builder is typically run from inside a container, so, if you do not already have a way to run containers, we need to start by installing a container runtime such as https://podman.io[Podman] or https://rancherdesktop.io[Rancher Desktop]. For this document, we assume you already have a container runtime available.
+<<components-eib, Edge Image Builder>> is used to prepare a modified SLEMicro base image which is provisioned on downstream cluster hosts.
 
-*Directory structure*
+A lot of configuration via Edge Image Builder is possible, but in this guide, we cover the minimal configurations necessary to set up the downstream cluster.
 
-When running the `EIB`, a directory is mounted from the host, so the first thing to do is to create a directory structure to be used by the `EIB` to store the configuration files and the image itself.
-This directory has the following structure:
+==== Prerequisistes
+
+* A container runtime such as https://podman.io[Podman] or https://rancherdesktop.io[Rancher Desktop] is required to run Edge Image Builder.
+* The base image `SLE-Micro.x86_64-5.5.0-Default-RT-GM.raw` must be downloaded from the https://scc.suse.com/[SUSE Customer Center] or the https://www.suse.com/download/sle-micro/[SUSE Download page].
+
+==== Image Configuration
+
+When running Edge Image Builder, a directory is mounted from the host, so it is necessary to create a directory structure to to store the configuration files used to define the target image.
+
+* `downstream-cluster-config.yaml` is the image definition file, see <<quickstart-eib>> for more details.
+* The base image when downloaded is `xz` compressed, it must be uncompressed with `unxz` and copied/moved under the `base-images` folder.
+* The `network` folder is optional, see <<add-network-eib>> for more details.
+* The custom/scripts directory contains scripts to be run on first-boot, currently a `growfs.sh` script is required to resize the OS root partition on deployment
 
 [,console]
 ----
@@ -75,19 +77,9 @@ This directory has the following structure:
         └ growfs.sh
 ----
 
-Where the `network` folder is optional, just in case you need to customize for DHCP-less, or advanced networking scenarios (covered in the following sections).
+===== Downstream cluster image definition file
 
-
-[NOTE]
-====
-The image `SLE-Micro.x86_64-5.5.0-Default-RT-GM.raw` must be downloaded from the https://scc.suse.com/[SUSE Customer Center] or the https://www.suse.com/download/sle-micro/[SUSE Download page], and it needs to be located under the `base-images` folder.
-====
-
-*Downstream cluster config file*
-
-The `downstream-cluster-config.yaml` file is the main configuration file for the downstream cluster.
-
-* Depending on the use case, the common configuration file for all scenarios contains the following information:
+The `downstream-cluster-config.yaml` file is the main configuration file for the downstream cluster image, the following is a minimal example for deployment via Metal^3^
 
 [,yaml]
 ----
@@ -110,17 +102,55 @@ operatingSystem:
       sshKeys:
       - ${USERKEY1}
 ----
-Where the `$\{ROOT_PASSWORD\}` is the encrypted password for the root user. Just for testing purposes, to generate the encrypted password, use the following command:
+
+`$\{ROOT_PASSWORD\}` is the encrypted password for the root user, which can be useful for test/debugging.  It can be generated with the `openssl passwd -6 PASSWORD` command
+
+For the production environments, it is recommended to use the SSH keys that can be added to the users block replacing the `$\{USERKEY1\}` with the real SSH keys.
+
+[NOTE]
+====
+`net.ifnames=1` enables https://documentation.suse.com/smart/network/html/network-interface-predictable-naming/index.html[Predictable Network Interface Naming]
+
+This matches the default configuration for the metal3 chart, but the setting must match the configured chart `predictableNicNames` value.
+
+Also note `ignition.platform.id=openstack` is mandatory, without this argument SLEMicro configuration via ignition will fail in the Metal^3^ automated flow.
+====
+
+[#add-custom-script-growfs]
+===== Growfs script
+
+Currently is a custom script (`custom/scripts/growfs.sh`) which is required to grow the file system to the match the disk size on first-boot after provisioning. The `growfs.sh` script contains the following information:
 
 [,shell]
 ----
-openssl passwd -6 PASSWORD
+#!/bin/bash
+growfs() {
+  mnt="$1"
+  dev="$(findmnt --fstab --target ${mnt} --evaluate --real --output SOURCE --noheadings)"
+  # /dev/sda3 -> /dev/sda, /dev/nvme0n1p3 -> /dev/nvme0n1
+  parent_dev="/dev/$(lsblk --nodeps -rno PKNAME "${dev}")"
+  # Last number in the device name: /dev/nvme0n1p42 -> 42
+  partnum="$(echo "${dev}" | sed 's/^.*[^0-9]\([0-9]\+\)$/\1/')"
+  ret=0
+  growpart "$parent_dev" "$partnum" || ret=$?
+  [ $ret -eq 0 ] || [ $ret -eq 1 ] || exit 1
+  /usr/lib/systemd/systemd-growfs "$mnt"
+}
+growfs /
 ----
 
-For the production environment, the recommendation is to use the SSH keys that can be added to the users block replacing the `$\{USERKEY1\}` with the real SSH keys.
+[NOTE]
+====
+Add your own custom scripts to be executed during the provisioning process using the same approach.
+For more information, see <<quickstart-eib>>.
+
+The bug related to this workaround is https://bugzilla.suse.com/show_bug.cgi?id=1217430
+====
 
 [#add-telco-feature-eib]
-* If you need to configure Telco features like `dpdk`, `sr-iov` or `FEC`, the following file includes the packages required to enable these features:
+===== Additional configuration for Telco workloads
+
+To enable Telco features like `dpdk`, `sr-iov` or `FEC`, additional packages may be required as shown in the following example.
 
 [,yaml]
 ----
@@ -154,18 +184,16 @@ operatingSystem:
     sccRegistrationCode: ${SCC_REGISTRATION_CODE}
 ----
 
-
-Where `$\{SCC_REGISTRATION_CODE\}` is the registration code for the SUSE Customer Center, and the package list contains the minimum packages to be used for the Telco profiles.
+Where `$\{SCC_REGISTRATION_CODE\}` is the registration code copied from https://scc.suse.com/[SUSE Customer Center], and the package list contains the minimum packages to be used for the Telco profiles.
 To use the `pf-bb-config` package (to enable the `FEC` feature and binding with drivers), the `additionalRepos` block must be included to add the `SUSE Edge Telco` repository.
 
-[#advanced-network-configuration-eib]
-
 [#add-network-eib]
-* If you need to configure the networking for a DHCP-less or more networking advanced scenarios, the following folder and file should be included with the networking configuration.
+===== Additional script for Advanced Network Configuration
 
-In the `network` folder, the `configure-network.sh` file contains the networking configuration for the downstream cluster.
-The following script tries to statically configure a NIC when the bare-metal object has been created with a secret containing the static network configuration covered in the xref:advanced-network-configuration[advanced network configuration] section.
-Also, it uses the networking information to generate the network configuration for the downstream cluster using the `nmc` https://github.com/suse-edge/nm-configurator[tool].
+If you need to configure static IPs or more advanced networking scenarios, as described in <<advanced-network-configuration>> the following additional configuration is required.
+
+In the `network` folder, create the following `configure-network.sh` file - this consumes configuration drive data on first-boot, and configures the
+host networking using the https://github.com/suse-edge/nm-configurator[NM Configurator tool].
 
 [,shell]
 ----
@@ -202,36 +230,7 @@ umount /mnt
 ./nmc apply --config-dir /tmp/nmc/generated
 ----
 
-[#add-custom-script-growfs]
-* There is a custom script (`custom/scripts/growfs.sh`) which is required to grow the file system to the disk size once it is installed during the process. The `growfs.sh` script contains the following information:
-
-[,shell]
-----
-#!/bin/bash
-growfs() {
-  mnt="$1"
-  dev="$(findmnt --fstab --target ${mnt} --evaluate --real --output SOURCE --noheadings)"
-  # /dev/sda3 -> /dev/sda, /dev/nvme0n1p3 -> /dev/nvme0n1
-  parent_dev="/dev/$(lsblk --nodeps -rno PKNAME "${dev}")"
-  # Last number in the device name: /dev/nvme0n1p42 -> 42
-  partnum="$(echo "${dev}" | sed 's/^.*[^0-9]\([0-9]\+\)$/\1/')"
-  ret=0
-  growpart "$parent_dev" "$partnum" || ret=$?
-  [ $ret -eq 0 ] || [ $ret -eq 1 ] || exit 1
-  /usr/lib/systemd/systemd-growfs "$mnt"
-}
-growfs /
-----
-
-[NOTE]
-====
-Add your own custom scripts to be executed during the provisioning process.
-For more information, see <<components-eib>>.
-
-====
-
-
-*Image creation*
+==== Image Creation
 
 Once the directory structure is prepared following the previous sections, run the following command to build the image:
 
@@ -244,6 +243,8 @@ podman run --rm --privileged -it -v $PWD:/eib \
 
 This creates the output ISO image file named `eibimage-slemicro55rt-telco.raw`, based on the definition described above.
 
+The output image must then be made available via a webserver, either the media-server container enabled via the <<metal3-media-server,Management Cluster Documentation>>
+or some other locally accessible server.  In the examples below we refer to this server as `imagecache.local:8080`
 
 [#single-node]
 === Downstream cluster provisioning with Direct network provisioning (single-node)
@@ -831,15 +832,15 @@ $ kubectl apply -f capi-provisioning-example.yaml
 
 
 [#advanced-network-configuration]
-=== Advanced network configuration
+=== Advanced Network Configuration
 
-The direct network provisioning workflow allows to automate the provisioning of the downstream clusters using advanced network configurations like DHCP-less, bond+vlans. The following sections describe the differences that can be used to automate the provisioning of the downstream clusters using advanced network configuration.
+The direct network provisioning workflow allows downstream clusters network configurations such as static IPs, bonding, vlans, etc.
+
+The following sections describe the additional steps required to enable provisioning downstream clusters using advanced network configuration.
 
 *Requirements*
 
-- The image generated using `EIB` has to include the network folder and the script following xref:add-network-eib[this section].
-- The image generated using `EIB`, as described in the xref:eib-edge-image[previous section], has to be located in the management cluster exactly on the path you configured on xref:metal3-media-server[this section].
-- The management server created and available to be used on the following sections. For more information, refer to the Management Cluster section: <<atip-management-cluster>>.
+- The image generated using `EIB` has to include the network folder and the script following <<add-network-eib,this section>>.
 
 *Configuration*
 
