@@ -12,29 +12,32 @@ endif::[]
 
 == Intro
 
-This guide will show how to deploy Rancher and NeuVector completely air-gapped on SLE Micro 5.5+ utilizing <<components-eib,Edge Image Builder(EIB)>>. With this, you'll be able to boot into a customized, ready to boot (CRB) image created by EIB and have Rancher and/or NeuVector deployed on a RKE2/K3s cluster without an internet connection or any manual steps. This configuration is highly desirable for customers that want to pre-bake all artifacts required for deployment into the CRB image so that the artifacts are immediately available on boot. This guide will explain configuring EIB and verifying the Rancher/NeuVector deployments.
+This guide will show how to deploy several of the SUSE Edge components completely air-gapped on SLE Micro 5.5 utilizing <<components-eib,Edge Image Builder(EIB)>>. With this, you'll be able to boot into a customized, ready to boot (CRB) image created by EIB and have the specified components deployed on a RKE2/K3s cluster without an Internet connection or any manual steps. This configuration is highly desirable for customers that want to pre-bake all artifacts required for deployment into their OS image so they are immediately available on boot.
 
-It's important to note that the <<components-rancher,Rancher>> deployment that will be demonstrated will be highly slimmed down for demonstration purposes. For your actual deployments, additional artifacts may be necessary depending on your configuration. This guide will demonstrate the process of adding artifacts on an as-needed basis.
+We will cover an air-gapped installation of:
 
-Further information about <<components-rancher,Rancher>> and <<components-neuvector,NeuVector>> can be found in the links to their respective guides.
+* <<components-rancher>>
+* <<components-neuvector>>
 
 [WARNING]
 ====
-EIB will parse and pre-download all images referenced in the provided Helm charts and Kubernetes manifests. However, some of those may be attempting to pull container images and create Kubernetes resources based on those at runtime. In these cases we have to manually specify the necessary images in the definition file if we want to set up a completely airgapped environment.
+EIB will parse and pre-download all images referenced in the provided Helm charts and Kubernetes manifests. However, some of those may be attempting to pull container images and create Kubernetes resources based on those at runtime. In these cases we have to manually specify the necessary images in the definition file if we want to set up a completely air-gapped environment.
 ====
 
 == Prerequisites
 
-If you're following this guide, it's assumed that you are already familiar with <<components-eib,Edge Image Builder(EIB)>>, if not, please follow the EIB <<quickstart-eib,quick start guide>> to familiarize yourself with the process.
+If you're following this guide, it's assumed that you are already familiar with <<components-eib,EIB>>. If not, please follow the <<quickstart-eib,quick start guide>> to better understand the concepts shown in practice below.
 
 == Libvirt Network Configuration
 
 [NOTE] 
 ====
-To demo the air-gapped deployment, this guide will be done using a simulated air-gapped libvirt network and the following configuration will be tailored to that. For your own deployments, you may have to modify the `host1.local.yaml` configuration that will be introduced in the next step.
+To demo the air-gapped deployment, this guide will be done using a simulated air-gapped `libvirt` network and the following configuration will be tailored to that. For your own deployments, you may have to modify the `host1.local.yaml` configuration that will be introduced in the next step.
 ====
 
-If you would like to use the same libvirt network configuration, the steps for it are as follows:
+If you would like to use the same `libvirt` network configuration, follow along. If not, skip to <<config-dir-creation>>.
+
+Let's create an isolated network configuration with an IP address range `192.168.122.1/24` for DHCP:
 
 [,shell]
 ----
@@ -51,21 +54,23 @@ cat << EOF > isolatednetwork.xml
 EOF
 ----
 
+Now, the only thing left is to create the network and start it:
+
 [,shell]
 ----
 virsh net-define isolatednetwork.xml
 virsh net-start isolatednetwork
 ----
 
-== Base EIB Directory Configuration
+== Base Directory Configuration [[config-dir-creation]]
 
-This guide features both Rancher and NeuVector deployments, but the base directory configuration for each will be the same, so we will set that up here.
-
-For simplicity, setting the variable `$CONFIG_DIR` to the full path of where you want the configuration directory is recommended, e.g. `CONFIG_DIR=$HOME/config`.
+The base directory configuration is the same across all different components, so we will set it up here.
 
 We will first create the necessary directories:
+
 [,shell]
 ----
+export CONFIG_DIR=$HOME/config
 mkdir -p $CONFIG_DIR/base-images
 mkdir -p $CONFIG_DIR/network
 mkdir -p $CONFIG_DIR/kubernetes/helm/values
@@ -73,10 +78,17 @@ mkdir -p $CONFIG_DIR/kubernetes/helm/values
 
 Make sure to add whichever base image you plan to use into the `base-images` directory. This guide will focus on the Self Install ISO found https://www.suse.com/download/sle-micro/[here].
 
+Let's copy the downloaded image:
+
 [,shell]
 ----
 cp SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso $CONFIG_DIR/base-images/slemicro.iso
 ----
+
+[NOTE]
+=====
+EIB is never going to modify the base image input.
+=====
 
 Let's create a file containing the desired network configuration:
 
@@ -116,27 +128,78 @@ interfaces:
 EOF
 ----
 
-This configures a single ethernet interface with a static IP of `192.168.100.50`.
+This configuration ensures the following are present on the provisioned systems:
+
+* an Ethernet interface with a static IP address
+* routing
+* DNS
+* hostname (`host1.local`)
 
 The resulting file structure should now look like:
 [,console]
 ----
 ├── kubernetes/
-│   └ helm/
-│     └ values/
+│   └── helm/
+│       └── values/
 ├── base-images/
-│   └ slemicro.iso
+│   └── slemicro.iso
 └── network/  
-    └ host1.local.yaml
+    └── host1.local.yaml
 ----
 
-== Rancher Installation Using Edge Image Builder
+== Base Definition File
 
-https://github.com/rancher/rancher/releases/tag/v2.8.3[Rancher v2.8.3 release assets] contains `rancher-images.txt` which lists all of the images required by Rancher for an air-gapped installation.
+Edge Image Builder is using _definition files_ to modify the SLE Micro images. These files contain the majority of configurable options.
+Many of these options will be repeated across the different component sections, so we will list and explain those here.
 
-There are about 602 container images here which means that the resulting CRB image will be roughly 28GB+. For our Rancher configuration, we will strip away any images not necessary. From there, you can add back any images you may need for your deployments.
+[TIP]
+====
+Full list of customization options in the definition file can be found in the https://github.com/suse-edge/edge-image-builder/blob/release-1.0/docs/building-images.md#image-definition-file[upstream documentation]
+====
+
+We will take a look at the following fields which will be present in all definition files:
+
+[,yaml]
+----
+apiVersion: 1.0
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+kubernetes:
+  version: v1.28.8+rke2r1
+embeddedArtifactRegistry:
+  images:
+    - ...
+----
+
+The `image` section is required, and it specifies the input image, its architecture and type, as well as what the output image will be called.
+
+The `operatingSystem` section is optional, and contains configuration to enable login on the provisioned systems with the `root/eib` username/password.
+
+The `kubernetes` section is optional, and it defines the Kubernetes type and version. We are going to use Kubernetes 1.28.8 and RKE2 by default.
+Use `kubernetes.version: v1.28.8+k3s1` if K3s is desired instead. Unless explicitly configured via the `kubernetes.nodes` fields, all clusters we bootstrap in this guide will be single-node ones.
+
+The `embeddedArtifactRegistry` will manually list all images which are only referenced and pulled at runtime for the specific component.
+
+== Rancher Installation
+
+[NOTE]
+====
+The <<components-rancher,Rancher>> deployment that will be demonstrated will be highly slimmed down for demonstration purposes. For your actual deployments, additional artifacts may be necessary depending on your configuration. This guide will demonstrate the process of adding artifacts on an as-needed basis.
+====
+
+The release assets of https://github.com/rancher/rancher/releases/tag/v2.8.3[Rancher v2.8.3] contain= a `rancher-images.txt` file which lists all the images required for an air-gapped installation.
+
+There are about 602 container images in total which means that the resulting CRB image would be roughly 28GB+. For our Rancher configuration, we will strip down that list to the smallest working configuration. From there, you can add back any images you may need for your deployments.
 
 We will create the EIB definition file and include the stripped down images list:
+
 [,console]
 ----
 apiVersion: 1.0
@@ -242,7 +305,7 @@ embeddedArtifactRegistry:
     - name: registry.rancher.com/rancher/kubectl:v1.20.2
 ----
 
-This definition file sets the username/password of the CRB image to `root/eib` respectively. Additionally, it configures RKE2 version `v1.28.8+rke2r1` with the Rancher and cert-manager Helm charts. From here, you can customize the deployment for your needs by appending any additional images you require to the `embeddedArtifactRegistry`. As compared to the 602 container images from before, the slimmed down version only contains 62 container images which makes the new CRB image only about 7GB.
+As compared to the full list of 602 container images, this slimmed down version only contains 62 which makes the new CRB image only about 7GB.
 
 We also need to create a Helm values file for Rancher:
 [,shell]
@@ -284,18 +347,18 @@ Rpm .......................... [SKIPPED]
 Systemd ...................... [SKIPPED]
 Elemental .................... [SKIPPED]
 Suma ......................... [SKIPPED]
-Downloading file: dl-manifest-1.yaml 100% |███████████████████████████████████████████████████████████████████████████████████████| (437/437 kB, 17 MB/s)        
-Populating Embedded Artifact Registry... 100% |███████████████████████████████████████████████████████████████████████████████████| (69/69, 26 it/min)           
+Downloading file: dl-manifest-1.yaml 100% (437/437 kB, 17 MB/s)
+Populating Embedded Artifact Registry... 100% (69/69, 26 it/min)
 Embedded Artifact Registry ... [SUCCESS]
 Keymap ....................... [SUCCESS]
 Configuring Kubernetes component...
 The Kubernetes CNI is not explicitly set, defaulting to 'cilium'.
 Downloading file: rke2_installer.sh
-Downloading file: rke2-images-core.linux-amd64.tar.zst 100% |████████████████████████████████████████████████████████████████████| (780/780 MB, 115 MB/s)        
-Downloading file: rke2-images-cilium.linux-amd64.tar.zst 100% |██████████████████████████████████████████████████████████████████| (367/367 MB, 108 MB/s)        
-Downloading file: rke2.linux-amd64.tar.gz 100% |███████████████████████████████████████████████████████████████████████████████████| (34/34 MB, 117 MB/s)        
-Downloading file: sha256sum-amd64.txt 100% |██████████████████████████████████████████████████████████████████████████████████████| (3.9/3.9 kB, 34 MB/s)        
-Downloading file: dl-manifest-1.yaml 100% |██████████████████████████████████████████████████████████████████████████████████████| (437/437 kB, 106 MB/s)        
+Downloading file: rke2-images-core.linux-amd64.tar.zst 100% (780/780 MB, 115 MB/s)
+Downloading file: rke2-images-cilium.linux-amd64.tar.zst 100% (367/367 MB, 108 MB/s)
+Downloading file: rke2.linux-amd64.tar.gz 100% (34/34 MB, 117 MB/s)
+Downloading file: sha256sum-amd64.txt 100% (3.9/3.9 kB, 34 MB/s)
+Downloading file: dl-manifest-1.yaml 100% (437/437 kB, 106 MB/s)
 Kubernetes ................... [SUCCESS]
 Certificates ................. [SKIPPED]
 Building ISO image...
@@ -303,9 +366,8 @@ Kernel Params ................ [SKIPPED]
 Image build complete!
 ----
 
-If you run into any issues, please see the https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md[documentation] for Edge Image Builder for the process of building, testing, and debugging the build and deployment process.
+Once a node using the built image is provisioned, we can verify the Rancher installation:
 
-Once the image has been booted and everything has been deployed, we can run:
 [,shell]
 ----
 /var/lib/rancher/rke2/bin/kubectl get all -A --kubeconfig /etc/rancher/rke2/rke2.yaml
@@ -452,3 +514,7 @@ kube-system   job.batch/helm-install-rke2-snapshot-validation-webhook   1/1     
 And when we go to `https://192.168.100.50.sslip.io` and log in with the `adminadminadmin` password that we set earlier, we are greeted with the Rancher dashboard:
 
 image::air-gapped-rancher.png[]
+
+== Troubleshooting
+
+If you run into any issues while building the images or are looking to further test and debug the process, please refer to the https://github.com/suse-edge/edge-image-builder/tree/release-1.0/docs[upstream documentation].
