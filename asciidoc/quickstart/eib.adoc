@@ -11,19 +11,21 @@ ifdef::env-github[]
 :warning-caption: :warning:
 endif::[]
 
-Edge Image Builder (EIB) is a tool that streamlines the process of generating customized, ready-to-boot (CRB) disk images for bootstrapping machines, even in air-gapped scenarios.
+Edge Image Builder (EIB) is a tool that streamlines the process of generating customized, ready-to-boot (CRB) disk images for bootstrapping machines, even in fully air-gapped scenarios. EIB is used to create deployment images for use in all three of the SUSE Edge deployment footprints, as it's flexible enough to offer the smallest customizations, e.g. adding a user or setting the timezone, through offering a comprehensively configured image that sets up, for example, complex networking configurations, deploys multi-node Kubernetes clusters, deploys customer workloads, and registers to the centralized management platform via Rancher/Elemental and SUSE Manager. EIB runs as in a container image, making it incredibly portable across platforms and ensuring that all of the required dependencies are self-contained, having a very minimal impact on the installed packages of the system that's being used to operate the tool.
 
 For more information, read the <<components-eib,Edge Image Builder Introduction>>.
 
 == Prerequisites
 
-* An x86_64 physical host (or virtual machine) running SLES 15 SP5 or openSUSE Leap 15.5
+* An x86_64 physical host (or virtual machine) running SLES 15 SP5, openSUSE Leap 15.5, or openSUSE Tumbleweed.
 * An available container runtime (e.g. Podman)
-* A copy of the SLE Micro 5.5 ISO image found https://www.suse.com/download/sle-micro/[here]
+* A downloaded copy of the latest SLE Micro 5.5 SelfInstall "GM2" ISO image found https://www.suse.com/download/sle-micro/[here].
+
+NOTE: Other operating systems may function so long as a compatible container runtime is available, but testing on other platforms has not been extensive. The documentation focuses on Podman, but the same functionality should be able to be achieved with Docker.
 
 === Getting the EIB Image
 
-The EIB container image is publicly available and can be downloaded from the SUSE Edge registry by running:
+The EIB container image is publicly available and can be downloaded from the SUSE Edge registry by running the following command on your image build host:
 
 [,shell]
 ----
@@ -32,8 +34,7 @@ podman pull registry.suse.com/edge/edge-image-builder:1.0.1
 
 == Creating the image configuration directory
 
-EIB containers require mounting a configuration directory from the host.
-This directory must follow a specific structure. Let's create it:
+As EIB runs within a container, we need to mount a configuration directory from the host, enabling you to specify your desired configuration, and during the build process EIB has access to any required input files and supporting artifacts. This directory must follow a specific structure. Let's create it, assuming that this directory will exist in your home directory, and called "eib":
 
 [,shell]
 ----
@@ -41,14 +42,18 @@ export CONFIG_DIR=$HOME/eib
 mkdir -p $CONFIG_DIR/base-images
 ----
 
-We will now ensure that the downloaded base image copy is moved over to the configuration directory:
+In the previous step we created a "base-images" directory that will host the SLE Micro 5.5 input image, let's ensure that the downloaded image is copied over to the configuration directory:
 
 [,shell]
 ----
-mv /path/to/downloads/SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso $CONFIG_DIR/base-images/slemicro.iso
+cp /path/to/downloads/SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso $CONFIG_DIR/base-images/slemicro.iso
 ----
 
-> NOTE: EIB is never going to modify the base image input.
+
+[NOTE]
+====
+During the EIB run, the original base image is *not* modified; a new and customized version is created with the desired configuration in the root of the EIB config directory.
+====
 
 The configuration directory at this point should look like the following:
 
@@ -60,15 +65,7 @@ The configuration directory at this point should look like the following:
 
 == Creating the image definition file
 
-The definition file describes the majority of configurable options that the Edge Image Builder supports.
-
-[NOTE]
-====
-The following instructions outline a non-comprehensive example.
-Please refer to the https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md[upstream building images guide] for details.
-====
-
-Let's start with a very basic definition file for our OS image:
+The definition file describes the majority of configurable options that the Edge Image Builder supports, a full example of options can be found https://github.com/suse-edge/edge-image-builder/blob/main/pkg/image/testdata/full-valid-example.yaml[here], and we would recommend that you take a look at the https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md[upstream building images guide] for more comprehensive examples than the one we're going to run through below. Let's start with a very basic definition file for our OS image:
 
 [,console]
 ----
@@ -82,8 +79,8 @@ image:
 EOF
 ----
 
-This definition specifies generating an image for an `x86_64` system. The base image to be modified is an `ISO` image named `slemicro.iso`,
-expected to be located at `$CONFIG_DIR/base-images/slemicro.iso`. It also outlines that after EIB finishes modifying the image, the CRB image will be named `eib-image.iso`.
+This definition specifies that we're generating an output image for an `x86_64` based system. The image that will be used as the base for further modification is an `iso` image named `slemicro.iso`,
+expected to be located at `$CONFIG_DIR/base-images/slemicro.iso`. It also outlines that after EIB finishes modifying the image, the output image will be named `eib-image.iso`, and by default will reside in `$CONFIG_DIR`.
 
 Now our directory structure should look like:
 [,console]
@@ -93,11 +90,11 @@ Now our directory structure should look like:
     └── slemicro.iso
 ----
 
+In the following sections we'll walk through a few examples of common operations:
+
 === Configuring OS Users
 
-EIB allows us to preconfigure users with login information, such as passwords or SSH keys.
-
-First, create an encrypted password:
+EIB allows you to preconfigure users with login information, such as passwords or SSH keys, including setting a fixed root password. As part of this example we're going to fix the root password, and the first step is to use `OpenSSL` to create a one-way encrypted password:
 
 [,console]
 ----
@@ -111,8 +108,7 @@ This will output something similar to:
 $6$G392FCbxVgnLaFw1$Ujt00mdpJ3tDHxEg1snBU3GjujQf6f8kvopu7jiCBIhRbRvMmKUqwcmXAKggaSSKeUUOEtCP3ZUoZQY7zTXnC1
 ----
 
-We can then add a section in the definition file called `operatingSystem` with a `users` array inside it.
-The resulting file should look like:
+We can then add a section in the definition file called `operatingSystem` with a `users` array inside it. The resulting file should look like:
 
 [,yaml]
 ----
@@ -128,12 +124,24 @@ operatingSystem:
       encryptedPassword: $6$G392FCbxVgnLaFw1$Ujt00mdpJ3tDHxEg1snBU3GjujQf6f8kvopu7jiCBIhRbRvMmKUqwcmXAKggaSSKeUUOEtCP3ZUoZQY7zTXnC1
 ----
 
+[NOTE]
+====
+It's also possible to add additional users, create the home directories, set user-id's, add ssh-key authentication, and modify group information. Please refer to the https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md[upstream building images guide] for further examples.
+====
+
 === Configuring RPM packages
 
-EIB also allows us to install RPM packages on our images in air-gapped environments.
-It will automatically resolve and download all listed RPMs and their dependencies which will be later installed during the provisioning process.
+One of the major features of EIB is to provide a mechanism to add additional software packages to the image, so when the installation completes the system is able to leverage the installed packages right away. EIB permits users to specify the following:
 
-We are going to install the `yq` RPM package found in the PackageHub repository:
+* Packages by their name within a list in the image definition
+* Network repositories to search for these packages in
+* SUSE Customer Center (SCC) credentials to search official SUSE repositories for the listed packages
+* Via an `$CONFIG_DIR/rpms` directory, side-load custom RPM's that don't exist in network repositories
+* Via the same directory (`$CONFIG_DIR/rpms/gpg-keys`), GPG-keys to enable validation of 3rd party packages
+
+EIB will then run through a package resolution process at image build time, taking the base image as the input, and attempts to pull and install all supplied packages, either specified via the list or provided locally. EIB downloads all of the packages, including any dependencies into a repository that exists within the output image and instructs the system to install these during the first boot process. Doing this process during the image build guarantees that the packages will successfully install during first-boot on the desired platform, e.g. the node at the edge. This is also advantageous in environments where you want to bake the additional packages into the image rather than pull them over the network when in operation, e.g. for air-gapped or restricted network environments.
+
+As a simple example to demonstrate this, we are going to install the `yq` RPM package found in the openSUSE PackageHub repository:
 
 [,yaml]
 ----
@@ -167,15 +175,16 @@ operatingSystem:
 
 [NOTE]
 ====
-More examples of this feature can be found in the https://github.com/suse-edge/edge-image-builder/blob/main/docs/installing-packages.md[upstream installing packages guide].
+A more comprehensive guide with additional examples can be found in the https://github.com/suse-edge/edge-image-builder/blob/main/docs/installing-packages.md[upstream installing packages guide].
 ====
 
 === Configuring Kubernetes cluster and user workloads
 
-Another feature of EIB is the simplified air-gapped deployment of Kubernetes clusters and bootstrapping application workloads via Helm charts and Kubernetes manifests.
+Another feature of EIB is the ability to use it to automate the deployment of both single-node and multi-node highly-available Kubernetes clusters that "bootstrap in place", i.e. don't require any form of centralized management infrastructure to coordinate. The primary driver behind this approach is for air-gapped deployments, or network restricted environments, but it also serves as a way of quickly bootstrapping standalone clusters, even if full and unrestricted network access is available.
 
-We will be using the following addition to the definition file to instruct EIB to provision a single-node RKE2 Kubernetes cluster.
-We are also going to install KubeVirt via the SUSE Edge Helm chart, as well as NGINX via a Kubernetes manifest.
+This method enables not only the deployment of the customized operating system, but also the ability to specify Kubernetes configuration, any additional layered components via Helm charts, and any user workloads via supplied Kubernetes manifests. However, the design principle behind using this method is that we default to assuming that the user is wanting to air-gap and therefore any items specified in the image definition will be pulled into the image, which includes user-supplied workloads, where EIB will make sure that any discovered images that are required by definitions supplied are copied locally, and are served by the embedded image registry in the resulting deployed system.
+
+In this next example, we're going to take our existing image definition and will specify a Kubernetes configuration (in this example it doesn't list the systems and their roles, so we default to assuming single-node), which will instruct EIB to provision a single-node RKE2 Kubernetes cluster. To show the automation of both the deployment of both user-supplied workloads (via manifest) and layered components (via Helm), we are going to install KubeVirt via the SUSE Edge Helm chart, as well as NGINX via a Kubernetes manifest. The additional configuration we need to append to the existing image definition is as follows:
 
 [,yaml]
 ----
@@ -229,21 +238,17 @@ kubernetes:
 
 [NOTE]
 ====
-Further examples of options such as multi-node deployments, networking, and Helm chart options/values can be found in the https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md#kubernetes[upstream documentation].
+Further examples of options such as multi-node deployments, custom networking, and Helm chart options/values can be found in the https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md#kubernetes[upstream documentation].
 ====
 
 
 === Configuring the network
 
-Lastly, for this quick start example, let us set up a network device.
+In the last example in this quickstart, let's configure the network that will be brought up when a system is provisioned with the image generated by EIB. It's important to understand that unless a network configuration is supplied, the default model is that DHCP will be used on all interfaces discovered at boot time. However, this is not always a desirable configuration, especially if DHCP is not available and you need to provide static configurations, or you need to setup more complex networking constructs, e.g. bonds, LACP, and VLAN's, or need to override certain parameters, e.g. hostnames, DNS servers, and routes.
 
-[NOTE]
-====
-The following assumes a default `libvirt` network with an IP address range `192.168.122.1/24`.
-Adjust accordingly if this differs in your environment.
-====
+EIB provides the ability to provide either per-node configurations (where the system in question is uniquely identified by its MAC address), or an override for supplying an identical configuration to each machine, which is more useful when the system MAC addresses aren't known. An additional tool is used by EIB called Network Manager Configurator, or `nmc` for short, which is a tool built by the SUSE Edge team to allow custom networking configurations to be applied based on the https://nmstate.io/[nmstate.io] declarative network schema, and at boot time will identify the node it's booting on and will apply the desired network configuration prior to any services coming up.
 
-Let's create a file describing the desired network state in the respective network directory:
+We'll now apply a static network configuration for a system with a single interface by describing the desired network state in a node-specific file (based on the desired hostname) in the required `network` directory:
 
 [,console]
 ----
@@ -285,11 +290,11 @@ EOF
 
 [WARNING]
 ====
-EIB networking is MAC address-dependent. In the case of virtual machines, you may be able to set the MAC address at boot.
-For physical machines, you need to know the MAC address ahead of time.
+The above example is setup for the default `192.168.122.0/24` subnet assuming that testing is being executed on a virtual machine, please adapt to suit your environment, not forgetting the MAC address. As the same image can be used to provision multiple nodes, networking configured by EIB (via `nmc`) is dependent on it being able to uniquely identify the node by its MAC address, and hence during boot `nmc` will apply the correct networking configuration to each machine. This means that you'll need to know the MAC addresses of the systems you want to install onto. Alternatively, the default behavior is to rely on DHCP, but you can utilize the `configure-network.sh` hook to apply a common configuration to all nodes - see the <<components-networking,networking guide>> for further details.
 ====
 
 The resulting file structure should look like:
+
 [,console]
 ----
 ├── iso-definition.yaml
@@ -299,17 +304,16 @@ The resulting file structure should look like:
     └── host1.local.yaml
 ----
 
-The network configuration we just created will be parsed and converted to the necessary NetworkManager connection files.
-These files will be applied during the provisioning of the host, resulting in a complete network configuration.
+The network configuration we just created will be parsed and the necessary NetworkManager connection files will be automatically generated and inserted into the new installation image that EIB will create. These files will be applied during the provisioning of the host, resulting in a complete network configuration.
 
 [NOTE]
 ====
-Please refer to the <<components-nmc, Edge Networking component>> for comprehensive explanation and examples of this feature.
+Please refer to the <<components-networking, Edge Networking component>> for a more comprehensive explanation of the above configuration and examples of this feature.
 ====
 
 == Building the image
 
-To build the image, we can simply run:
+Now that we've got a base image and an image definition for EIB to consume, let's go ahead and build the image. For this, we simply use `podman` to call the EIB container with the "build" command, specifying the definition file:
 
 [,bash]
 ----
@@ -449,8 +453,9 @@ The contents of this directory should look like:
     └── ...
 ----
 
-If the build fails, `eib-build.log` is the first log that contains information.
-From there, it will direct you to the component that failed for debugging.
+If the build fails, `eib-build.log` is the first log that contains information. From there, it will direct you to the component that failed for debugging.
+
+At this point, you should have a ready-to-use image that will deploy SLE Micro 5.5, configure the root password, install yq, configure an embedded registry to serve content locally, install single-node RKE2, configure static networking, install KubeVirt, and deploy a user-manifest.
 
 == Debugging the image build process
 
