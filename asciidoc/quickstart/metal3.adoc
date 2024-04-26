@@ -34,7 +34,7 @@ image::quickstart-metal3-architecture.png[]
 
 == Prerequisites
 
-There are also some specific constraints related to the downstream cluster server hardware and networking:
+There are some specific constraints related to the downstream cluster server hardware and networking:
 
 * Management cluster
  ** Must have network connectivity to the target server management/BMC API
@@ -44,9 +44,13 @@ There are also some specific constraints related to the downstream cluster serve
  ** Must support out-of-band management via Redfish, iDRAC or iLO interfaces
  ** Must support deployment via virtual media (PXE is not currently supported)
  ** Must have network connectivity to the management cluster for access to the Metal^3^ provisioning APIs
-* Tools (installed either on the management cluster, or on a host which can access it)
- ** https://kubernetes.io/docs/reference/kubectl/kubectl/[Kubectl], https://helm.sh[Helm] and https://cluster-api.sigs.k8s.io/user/quick-start.html#install-clusterctl[Clusterctl]
- ** A container runtime such as https://podman.io[Podman] or https://rancherdesktop.io[Rancher Desktop]
+
+Some tools are required, these can be installed either on the management cluster, or on a host which can access it.
+
+* https://kubernetes.io/docs/reference/kubectl/kubectl/[Kubectl], https://helm.sh[Helm] and https://cluster-api.sigs.k8s.io/user/quick-start.html#install-clusterctl[Clusterctl]
+* A container runtime such as https://podman.io[Podman] or https://rancherdesktop.io[Rancher Desktop]
+
+The `SLE-Micro.x86_64-5.5.0-Default-GM.raw.xz` OS image file must be downloaded from the https://scc.suse.com/[SUSE Customer Center] or the https://www.suse.com/download/sle-micro/[SUSE Download page].
 
 === Setup Management Cluster
 
@@ -57,6 +61,7 @@ The basic steps to install a management cluster and use Metal^3^ are:
 . Install a storage provider
 . Install the Metal^3^ dependencies
 . Install CAPI dependencies
+. Build a SLEMicro OS image for downstream cluster hosts
 . Register BareMetalHost CRs to define the bare-metal inventory
 . Create a downstream cluster by defining CAPI resources
 
@@ -191,6 +196,118 @@ clusterctl init --core "cluster-api:v1.6.2" --infrastructure "metal3:v1.6.0" --b
 
 After some time, the controller pods should be running in the `capi-system`, `capm3-system`, `rke2-bootstrap-system` and `rke2-control-plane-system` namespaces.
 
+=== Prepare downstream cluster image
+
+<<components-eib, Edge Image Builder>> is used to prepare a modified SLEMicro base image which is provisioned on downstream cluster hosts.
+
+Much of the configuration via Edge Image Builder is possible, but in this guide, we cover the minimal configurations necessary to set up the downstream cluster.
+
+==== Image configuration
+
+When running Edge Image Builder, a directory is mounted from the host, so it is necessary to create a directory structure to to store the configuration files used to define the target image.
+
+* `downstream-cluster-config.yaml` is the image definition file, see <<quickstart-eib>> for more details.
+* The base image when downloaded is `xz` compressed, which must be uncompressed with `unxz` and copied/moved under the `base-images` folder.
+* The `network` folder is optional, see <<metal3-add-network-eib>> for more details.
+* The custom/scripts directory contains scripts to be run on first-boot; currently a `growfs.sh` script is required to resize the OS root partition on deployment
+
+[,console]
+----
+├── downstream-cluster-config.yaml
+├── base-images/
+│   └ SLE-Micro.x86_64-5.5.0-Default-GM.raw
+├── network/
+|   └ configure-network.sh
+└── custom/
+    └ scripts/
+        └ growfs.sh
+----
+
+===== Downstream cluster image definition file
+
+The `downstream-cluster-config.yaml` file is the main configuration file for the downstream cluster image. The following is a minimal example for deployment via Metal^3^:
+
+[,yaml]
+----
+apiVersion: 1.0
+image:
+  imageType: RAW
+  arch: x86_64
+  baseImage: SLE-Micro.x86_64-5.5.0-Default-GM.raw
+  outputImageName: SLE-Micro-eib-output.raw
+operatingSystem:
+  kernelArgs:
+    - ignition.platform.id=openstack
+    - net.ifnames=1
+  systemd:
+    disable:
+      - rebootmgr
+  users:
+    - username: root
+      encryptedPassword: ${ROOT_PASSWORD}
+      sshKeys:
+      - ${USERKEY1}
+----
+
+`$\{ROOT_PASSWORD\}` is the encrypted password for the root user, which can be useful for test/debugging.  It can be generated with the `openssl passwd -6 PASSWORD` command
+
+For the production environments, it is recommended to use the SSH keys that can be added to the users block replacing the `$\{USERKEY1\}` with the real SSH keys.
+
+[NOTE]
+====
+`net.ifnames=1` enables https://documentation.suse.com/smart/network/html/network-interface-predictable-naming/index.html[Predictable Network Interface Naming]
+
+This matches the default configuration for the metal3 chart, but the setting must match the configured chart `predictableNicNames` value.
+
+Also note `ignition.platform.id=openstack` is mandatory, without this argument SLEMicro configuration via ignition will fail in the Metal^3^ automated flow.
+====
+
+===== Growfs script
+
+Currently is a custom script (`custom/scripts/growfs.sh`) which is required to grow the file system to the match the disk size on first-boot after provisioning. The `growfs.sh` script contains the following information:
+
+[,shell]
+----
+#!/bin/bash
+growfs() {
+  mnt="$1"
+  dev="$(findmnt --fstab --target ${mnt} --evaluate --real --output SOURCE --noheadings)"
+  # /dev/sda3 -> /dev/sda, /dev/nvme0n1p3 -> /dev/nvme0n1
+  parent_dev="/dev/$(lsblk --nodeps -rno PKNAME "${dev}")"
+  # Last number in the device name: /dev/nvme0n1p42 -> 42
+  partnum="$(echo "${dev}" | sed 's/^.*[^0-9]\([0-9]\+\)$/\1/')"
+  ret=0
+  growpart "$parent_dev" "$partnum" || ret=$?
+  [ $ret -eq 0 ] || [ $ret -eq 1 ] || exit 1
+  /usr/lib/systemd/systemd-growfs "$mnt"
+}
+growfs /
+----
+
+[NOTE]
+====
+Add your own custom scripts to be executed during the provisioning process using the same approach.
+For more information, see <<quickstart-eib>>.
+
+The bug related to this workaround is https://bugzilla.suse.com/show_bug.cgi?id=1217430
+====
+
+==== Image creation
+
+Once the directory structure is prepared following the previous sections, run the following command to build the image:
+
+[,shell]
+----
+podman run --rm --privileged -it -v $PWD:/eib \
+ registry.suse.com/edge/edge-image-builder:1.0.1 \
+ build --definition-file downstream-cluster-config.yaml
+----
+
+This creates the output image file named `SLE-Micro-eib-output.raw`, based on the definition described above.
+
+The output image must then be made available via a webserver, either the media-server container enabled via the <<metal3-media-server,Metal^3^ chart>>
+or some other locally accessible server.  In the examples below, we refer to this server as `imagecache.local:8080`
+
 === Adding BareMetalHost inventory
 
 Registering bare-metal servers for automated deployment requires creating two resources: a Secret storing
@@ -232,10 +349,59 @@ Note the following:
  ** `idrac-virtualmedia://<IP ADDRESS>/redfish/v1/Systems/System.Embedded.1`: Dell iDRAC
 * See the https://github.com/metal3-io/baremetal-operator/blob/main/docs/api.md[Upstream API docs] for more details on the BareMetalHost API
 
+
 ==== Configuring Static IPs
 
 The BareMetalHost example above assumes DHCP provides the controlplane network configuration, but for scenarios where manual configuration
-is needed such as static IPs it is possible to provide additional configuration, for example:
+is needed such as static IPs it is possible to provide additional configuration, as described below.
+
+[#metal3-add-network-eib]
+===== Additional script for static network configuration
+
+When creating the base image with Edge Image Builder, in the `network` folder, create the following `configure-network.sh` file.
+
+This consumes configuration drive data on first-boot, and configures the host networking using the https://github.com/suse-edge/nm-configurator[NM Configurator tool].
+
+[,shell]
+----
+#!/bin/bash
+
+set -eux
+
+# Attempt to statically configure a NIC in the case where we find a network_data.json
+# In a configuration drive
+
+CONFIG_DRIVE=$(blkid --label config-2 || true)
+if [ -z "${CONFIG_DRIVE}" ]; then
+  echo "No config-2 device found, skipping network configuration"
+  exit 0
+fi
+
+mount -o ro $CONFIG_DRIVE /mnt
+
+NETWORK_DATA_FILE="/mnt/openstack/latest/network_data.json"
+
+if [ ! -f "${NETWORK_DATA_FILE}" ]; then
+  umount /mnt
+  echo "No network_data.json found, skipping network configuration"
+  exit 0
+fi
+
+DESIRED_HOSTNAME=$(cat /mnt/openstack/latest/meta_data.json | tr ',{}' '\n' | grep '\"metal3-name\"' | sed 's/.*\"metal3-name\": \"\(.*\)\"/\1/')
+
+mkdir -p /tmp/nmc/{desired,generated}
+cp ${NETWORK_DATA_FILE} /tmp/nmc/desired/${DESIRED_HOSTNAME}.yaml
+umount /mnt
+
+./nmc generate --config-dir /tmp/nmc/desired --output-dir /tmp/nmc/generated
+./nmc apply --config-dir /tmp/nmc/generated
+----
+
+===== Additional secret with host network configuration
+
+An additional secret containing data in the https://nmstate.io/[nmstate] format supported by <<components-nmc,NM Configurator>> can be defined for each host.
+
+The secret is then referenced in the `BareMetalHost` resource via the `preprovisioningNetworkDataName` spec field.
 
 [,yaml]
 ----
@@ -278,6 +444,8 @@ spec:
 # Remaining content as in previous example
 ----
 
+NOTE: although optional in the nmstate API, the mac-address is mandatory for configuration via NM Configurator and must be provided.
+
 ==== BareMetalHost preparation
 
 After creating the BareMetalHost resource and associated secrets as described above, a host preparation workflow is triggered:
@@ -295,7 +463,6 @@ NAME             STATE       CONSUMER   ONLINE   ERROR   AGE
 controlplane-0   available              true             9m44s
 worker-0         available              true             9m44s
 ----
-
 
 === Creating downstream clusters
 
@@ -427,6 +594,21 @@ spec:
         object: machine
 ----
 
+When the example above has been copied and adapted to suit your environment, it can be applied via `kubectl` then the cluster status can be monitored with `clusterctl`
+
+[,bash]
+----
+% kubectl apply -f rke2-control-plane.yaml
+
+# Wait for the cluster to be provisioned - status can be checked via clusterctl
+% clusterctl describe cluster sample-cluster
+NAME                                                    READY  SEVERITY  REASON  SINCE  MESSAGE
+Cluster/sample-cluster                                  True                     22m
+├─ClusterInfrastructure - Metal3Cluster/sample-cluster  True                     27m
+├─ControlPlane - RKE2ControlPlane/sample-cluster        True                     22m
+│ └─Machine/sample-cluster-chflc                        True                     23m
+----
+
 === Worker/Compute deployment
 
 Similar to the controlplane we define a yaml manifest, which contains the following resources:
@@ -541,6 +723,53 @@ spec:
         object: machine
       - key: local_hostname
         object: machine
+----
+
+
+When the example above has been copied and adapted to suit your environment, it can be applied via `kubectl` then the cluster status can be monitored with `clusterctl`
+
+[,bash]
+----
+% kubectl apply -f rke2-agent.yaml
+
+# Wait some time for the compute/agent hosts to be provisioned
+% clusterctl describe cluster sample-cluster
+NAME                                                    READY  SEVERITY  REASON  SINCE  MESSAGE
+Cluster/sample-cluster                                  True                     25m
+├─ClusterInfrastructure - Metal3Cluster/sample-cluster  True                     30m
+├─ControlPlane - RKE2ControlPlane/sample-cluster        True                     25m
+│ └─Machine/sample-cluster-chflc                        True                     27m
+└─Workers
+  └─MachineDeployment/sample-cluster                    True                     22m
+    └─Machine/sample-cluster-56df5b4499-zfljj           True                     23m
+----
+
+
+=== Cluster deprovisioning
+
+The downstream cluster may be deprovisioned by deleting the resources applied in the creation steps above:
+
+[,bash]
+----
+% kubectl delete -f rke2-agent.yaml
+% kubectl delete -f rke2-control-plane.yaml
+----
+
+This triggers deprovisioning of the BareMetalHost resources, which may take several minutes, after which they should be in available state again:
+
+[,bash]
+----
+% kubectl get bmh
+NAME             STATE            CONSUMER                            ONLINE   ERROR   AGE
+controlplane-0   deprovisioning   sample-cluster-controlplane-vlrt6   false            10m
+worker-0         deprovisioning   sample-cluster-workers-785x5        false            10m
+
+...
+
+% kubectl get bmh
+NAME             STATE       CONSUMER   ONLINE   ERROR   AGE
+controlplane-0   available              false            15m
+worker-0         available              false            15m
 ----
 
 == Known issues
