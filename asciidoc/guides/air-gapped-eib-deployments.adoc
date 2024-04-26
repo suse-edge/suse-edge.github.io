@@ -18,6 +18,8 @@ We will cover an air-gapped installation of:
 
 * <<components-rancher>>
 * <<components-neuvector>>
+* <<components-longhorn>>
+* <<components-kubevirt>>
 
 [WARNING]
 ====
@@ -788,6 +790,168 @@ replicaset.apps/csi-resizer-694f8f5f64             3         3         3       3
 replicaset.apps/csi-snapshotter-959b69d4b          3         3         3       35s
 replicaset.apps/longhorn-driver-deployer-9f4fc86   1         1         1       83s
 replicaset.apps/longhorn-ui-5f4b7bbf69             2         2         2       83s
+----
+
+== KubeVirt and CDI Installation [[kubevirt-install]]
+
+The Helm charts for both KubeVirt and CDI are only installing their respective operators.
+It is up to the operators to deploy the rest of the systems which means we will have to include all
+necessary container images in our definition file. Let's create it:
+
+[,console]
+----
+apiVersion: 1.0
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+kubernetes:
+  version: v1.28.8+rke2r1
+  helm:
+    charts:
+      - name: kubevirt-chart
+        repositoryName: suse-edge
+        version: 0.2.4
+        targetNamespace: kubevirt-system
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: cdi-chart
+        repositoryName: suse-edge
+        version: 0.2.3
+        targetNamespace: cdi-system
+        createNamespace: true
+        installationNamespace: kube-system
+    repositories:
+      - name: suse-edge
+        url: oci://registry.suse.com/edge
+embeddedArtifactRegistry:
+  images:
+    - name: registry.suse.com/suse/sles/15.5/cdi-uploadproxy:1.58.0-150500.6.12.1
+    - name: registry.suse.com/suse/sles/15.5/cdi-uploadserver:1.58.0-150500.6.12.1
+    - name: registry.suse.com/suse/sles/15.5/cdi-apiserver:1.58.0-150500.6.12.1
+    - name: registry.suse.com/suse/sles/15.5/cdi-controller:1.58.0-150500.6.12.1
+    - name: registry.suse.com/suse/sles/15.5/cdi-importer:1.58.0-150500.6.12.1
+    - name: registry.suse.com/suse/sles/15.5/cdi-cloner:1.58.0-150500.6.12.1
+    - name: registry.suse.com/suse/sles/15.5/virt-api:1.1.1-150500.8.12.1
+    - name: registry.suse.com/suse/sles/15.5/virt-controller:1.1.1-150500.8.12.1
+    - name: registry.suse.com/suse/sles/15.5/virt-launcher:1.1.1-150500.8.12.1
+    - name: registry.suse.com/suse/sles/15.5/virt-handler:1.1.1-150500.8.12.1
+----
+
+Let's build the image:
+
+[,shell]
+----
+podman run --rm -it --privileged -v $CONFIG_DIR:/eib \
+registry.suse.com/edge/edge-image-builder:1.0.1 \
+build --definition-file eib-iso-definition.yaml
+----
+
+The output should be similar to the following:
+[,console]
+----
+Generating image customization components...
+Identifier ................... [SUCCESS]
+Custom Files ................. [SKIPPED]
+Time ......................... [SKIPPED]
+Network ...................... [SUCCESS]
+Groups ....................... [SKIPPED]
+Users ........................ [SUCCESS]
+Proxy ........................ [SKIPPED]
+Rpm .......................... [SKIPPED]
+Systemd ...................... [SKIPPED]
+Elemental .................... [SKIPPED]
+Suma ......................... [SKIPPED]
+Populating Embedded Artifact Registry... 100% (13/13, 6 it/min)
+Embedded Artifact Registry ... [SUCCESS]
+Keymap ....................... [SUCCESS]
+Configuring Kubernetes component...
+The Kubernetes CNI is not explicitly set, defaulting to 'cilium'.
+Downloading file: rke2_installer.sh
+Kubernetes ................... [SUCCESS]
+Certificates ................. [SKIPPED]
+Building ISO image...
+Kernel Params ................ [SKIPPED]
+Image build complete!
+----
+
+Once a node using the built image is provisioned, we can verify the installation of both KubeVirt and CDI.
+
+Verify KubeVirt:
+
+[,shell]
+----
+/var/lib/rancher/rke2/bin/kubectl get all -n kubevirt-system --kubeconfig /etc/rancher/rke2/rke2.yaml
+----
+
+The output should be similar to the following, showing that everything has been successfully deployed:
+[,console]
+----
+NAME                                   READY   STATUS    RESTARTS   AGE
+pod/virt-api-7c45477984-z226r          1/1     Running   0          2m4s
+pod/virt-controller-664d9986b5-8p8gm   1/1     Running   0          98s
+pod/virt-controller-664d9986b5-v2n4h   1/1     Running   0          98s
+pod/virt-handler-2fx8c                 1/1     Running   0          98s
+pod/virt-operator-5cf69867dc-hz5s8     1/1     Running   0          2m30s
+pod/virt-operator-5cf69867dc-kp266     1/1     Running   0          2m30s
+
+NAME                                  TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
+service/kubevirt-operator-webhook     ClusterIP   10.43.210.235   <none>        443/TCP   2m7s
+service/kubevirt-prometheus-metrics   ClusterIP   None            <none>        443/TCP   2m7s
+service/virt-api                      ClusterIP   10.43.226.140   <none>        443/TCP   2m7s
+service/virt-exportproxy              ClusterIP   10.43.213.201   <none>        443/TCP   2m7s
+
+NAME                          DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR            AGE
+daemonset.apps/virt-handler   1         1         1       1            1           kubernetes.io/os=linux   98s
+
+NAME                              READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/virt-api          1/1     1            1           2m4s
+deployment.apps/virt-controller   2/2     2            2           98s
+deployment.apps/virt-operator     2/2     2            2           2m30s
+
+NAME                                         DESIRED   CURRENT   READY   AGE
+replicaset.apps/virt-api-7c45477984          1         1         1       2m4s
+replicaset.apps/virt-controller-664d9986b5   2         2         2       98s
+replicaset.apps/virt-operator-5cf69867dc     2         2         2       2m30s
+----
+
+Verify CDI:
+
+[,shell]
+----
+/var/lib/rancher/rke2/bin/kubectl get all -n cdi-system --kubeconfig /etc/rancher/rke2/rke2.yaml
+----
+
+The output should be similar to the following, showing that everything has been successfully deployed:
+[,console]
+----
+NAME                                   READY   STATUS    RESTARTS   AGE
+pod/cdi-apiserver-db465b888-mdsmm      1/1     Running   0          3m6s
+pod/cdi-deployment-56c7d74995-vt9sw    1/1     Running   0          3m6s
+pod/cdi-operator-55c74f4b86-gkt58      1/1     Running   0          3m10s
+pod/cdi-uploadproxy-7d7b94b968-msg2h   1/1     Running   0          3m6s
+
+NAME                             TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)    AGE
+service/cdi-api                  ClusterIP   10.43.161.135   <none>        443/TCP    3m6s
+service/cdi-prometheus-metrics   ClusterIP   10.43.161.159   <none>        8080/TCP   3m6s
+service/cdi-uploadproxy          ClusterIP   10.43.25.136    <none>        443/TCP    3m6s
+
+NAME                              READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/cdi-apiserver     1/1     1            1           3m6s
+deployment.apps/cdi-deployment    1/1     1            1           3m6s
+deployment.apps/cdi-operator      1/1     1            1           3m10s
+deployment.apps/cdi-uploadproxy   1/1     1            1           3m6s
+
+NAME                                         DESIRED   CURRENT   READY   AGE
+replicaset.apps/cdi-apiserver-db465b888      1         1         1       3m6s
+replicaset.apps/cdi-deployment-56c7d74995    1         1         1       3m6s
+replicaset.apps/cdi-operator-55c74f4b86      1         1         1       3m10s
+replicaset.apps/cdi-uploadproxy-7d7b94b968   1         1         1       3m6s
 ----
 
 == Troubleshooting
