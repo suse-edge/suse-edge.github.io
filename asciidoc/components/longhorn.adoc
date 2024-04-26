@@ -16,36 +16,73 @@ As an open source project, Longhorn was initially developed by Rancher Labs and 
 
 == Prerequisites
 
-* SLE Micro
-* K3s or RKE2 installed. You can find a guide on how to install K3s https://documentation.suse.com/trd/kubernetes/single-html/kubernetes_ri_k3s-slemicro/index.html#id-k3s[here]
-and RKE2 https://docs.rke2.io/install/quickstart[here].
-* Open-iSCSI
-** Install it on an existing SLE Micro by running `sudo transactional-update pkg install open-iscsi` and rebooting the host.
-** If you are building your images with Edge Image Builder, add `open-iscsi` to the packages list.
-* Helm 
+If you are following this guide, it assumes that you have the following already available:
 
-== Installing Longhorn
+* At least one host with SLE Micro 5.5 installed; this can be physical or virtual
+* A Kubernetes cluster installed; either K3s or RKE2
+* Helm
 
-To deploy `Longhorn`, use the https://longhorn.io/docs/1.6.0/deploy/install/install-with-helm/#installing-longhorn[Longhorn installation] guide.
+== Manual installation of Longhorn
 
-In this example, Helm was used to install Longhorn.
+=== Installing Open-iSCSI
 
-* Add the Longhorn Helm repository:
+A core requirement of deploying and using Longhorn is the installation of the `open-iscsi` package and the `iscsid` daemon running on all Kubernetes nodes.
+This is necessary, since Longhorn relies on `iscsiadm` on the host to provide persistent volumes to Kubernetes.
 
-** `helm repo add longhorn https://charts.longhorn.io`
+Let's install it:
 
-* Fetch the latest charts from the repository:
+[,shell]
+----
+transactional-update pkg install open-iscsi
+----
 
-** `helm repo update`
+It is important to note that once the operation is completed, the package is only installed into a new snapshot as SLE Micro is an immutable operating system.
+In order to load it and for the `iscsid` daemon to start running, we must reboot into that new snapshot that we just created.
+Issue the reboot command when you are ready:
 
-* Install Longhorn in the longhorn-system namespace:
+[,shell]
+----
+reboot
+----
 
-** `helm install longhorn longhorn/longhorn --namespace longhorn-system --create-namespace --version 1.6.0`
+[TIP]
+====
+For additional help installing open-iscsi, refer to the https://longhorn.io/docs/1.6.1/deploy/install/#installing-open-iscsi[official Longhorn documentation].
+====
 
-* To confirm that the deployment succeeded, run:
+=== Installing Longhorn
 
-** `kubectl -n longhorn-system get pod`
+There are several ways to install Longhorn on your Kubernetes clusters.
+This guide will follow through the Helm installation, however feel free to follow the https://longhorn.io/docs/1.6.1/deploy/install/[official documentation] if another approach is desired.
 
+. Add the Longhorn Helm repository:
++
+[,shell]
+----
+helm repo add longhorn https://charts.longhorn.io
+----
++
+. Fetch the latest charts from the repository:
++
+[,shell]
+----
+helm repo update
+----
++
+. Install Longhorn in the longhorn-system namespace:
++
+[,shell]
+----
+helm install longhorn longhorn/longhorn --namespace longhorn-system --create-namespace --version 1.6.1
+----
++
+. Confirm that the deployment succeeded:
++
+[,shell]
+----
+kubectl -n longhorn-system get pods
+----
++
 [,console]
 ----
 localhost:~ # kubectl -n longhorn-system get pod
@@ -73,17 +110,14 @@ longhorn-system   longhorn-csi-plugin-bsc8c                           3/3     Ru
 
 == Creating Longhorn volumes
 
-* Longhorn StorageClass Creation
+Longhorn utilizes Kubernetes resources called `StorageClass` in order to automatically provision `PersistentVolume` objects for pods.
+Think of `StorageClass` as a way for administrators to describe the _classes_ or _profiles_ of storage they offer.
 
-** First, create a Longhorn StorageClass containing parameters for provisioning PVs.
-To create PersistentVolumeClaim (PVC), run:
+Let's create a `StorageClass` with some default options:
 
-*** `kubectl create -f <NAME_OF_FILE.yaml>`
-
-*** Example values:
-
-[,yaml]
+[,shell]
 ----
+kubectl apply -f - <<EOF
 kind: StorageClass
 apiVersion: storage.k8s.io/v1
 metadata:
@@ -95,18 +129,18 @@ parameters:
   staleReplicaTimeout: "2880" # 48 hours in minutes
   fromBackup: ""
   fsType: "ext4"
+EOF
 ----
 
-* Create a PVC referencing the StorageClass.
+Now that we have our `StorageClass` in place, we need a `PersistentVolumeClaim` referencing it.
+A `PersistentVolumeClaim` (PVC) is a request for storage by a user. PVCs consume `PersistentVolume` resources.
+Claims can request specific sizes and access modes (e.g., they can be mounted once read/write or many times read-only).
 
-** The Kubernetes master checks the PVC to ensure the resource request can be fulfilled.
+Let's create a `PersistentVolumeClaim`:
 
-*** `kubectl create -f <NAME_OF_FILE.yaml>`
-
-*** Example values:
-
-[,yaml]
+[,shell]
 ----
+kubectl apply -f - <<EOF
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -119,18 +153,15 @@ spec:
   resources:
     requests:
       storage: 2Gi
+EOF
 ----
 
-* Pod deployment
+That's it! Once we have the `PersistentVolumeClaim` created, we can proceed with attaching it to a `Pod`.
+When the `Pod` is deployed, Kubernetes creates the Longhorn volume and binds it to the `Pod` if storage is available.
 
-** When the Pod is deployed, the Kubernetes master creates the Longhorn volume and binds it to the Pod if storage is available.
-
-*** `kubectl create -f <NAME_OF_FILE.yaml>`
-
-*** Example values:
-
-[,yaml]
+[,shell]
 ----
+kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
@@ -150,7 +181,14 @@ spec:
   - name: volv
     persistentVolumeClaim:
       claimName: longhorn-volv-pvc
+EOF
 ----
+
+[TIP]
+====
+The concept of storage in Kubernetes is a complex, but important topic. We briefly mentioned some of the most common Kubernetes resources,
+however, we suggest to familiarize yourself with the https://longhorn.io/docs/1.6.1/terminology/[terminology documentation] that Longhorn offers.
+====
 
 In this example, the result should look something like this:
 
@@ -196,54 +234,44 @@ allow external traffic into the cluster. Authentication is not enabled by
 default. If the Rancher catalog app was used, Rancher automatically created an Ingress controller with
 access control (the rancher-proxy).
 
-* Get the Longhorn’s external service IP:
-
+. Get the Longhorn’s external service IP address:
++
 [,console]
 ----
 kubectl -n longhorn-system get svc
 ----
-
-* Once you have retrieved the longhorn-frontend IP, you can start using the UI by navigating to it in your browser.
++
+. Once you have retrieved the `longhorn-frontend` IP address, you can start using the UI by navigating to it in your browser.
 
 == Using Edge Image Builder to deploy Longhorn
 
-The configuration file from below can be used to create an image via
-<<components-eib,the Edge Image Builder>> with
-Longhorn being set up as well.
+SUSE Edge is using <<components-eib>> in order to customize base SLE Micro OS images.
+We are going to demonstrate how to do so for provisioning an RKE2 cluster with Longhorn on top of it.
 
-* Build the container:
+Let's create the definition file:
 
-[,console]
+[,shell]
 ----
-podman build -t eib:dev .
-----
+export CONFIG_DIR=$HOME/eib
+mkdir -p $CONFIG_DIR
 
-* This command attaches the directory and runs EIB. The $DEFINITION_FILE.yaml must contain the values from the YAML file below. It is customizable, but for our purpose this is enough to deploy Longhorn.
-
-[,console]
-----
-podman run --rm -it -v $IMAGE_DIR:/eib eib:dev build --definition-file $DEFINITION_FILE.yaml
-----
-
-[,yaml]
-----
+cat << EOF > $CONFIG_DIR/iso-definition.yaml
 apiVersion: 1.0
 image:
   imageType: iso
-  baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM.install.iso
+  baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso
   arch: x86_64
   outputImageName: eib-image.iso
 kubernetes:
-  version: v1.28.7+rke2r1
+  version: v1.28.8+rke2r1
   helm:
     charts:
       - name: longhorn
-        version: 1.6.0
+        version: 1.6.1
         repositoryName: longhorn
         targetNamespace: longhorn-system
         createNamespace: true
         installationNamespace: kube-system
-        valuesFile: longhorn.yaml # optional! if we want to edit some of the default settings
     repositories:
       - name: longhorn
         url: https://charts.longhorn.io
@@ -254,26 +282,54 @@ operatingSystem:
       - open-iscsi
   users:
   - username: root
-    encryptedPassword: <password>
+    encryptedPassword: \$6\$jHugJNNd3HElGsUZ\$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+EOF
 ----
 
-* If you want to customize the default values of the chart, do so by creating `./kubernetes/helm/values/longhorn.yaml`.
+[NOTE]
+====
+Customizing any of the Helm chart values is possible via a separate file provided under `helm.charts[].valuesFile`.
+Refer to the https://github.com/suse-edge/edge-image-builder/blob/release-1.0/docs/building-images.md#kubernetes[upstream documentation] for details.
+====
 
-** Retrieve a copy of the Longhorn `values.yaml` https://raw.githubusercontent.com/longhorn/charts/master/charts/longhorn/values.yaml[here].
+Let's build the image:
 
-*** Now you can edit the defaultSettings in the file we created earlier under `./kubernetes/helm/values/longhorn.yaml`.
-
-** Example YAML file that you can use to add the changes to the ConfigMap: `longhorn-default-setting`.
-
-[,yaml]
+[,shell]
 ----
-defaultSettings:
-  defaultLonghornStaticStorageClass: longhorn-static-example
-  backupstorePollInterval: 500
-  priorityClass: high-priority
+podman run --rm --privileged -it -v $CONFIG_DIR:/eib registry.suse.com/edge/edge-image-builder:1.0.1 build --definition-file $CONFIG_DIR/iso-definition.yaml
 ----
 
-* After the image is built, you can use it to install your OS, and Longhorn will be deployed on top of RKE2.
+After the image is built, you can use it to install your OS on a physical or virtual host.
+Once the provisioning is complete, you are able to log in to the system using the `root:eib` credentials pair.
+
+Ensure that Longhorn has been successfully deployed:
+
+[,console]
+----
+localhost:~ # /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml -n longhorn-system get pods
+NAME                                                READY   STATUS    RESTARTS        AGE
+csi-attacher-5c4bfdcf59-qmjtz                       1/1     Running   0               103s
+csi-attacher-5c4bfdcf59-s7n65                       1/1     Running   0               103s
+csi-attacher-5c4bfdcf59-w9xgs                       1/1     Running   0               103s
+csi-provisioner-667796df57-fmz2d                    1/1     Running   0               103s
+csi-provisioner-667796df57-p7rjr                    1/1     Running   0               103s
+csi-provisioner-667796df57-w9fdq                    1/1     Running   0               103s
+csi-resizer-694f8f5f64-2rb8v                        1/1     Running   0               103s
+csi-resizer-694f8f5f64-z9v9x                        1/1     Running   0               103s
+csi-resizer-694f8f5f64-zlncz                        1/1     Running   0               103s
+csi-snapshotter-959b69d4b-5dpvj                     1/1     Running   0               103s
+csi-snapshotter-959b69d4b-lwwkv                     1/1     Running   0               103s
+csi-snapshotter-959b69d4b-tzhwc                     1/1     Running   0               103s
+engine-image-ei-5cefaf2b-hvdv5                      1/1     Running   0               109s
+instance-manager-0ee452a2e9583753e35ad00602250c5b   1/1     Running   0               109s
+longhorn-csi-plugin-gd2jx                           3/3     Running   0               103s
+longhorn-driver-deployer-9f4fc86-j6h2b              1/1     Running   0               2m28s
+longhorn-manager-z4lnl                              1/1     Running   0               2m28s
+longhorn-ui-5f4b7bbf69-bln7h                        1/1     Running   3 (2m7s ago)    2m28s
+longhorn-ui-5f4b7bbf69-lh97n                        1/1     Running   3 (2m10s ago)   2m28s
+----
+
+TODO: Drop the following and refer to the airgapped guide
 
 == Using Edge Image Builder to deploy Longhorn in an air-gapped environment
 
