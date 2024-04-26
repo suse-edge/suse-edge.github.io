@@ -12,7 +12,7 @@ endif::[]
 
 == Intro
 
-This guide will show how to deploy several of the SUSE Edge components completely air-gapped on SLE Micro 5.5 utilizing <<components-eib,Edge Image Builder(EIB)>>. With this, you'll be able to boot into a customized, ready to boot (CRB) image created by EIB and have the specified components deployed on a RKE2/K3s cluster without an Internet connection or any manual steps. This configuration is highly desirable for customers that want to pre-bake all artifacts required for deployment into their OS image so they are immediately available on boot.
+This guide will show how to deploy several of the SUSE Edge components completely air-gapped on SLE Micro 5.5 utilizing <<components-eib,Edge Image Builder(EIB)>>. With this, you'll be able to boot into a customized, ready to boot (CRB) image created by EIB and have the specified components deployed on either a RKE2 or K3s cluster without an Internet connection or any manual steps. This configuration is highly desirable for customers that want to pre-bake all artifacts required for deployment into their OS image so they are immediately available on boot.
 
 We will cover an air-gapped installation of:
 
@@ -66,7 +66,7 @@ virsh net-start isolatednetwork
 
 The base directory configuration is the same across all different components, so we will set it up here.
 
-We will first create the necessary directories:
+We will first create the necessary subdirectories:
 
 [,shell]
 ----
@@ -128,7 +128,7 @@ interfaces:
 EOF
 ----
 
-This configuration ensures the following are present on the provisioned systems:
+This configuration ensures the following are present on the provisioned systems (using the specified MAC address):
 
 * an Ethernet interface with a static IP address
 * routing
@@ -183,22 +183,22 @@ The `image` section is required, and it specifies the input image, its architect
 The `operatingSystem` section is optional, and contains configuration to enable login on the provisioned systems with the `root/eib` username/password.
 
 The `kubernetes` section is optional, and it defines the Kubernetes type and version. We are going to use Kubernetes 1.28.8 and RKE2 by default.
-Use `kubernetes.version: v1.28.8+k3s1` if K3s is desired instead. Unless explicitly configured via the `kubernetes.nodes` fields, all clusters we bootstrap in this guide will be single-node ones.
+Use `kubernetes.version: v1.28.8+k3s1` if K3s is desired instead. Unless explicitly configured via the `kubernetes.nodes` field, all clusters we bootstrap in this guide will be single-node ones.
 
-The `embeddedArtifactRegistry` will manually list all images which are only referenced and pulled at runtime for the specific component.
+The `embeddedArtifactRegistry` section will include all images which are only referenced and pulled at runtime for the specific component.
 
 == Rancher Installation
 
 [NOTE]
 ====
-The <<components-rancher,Rancher>> deployment that will be demonstrated will be highly slimmed down for demonstration purposes. For your actual deployments, additional artifacts may be necessary depending on your configuration. This guide will demonstrate the process of adding artifacts on an as-needed basis.
+The <<components-rancher,Rancher>> deployment that will be demonstrated will be highly slimmed down for demonstration purposes. For your actual deployments, additional artifacts may be necessary depending on your configuration.
 ====
 
-The release assets of https://github.com/rancher/rancher/releases/tag/v2.8.3[Rancher v2.8.3] contain= a `rancher-images.txt` file which lists all the images required for an air-gapped installation.
+The release assets of https://github.com/rancher/rancher/releases/tag/v2.8.3[Rancher v2.8.3] contain a `rancher-images.txt` file which lists all the images required for an air-gapped installation.
 
-There are about 602 container images in total which means that the resulting CRB image would be roughly 28GB+. For our Rancher configuration, we will strip down that list to the smallest working configuration. From there, you can add back any images you may need for your deployments.
+There are about 602 container images in total which means that the resulting CRB image would be roughly 28GB+. For our Rancher installation, we will strip down that list to the smallest working configuration. From there, you can add back any images you may need for your deployments.
 
-We will create the EIB definition file and include the stripped down images list:
+We will create the definition file and include the stripped down image list:
 
 [,console]
 ----
@@ -319,12 +319,12 @@ useBundledSystemChart: true
 EOF
 ----
 
-[NOTE]
+[WARNING]
 ====
-This sets the Rancher bootstrap password to `adminadminadmin`. Additionally, setting the `systemDefaultRegistry` to `registry.rancher.com` allows Rancher to automatically look for images in the embedded artifact registry started within the CRB image at boot.
+Setting the `systemDefaultRegistry` to `registry.rancher.com` allows Rancher to automatically look for images in the embedded artifact registry started within the CRB image at boot. Omitting this field may result in failure to find the container images on the node.
 ====
 
-To build the image:
+Let's build the image:
 [,shell]
 ----
 podman run --rm -it --privileged -v $CONFIG_DIR:/eib \
@@ -332,7 +332,7 @@ registry.suse.com/edge/edge-image-builder:1.0.1 \
 build --definition-file eib-iso-definition.yaml
 ----
 
-The output should look like:
+The output should be similar to the following:
 [,console]
 ----
 Generating image customization components...
@@ -373,7 +373,7 @@ Once a node using the built image is provisioned, we can verify the Rancher inst
 /var/lib/rancher/rke2/bin/kubectl get all -A --kubeconfig /etc/rancher/rke2/rke2.yaml
 ----
 
-The output should look like this, showing that everything has been successfully deployed:
+The output should be similar to the following, showing that everything has been successfully deployed:
 [,console]
 ----
 NAMESPACE                         NAME                                                        READY   STATUS      RESTARTS   AGE
