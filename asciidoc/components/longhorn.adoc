@@ -245,27 +245,25 @@ kubectl -n longhorn-system get svc
 
 == Using Edge Image Builder to deploy Longhorn
 
-The configuration file from below can be used to create an image via
-<<components-eib,the Edge Image Builder>> with
-Longhorn being set up as well.
+SUSE Edge is using <<components-eib>> in order to customize base SLE Micro OS images.
+We are going to demonstrate how to do so for provisioning an RKE2 cluster with Longhorn on top of it.
 
-* This command attaches the directory and runs EIB. The $DEFINITION_FILE.yaml must contain the values from the YAML file below. It is customizable, but for our purpose this is enough to deploy Longhorn.
+Let's create the definition file:
 
-[,console]
+[,shell]
 ----
-podman run --rm -it -v $IMAGE_DIR:/eib eib:dev build --definition-file $DEFINITION_FILE.yaml
-----
+export CONFIG_DIR=$HOME/eib
+mkdir -p $CONFIG_DIR
 
-[,yaml]
-----
+cat << EOF > $CONFIG_DIR/iso-definition.yaml
 apiVersion: 1.0
 image:
   imageType: iso
-  baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM.install.iso
+  baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso
   arch: x86_64
   outputImageName: eib-image.iso
 kubernetes:
-  version: v1.28.7+rke2r1
+  version: v1.28.8+rke2r1
   helm:
     charts:
       - name: longhorn
@@ -274,7 +272,6 @@ kubernetes:
         targetNamespace: longhorn-system
         createNamespace: true
         installationNamespace: kube-system
-        valuesFile: longhorn.yaml # optional! if we want to edit some of the default settings
     repositories:
       - name: longhorn
         url: https://charts.longhorn.io
@@ -285,26 +282,54 @@ operatingSystem:
       - open-iscsi
   users:
   - username: root
-    encryptedPassword: <password>
+    encryptedPassword: \$6\$jHugJNNd3HElGsUZ\$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+EOF
 ----
 
-* If you want to customize the default values of the chart, do so by creating `./kubernetes/helm/values/longhorn.yaml`.
+[NOTE]
+====
+Customizing any of the Helm chart values is possible via a separate file provided under `helm.charts[].valuesFile`.
+Refer to the https://github.com/suse-edge/edge-image-builder/blob/release-1.0/docs/building-images.md#kubernetes[upstream documentation] for details.
+====
 
-** Retrieve a copy of the Longhorn `values.yaml` https://raw.githubusercontent.com/longhorn/charts/master/charts/longhorn/values.yaml[here].
+Let's build the image:
 
-*** Now you can edit the defaultSettings in the file we created earlier under `./kubernetes/helm/values/longhorn.yaml`.
-
-** Example YAML file that you can use to add the changes to the ConfigMap: `longhorn-default-setting`.
-
-[,yaml]
+[,shell]
 ----
-defaultSettings:
-  defaultLonghornStaticStorageClass: longhorn-static-example
-  backupstorePollInterval: 500
-  priorityClass: high-priority
+podman run --rm --privileged -it -v $CONFIG_DIR:/eib registry.suse.com/edge/edge-image-builder:1.0.1 build --definition-file $CONFIG_DIR/iso-definition.yaml
 ----
 
-* After the image is built, you can use it to install your OS, and Longhorn will be deployed on top of RKE2.
+After the image is built, you can use it to install your OS on a physical or virtual host.
+Once the provisioning is complete, you are able to log in to the system using the `root:eib` credentials pair.
+
+Ensure that Longhorn has been successfully deployed:
+
+[,console]
+----
+localhost:~ # /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml -n longhorn-system get pods
+NAME                                                READY   STATUS    RESTARTS        AGE
+csi-attacher-5c4bfdcf59-qmjtz                       1/1     Running   0               103s
+csi-attacher-5c4bfdcf59-s7n65                       1/1     Running   0               103s
+csi-attacher-5c4bfdcf59-w9xgs                       1/1     Running   0               103s
+csi-provisioner-667796df57-fmz2d                    1/1     Running   0               103s
+csi-provisioner-667796df57-p7rjr                    1/1     Running   0               103s
+csi-provisioner-667796df57-w9fdq                    1/1     Running   0               103s
+csi-resizer-694f8f5f64-2rb8v                        1/1     Running   0               103s
+csi-resizer-694f8f5f64-z9v9x                        1/1     Running   0               103s
+csi-resizer-694f8f5f64-zlncz                        1/1     Running   0               103s
+csi-snapshotter-959b69d4b-5dpvj                     1/1     Running   0               103s
+csi-snapshotter-959b69d4b-lwwkv                     1/1     Running   0               103s
+csi-snapshotter-959b69d4b-tzhwc                     1/1     Running   0               103s
+engine-image-ei-5cefaf2b-hvdv5                      1/1     Running   0               109s
+instance-manager-0ee452a2e9583753e35ad00602250c5b   1/1     Running   0               109s
+longhorn-csi-plugin-gd2jx                           3/3     Running   0               103s
+longhorn-driver-deployer-9f4fc86-j6h2b              1/1     Running   0               2m28s
+longhorn-manager-z4lnl                              1/1     Running   0               2m28s
+longhorn-ui-5f4b7bbf69-bln7h                        1/1     Running   3 (2m7s ago)    2m28s
+longhorn-ui-5f4b7bbf69-lh97n                        1/1     Running   3 (2m10s ago)   2m28s
+----
+
+TODO: Drop the following and refer to the airgapped guide
 
 == Using Edge Image Builder to deploy Longhorn in an air-gapped environment
 
