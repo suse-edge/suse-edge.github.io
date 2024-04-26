@@ -45,14 +45,14 @@ This guide is created using a Digital Ocean droplet to host the upstream cluster
 
 The basic steps to install and use Elemental are:
 
-* Build bootstrap cluster
-* Install Rancher
-* Install Elemental Operator and Rancher UI extension
-* Build installer disk
-* Boot device with installer
-* Create downstream cluster
+* <<build-bootstrap-cluster>>
+* <<install-rancher>>
+* <<install-elemental, Install Elemental Operator and Rancher UI extension>>
+* <<build-installation-media, Build installer disk>>
+* <<boot-downstream-nodes, Boot device with installer>>
+* <<create-downstream-clusters>>
 
-=== Build bootstrap cluster
+=== Build bootstrap cluster [[build-bootstrap-cluster]]
 
 Start by creating a cluster capable of hosting Rancher and Elemental. This cluster needs to be routable from the network that the downstream nodes are connected to.
 
@@ -71,16 +71,18 @@ Before continuing, you need to set up access to your cluster. As with the setup 
 If you do not want to handle setting up DNS records (for example, this is just an ephemeral test server), you can use a service like https://sslip.io[sslip.io] instead. With this service, you can resolve any IP address with `<address>.sslip.io`.
 ====
 
-==== Installing Rancher
+=== Install Rancher [[install-rancher]]
 
-To install Rancher, you need to get access to the kubeapi of the cluster you just created. This looks differently depending on what distribution of Kubernetes is being used.
+To install Rancher, you need to get access to the Kubernetes API of the cluster you just created. This looks differently depending on what distribution of Kubernetes is being used.
 
 [NOTE]
 ====
 For Rancher Prime customers, please use the Rancher Prime installation instructions provided to you. 
 ====
 
-For RKE2,the kubeconfig file will have been written to `/etc/rancher/rke2/rke2.yaml`. Save this file as `~/.kube/config` on your local system. You may need to edit the file to include the correct externally routable IP address or host name.
+For RKE2, the kubeconfig file will have been written to `/etc/rancher/rke2/rke2.yaml`.
+Save this file as `~/.kube/config` on your local system.
+You may need to edit the file to include the correct externally routable IP address or host name.
 
 Install Rancher easily with the commands from the https://ranchermanager.docs.rancher.com/pages-for-subheaders/install-upgrade-on-a-kubernetes-cluster[Rancher Documentation]:
 
@@ -153,13 +155,14 @@ helm install rancher rancher-latest/rancher `
 If this is intended to be a production system, please use cert-manager to configure a real certificate (such as one from Let's Encrypt).
 ====
 
-Browse to the host name you set up and log in to Rancher with the bootstrapPassword you used. You will be guided through a short setup process.
+Browse to the host name you set up and log in to Rancher with the `bootstrapPassword` you used. You will be guided through a short setup process.
 
-==== Installing Elemental
+=== Install Elemental [[install-elemental]]
 
 With Rancher installed, you can now install Elemental itself.
 
-The helm chart for Elemental is published as an OCI artifact so the installation is a little simpler than other charts. It can be installed from either the same shell you used to install Rancher or in the browser from within Rancher's shell.
+The Helm chart for Elemental is published as an OCI artifact so the installation is a little simpler than other charts.
+It can be installed from either the same shell you used to install Rancher or in the browser from within Rancher's shell.
 
 [,bash]
 ----
@@ -172,7 +175,7 @@ helm install --create-namespace -n cattle-elemental-system \
  oci://registry.suse.com/rancher/elemental-operator-chart
 ----
 
-==== (Optionally) Installing the Elemental UI extension
+==== (Optionally) Install the Elemental UI extension
 
 . To use the Elemental UI, log in to your Rancher instance, click the three-dot menu in the upper left:
 +
@@ -194,23 +197,21 @@ image::installing-elemental-extension-4.png[Installing Elemental extension 4]
 +
 image::accessing-elemental-extension.png[Accessing Elemental extension]
 
-TODO: annotate screenshots
+==== Configure Elemental
 
-TODO: retake screenshots with Rancher 2.8.2 and Elemental 1.4 once released
+For simplicity, we recommend setting the variable `$ELEM` to the full path of where you want the configuration directory:
 
-==== Configuring Elemental
-
-For simplicity, we recommend setting the variable `$ELEM` to the full path of where you want the configuration directory, for example, `ELEM=/home/user/elemental/`.
-
-```
+[,shell]
+----
+export ELEM=$HOME/elemental
 mkdir -p $ELEM
-```
+----
 
-To allow machines to register to Elemental, we need to create a MachineRegistration object in the `fleet-default` namespace.
+To allow machines to register to Elemental, we need to create a `MachineRegistration` object in the `fleet-default` namespace.
 
-A basic version of this object is:
+Let us create a basic version of this object:
 
-[,yaml]
+[,shell]
 ----
 cat << EOF > $ELEM/registration.yaml
 apiVersion: elemental.cattle.io/v1beta1
@@ -224,20 +225,16 @@ spec:
     manufacturer: "\${System Information/Manufacturer}"
     productName: "\${System Information/Product Name}"
 EOF
-----
-[NOTE]
-====
-* The `cat` command has `\` before each `$` so that Bash does not template them. If you copy this manually, make sure to remove each `\`.
-====
 
-To create the object, use:
-
-[,bash]
-----
 kubectl apply -f $ELEM/registration.yaml
 ----
 
-Afterwards, find and note the endpoint that gets assigned:
+[NOTE]
+====
+The `cat` command escapes each `$` with a backslash (`\`) so that Bash does not template them. Remove the backslashes if copying manually.
+====
+
+Once the object is created, find and note the endpoint that gets assigned:
 
 [,bash]
 ----
@@ -268,13 +265,6 @@ image::create-registration-labels.png[Add Labels]
 +
 image::create-registration-create.png[Click Create]
 
-
-Afterwards, find and note the endpoint that gets assigned:
-
-[,bash]
-----
-REGISURL=$(kubectl get machineregistration ele-quickstart-nodes -n fleet-default -o jsonpath='{.status.registrationURL}')
-----
 UI Extension::
 If you just created the configuration, you should see the Registration URL listed and can click "Copy" to copy the address:
 +
@@ -287,7 +277,7 @@ If you clicked away from that screen, you can click "Registration Endpoints" in 
 
 This URL is used in the next step.
 
-=== Building installation media
+=== Build the installation media [[build-installation-media]]
 
 While the current version of Elemental (at the time of writing) has a way to build its own installation media, we need to do this with the Edge Image Builder instead, so the resulting system is built with https://www.suse.com/products/micro/[SLE Micro] as the base Operating System.
 
@@ -297,7 +287,6 @@ For more details on the Edge Image Builder, check out the <<quickstart-eib,Getti
 ====
 
 From a Linux system with Podman installed, run:
-
 
 [,bash]
 ----
@@ -310,7 +299,7 @@ mkdir -p $ELEM/eib_quickstart/elemental
 curl $REGISURL -o $ELEM/eib_quickstart/elemental/elemental_config.yaml
 ----
 
-[,yaml]
+[,bash]
 ----
 cat << EOF > $ELEM/eib_quickstart/eib-config.yaml
 apiVersion: 1.0
@@ -322,33 +311,31 @@ image:
 operatingSystem:
   users:
     - username: root
-      encryptedPassword: \$6\$jHugJNNd3HElGsUZ\$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/ # The unencoded password is 'eib'.
+      encryptedPassword: \$6\$jHugJNNd3HElGsUZ\$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
 EOF
 ----
+
 [NOTE]
 ====
-* The unencoded password is `eib`
-* The `cat` command has `\` before each `$` so that Bash does not template them. If you want to copy the encoded password separately, it is `$6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/`.
+* The unencoded password is `eib`.
+* The `cat` command escapes each `$` with a backslash (`\`) so that Bash does not template them. Remove the backslashes if copying manually.
 ====
 
 [,bash]
 ----
 podman run --privileged --rm -it -v $ELEM/eib_quickstart/:/eib \
- registry.opensuse.org/isv/suse/edge/edgeimagebuilder/containerfile/suse/edge-image-builder:1.0.0.rc3 \
+ registry.suse.com/edge/edge-image-builder:1.0.1 \
  build --definition-file eib-config.yaml
 ----
 
-TODO: update image to released image on release
-
-
 If you are booting a physical device, we need to burn the image to a USB flash drive. This can be done with:
 
+[,bash]
 ----
 sudo dd if=/eib_quickstart/elemental-image.iso of=/dev/<PATH_TO_DISK_DEVICE>
 ----
 
-
-=== Booting downstream nodes
+=== Boot the downstream nodes [[boot-downstream-nodes]]
 
 Now that we have created the installation media, we can boot our downstream nodes with it.
 
@@ -356,15 +343,15 @@ For each of the systems that you want to control with Elemental, add the install
 
 If you are using the UI extension, you should see your node appear in the "Inventory of Machines."
 
-=== Creating downstream clusters
+=== Create downstream clusters [[create-downstream-clusters]]
 
 There are two objects we need to create when provisioning a new cluster using Elemental.
 
 [.tabs]
 Linux::
-The first is the MachineInventorySelectorTemplate. This object allows us to specify a mapping between clusters and the machines in the inventory.
+The first is the `MachineInventorySelectorTemplate`. This object allows us to specify a mapping between clusters and the machines in the inventory.
 +
-. Create a file called `selector.yaml` with the contents:
+. Create a file containing the custom resource:
 +
 [,yaml]
 ----
@@ -382,32 +369,29 @@ spec:
           locationID: '123'
 EOF
 ----
+
+The selector we specified will match any machine in the inventory with the label `locationID: 123`.
 +
-. Then we can create it with
+. Apply the resource to the cluster:
 +
 [,bash]
 ----
 kubectl apply -f $ELEM/selector.yaml
 ----
 +
-. This will match any machine in the inventory with the label `locationID: 123` so we need to add this label to the machines that must be matched. Start by obtaining the name of the machine with
+. Obtain the name of the machine and add the matching label:
 +
 [,bash]
 ----
 MACHINENAME=$(kubectl get MachineInventory -n fleet-default | awk 'NR>1 {print $1}')
-----
-+
-Then we can:
-+
-[,bash]
-----
+
 kubectl label MachineInventory -n fleet-default \
  $MACHINENAME locationID=123
 ----
 +
-. Next, we create the cluster itself. There are different options here but a simple single-node K3s cluster that we will name `cluster.yaml` looks like:
+. Create a simple single-node K3s cluster resource and apply it to the cluster:
 +
-[,yaml]
+[,bash]
 ----
 cat << EOF > $ELEM/cluster.yaml
 apiVersion: provisioning.cattle.io/v1
@@ -429,11 +413,7 @@ spec:
           name: location-123-selector
           apiVersion: elemental.cattle.io/v1beta1
 EOF
-----
-To apply it:
-+
-[,bash]
-----
+
 kubectl apply -f $ELEM/cluster.yaml
 ----
 +
@@ -446,7 +426,6 @@ The UI extension allows for a few shortcuts to be taken. (Managing multiple loca
 . On this screen, configure the cluster you want to be built. For this quick start, K3s v1.28.8+k3s1 is selected and the rest of the options are left as is.
 +
 TODO: Screenshot
-TODO: update version of k3s once new Rancher version is stable
 +
 [TIP]
 ====
@@ -478,7 +457,7 @@ elemental-register --label "network=$INET" \
 Here are some recommended resources to research after using this guide:
 
 * End-to-end automation in <<components-fleet>>
-* Additional network configuration options in <<components-eib>>
+* Additional network configuration options in <<components-nmc>>
 
 == Planned changes
 
