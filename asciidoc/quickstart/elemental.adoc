@@ -11,13 +11,9 @@ ifdef::env-github[]
 :warning-caption: :warning:
 endif::[]
 
-Elemental is a software stack that provides for remote control over the lifecycle of the Operating System, Kubernetes and workload in a secure and declarative way.
+This section documents the "phone home network provisiong" solution as part of SUSE Edge, where we use Elemental to assist with node onboarding. Elemental is a software stack enabling remote host registration and centralized full cloud-native OS management with Kubernetes. In the SUSE Edge stack we use the registration feature of Elemental to enable remote host onboarding into Rancher so that hosts can be integrated into a centralized management platform and from there, deploy and manage Kubernetes clusters along with layered components, applications, and their lifecycle, all from a common place. 
 
-== Why use this method
-
-Elemental can be useful for scenarios where the devices that you want to control are not on the same network as the upstream cluster or do not have a BMC onboard to allow more direct control.
-
-This is a common scenario for use cases in Retail, IIoT or other spaces where you have little control over the network your devices are being installed in.
+This approach can be useful in scenarios where the devices that you want to control are not on the same network as the upstream cluster or do not have a out-of-band management controller onboard to allow more direct control, and where you're booting many different "unknown" systems at the edge, and need to securely onboard and manage them at scale. This is a common scenario for use cases in retail, industrial IoT, or other spaces where you have little control over the network your devices are being installed in.
 
 == High-level architecture
 
@@ -25,19 +21,19 @@ image::quickstart-elemental-architecture.png[]
 
 == Resources needed
 
-At the very least, you need:
+The following describes the minimum system and environmental requirements to run through this quickstart:
 
-* A host for the management cluster (the one hosting Rancher and Elemental):
+* A host for the centralized management cluster (the one hosting Rancher and Elemental):
  ** Minimum 8 GB RAM and 20 GB disk space for development or testing (see https://ranchermanager.docs.rancher.com/pages-for-subheaders/installation-requirements#hardware-requirements[here] for production use)
-* A host to be controlled (a virtual machine can be used for demoing or testing purposes)
- ** Minimum 25 GB disk
+* A target node to be provisioned, i.e. the edge device (a virtual machine can be used for demoing or testing purposes)
+ ** Minimum 4GB RAM, 2 CPU cores, and 20 GB disk
 * A resolvable host name for the management cluster or a static IP address to use with a service like sslip.io
-* A host to build the installation media
- ** Running SLES 15 SP5 or openSUSE Leap 15.5
+* A host to build the installation media via Edge Image Builder
+ ** Running SLES 15 SP5, openSUSE Leap 15.5, or another compatible operating system that supports Podman.
  ** With https://kubernetes.io/docs/reference/kubectl/kubectl/[Kubectl], https://podman.io[Podman], and https://helm.sh[Helm] installed
- ** For most people, this is their local desktop
 * A USB flash drive to boot from (if using physical hardware)
- ** Existing data is overwritten as part of the process
+
+NOTE: Existing data found on target machines will be overwritten as part of the process, please make sure you backup any data on any USB storage devices and disks attached to target deployment nodes.
 
 This guide is created using a Digital Ocean droplet to host the upstream cluster and an Intel NUC as the downstream device. For building the installation media, SUSE Linux Enterprise Server is used.
 
@@ -75,11 +71,6 @@ If you do not want to handle setting up DNS records (for example, this is just a
 
 To install Rancher, you need to get access to the Kubernetes API of the cluster you just created. This looks differently depending on what distribution of Kubernetes is being used.
 
-[NOTE]
-====
-For Rancher Prime customers, please use the Rancher Prime installation instructions provided to you. 
-====
-
 For RKE2, the kubeconfig file will have been written to `/etc/rancher/rke2/rke2.yaml`.
 Save this file as `~/.kube/config` on your local system.
 You may need to edit the file to include the correct externally routable IP address or host name.
@@ -93,7 +84,7 @@ Linux::
 +
 [,bash]
 ----
-helm repo add rancher-latest https://releases.rancher.com/server-charts/latest
+helm repo add rancher-prime https://charts.rancher.com/server-charts/prime
 
 kubectl create namespace cattle-system
 
@@ -111,7 +102,7 @@ Windows::
 +
 [,bash]
 ----
-helm repo add rancher-latest https://releases.rancher.com/server-charts/latest
+helm repo add rancher-prime https://charts.rancher.com/server-charts/prime
 
 kubectl create namespace cattle-system
 
@@ -132,7 +123,7 @@ Linux::
 +
 [,bash]
 ----
-helm install rancher rancher-latest/rancher \
+helm install rancher rancher-prime/rancher \
   --namespace cattle-system \
   --set hostname=<DNS or sslip from above> \
   --set replicas=1 \
@@ -143,7 +134,7 @@ Windows::
 +
 [,bash]
 ----
-helm install rancher rancher-latest/rancher `
+helm install rancher rancher-prime/rancher `
   --namespace cattle-system `
   --set hostname=<DNS or sslip from above> `
   --set replicas=1 `
@@ -159,9 +150,7 @@ Browse to the host name you set up and log in to Rancher with the `bootstrapPass
 
 === Install Elemental [[install-elemental]]
 
-With Rancher installed, you can now install Elemental itself.
-
-The Helm chart for Elemental is published as an OCI artifact so the installation is a little simpler than other charts.
+With Rancher installed, you can now install the Elemental operator and required CRD's. The Helm chart for Elemental is published as an OCI artifact so the installation is a little simpler than other charts.
 It can be installed from either the same shell you used to install Rancher or in the browser from within Rancher's shell.
 
 [,bash]
@@ -279,7 +268,7 @@ This URL is used in the next step.
 
 === Build the installation media [[build-installation-media]]
 
-While the current version of Elemental (at the time of writing) has a way to build its own installation media, we need to do this with the Edge Image Builder instead, so the resulting system is built with https://www.suse.com/products/micro/[SLE Micro] as the base Operating System.
+While the current version of Elemental has a way to build its own installation media, in SUSE Edge 3.0 we do this with the Edge Image Builder instead, so the resulting system is built with https://www.suse.com/products/micro/[SLE Micro] as the base Operating System.
 
 [TIP]
 ====
@@ -332,7 +321,7 @@ If you are booting a physical device, we need to burn the image to a USB flash d
 
 [,bash]
 ----
-sudo dd if=/eib_quickstart/elemental-image.iso of=/dev/<PATH_TO_DISK_DEVICE>
+sudo dd if=/eib_quickstart/elemental-image.iso of=/dev/<PATH_TO_DISK_DEVICE> status=progress
 ----
 
 === Boot the downstream nodes [[boot-downstream-nodes]]
@@ -342,6 +331,8 @@ Now that we have created the installation media, we can boot our downstream node
 For each of the systems that you want to control with Elemental, add the installation media and boot the device. After installation, it will reboot and register itself.
 
 If you are using the UI extension, you should see your node appear in the "Inventory of Machines."
+
+NOTE: Do not remove the installation medium until you've seen the login prompt; during first-boot files are still accessed on the USB stick.
 
 === Create downstream clusters [[create-downstream-clusters]]
 
@@ -452,15 +443,3 @@ Here are some recommended resources to research after using this guide:
 
 * End-to-end automation in <<components-fleet>>
 * Additional network configuration options in <<components-nmc>>
-
-== Planned changes
-
-There are a few changes to this guide that are currently planned (at the time of writing):
-
-=== Improved support for and integration with SLE Micro 6.x
-
-* Image building done in the Elemental Operator
-* Both A/B and RPM-based transactional updates
-* UI improvements for non-teal images
-
-These improvements are expected to be included in an upcoming release.
