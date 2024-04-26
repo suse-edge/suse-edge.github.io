@@ -11,62 +11,68 @@ ifdef::env-github[]
 :warning-caption: :warning:
 endif::[]
 
-Edge Image Builder (EIB) is a tool that streamlines the process of generating preconfigured, ready-to-deploy (RTD) disk images for bootstrapping machines, even in air-gapped scenarios.
+Edge Image Builder (EIB) is a tool that streamlines the process of generating customized, ready-to-boot (CRB) disk images for bootstrapping machines, even in air-gapped scenarios.
 
 For more information, read the <<components-eib,Edge Image Builder Introduction>>.
 
 == Prerequisites
 
-* x86_64 machine to run EIB
-* Podman or alternative container runtime
-* Local copy of `SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso` found https://www.suse.com/download/sle-micro/[here]
-
-[NOTE]
-====
-If you are running Rancher Desktop, you need to switch to the https://docs.rancherdesktop.io/ui/preferences/container-engine/general[`dockerd (moby)` container runtime].
-====
+* An x86_64 physical host (or virtual machine) running SLES 15 SP5 or openSUSE Leap 15.5
+* An available container runtime (e.g. Podman)
+* A copy of the SLE Micro 5.5 ISO image found https://www.suse.com/download/sle-micro/[here]
 
 === Getting the EIB Image
 
-Edge Image Builder is run as a container image that can be pulled with:
+The EIB container image is publicly available and can be downloaded from the SUSE Edge registry by running:
 
-```
-podman pull registry.opensuse.org/isv/suse/edge/edgeimagebuilder/containerfile/suse/edge-image-builder:1.0.0.rc3
-```
+[,shell]
+----
+podman pull registry.suse.com/edge/edge-image-builder:1.0.1
+----
 
 == Creating the image configuration directory
 
-EIB requires mounting a directory from the host.
+EIB containers require mounting a configuration directory from the host.
+This directory must follow a specific structure. Let's create it:
 
-This directory must follow a specific structure. The following instructions outline a non-comprehensive example:
+[,shell]
+----
+export CONFIG_DIR=$HOME/eib
+mkdir -p $CONFIG_DIR/base-images
+----
 
-For simplicity, we recommend setting the variable `$EIB` to the full path of where you want the configuration directory, for example, `EIB=/home/user/eib/config`.
+We will now ensure that the downloaded base image copy is moved over to the configuration directory:
 
-```
-mkdir -p $EIB/base-images
-```
+[,shell]
+----
+mv /path/to/downloads/SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso $CONFIG_DIR/base-images/slemicro.iso
+----
 
-```
-cp SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso $EIB/base-images/slemicro.iso
-```
+> NOTE: EIB is never going to modify the base image input.
 
-The generated directory should look like:
+The configuration directory at this point should look like the following:
 
 [,console]
 ----
 └── base-images/
-    └ slemicro.iso
+    └── slemicro.iso
 ----
 
-== Building the image definition file
+== Creating the image definition file
 
-The definition file declaratively defines the desired configuration of the RTD image.
+The definition file describes the majority of configurable options that the Edge Image Builder supports.
 
-The following is the base content of the definition file that we will name `eib-iso-definition.yaml`:
+[NOTE]
+====
+The following instructions outline a non-comprehensive example.
+Please refer to the https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md[upstream building images guide] for details.
+====
+
+Let's start with a very basic definition file for our OS image:
 
 [,console]
 ----
-cat << EOF > $EIB/eib-iso-definition.yaml
+cat << EOF > $CONFIG_DIR/iso-definition.yaml
 apiVersion: 1.0
 image:
   imageType: iso
@@ -76,19 +82,20 @@ image:
 EOF
 ----
 
-This definition specifies generating an image for an `x86_64` system. The base image to be modified is an `ISO` image named `slemicro.iso`, expected to be located at `$EIB/base-images/slemicro.iso`. It also outlines that after EIB finishes modifying the image, the RTD image will be named `eib-image.iso`.
+This definition specifies generating an image for an `x86_64` system. The base image to be modified is an `ISO` image named `slemicro.iso`,
+expected to be located at `$CONFIG_DIR/base-images/slemicro.iso`. It also outlines that after EIB finishes modifying the image, the CRB image will be named `eib-image.iso`.
 
 Now our directory structure should look like:
 [,console]
 ----
-├── eib-iso-definition.yaml
-├── base-images/
-└── └ slemicro.iso
+├── iso-definition.yaml
+└── base-images/
+    └── slemicro.iso
 ----
 
 === Configuring OS Users
 
-EIB allows us to preconfigure users with login information, such as passwords or SSH keys. (Doing this for root is not recommended but we will use root for this guide).
+EIB allows us to preconfigure users with login information, such as passwords or SSH keys.
 
 First, create an encrypted password:
 
@@ -101,10 +108,11 @@ This will output something similar to:
 
 [,console]
 ----
-$6$NEi4Y1pauz2Ya9gy$QUBRl/YkPgUyiJ41Iw9Zho7ngoWxbhTQL2U/ahB3b7iXmAOBc1xqw4RabfYs/2SfCo6EWi4Sg8avnczEkDjRk0
+$6$G392FCbxVgnLaFw1$Ujt00mdpJ3tDHxEg1snBU3GjujQf6f8kvopu7jiCBIhRbRvMmKUqwcmXAKggaSSKeUUOEtCP3ZUoZQY7zTXnC1
 ----
 
-We can then add a section in the definition file called `operatingSystem` with a `users` array inside it. The resulting file should look like:
+We can then add a section in the definition file called `operatingSystem` with a `users` array inside it.
+The resulting file should look like:
 
 [,yaml]
 ----
@@ -117,14 +125,20 @@ image:
 operatingSystem:
   users:
     - username: root
-      encryptedPassword: $6$NEi4Y1pauz2Ya9gy$QUBRl/YkPgUyiJ41Iw9Zho7ngoWxbhTQL2U/ahB3b7iXmAOBc1xqw4RabfYs/2SfCo6EWi4Sg8avnczEkDjRk0
+      encryptedPassword: $6$G392FCbxVgnLaFw1$Ujt00mdpJ3tDHxEg1snBU3GjujQf6f8kvopu7jiCBIhRbRvMmKUqwcmXAKggaSSKeUUOEtCP3ZUoZQY7zTXnC1
 ----
 
-=== Configuring packages
+=== Configuring RPM packages
 
-EIB also allows us to preconfigure our RTD image with packages.
+EIB also allows us to preconfigure our CRB image with RPM packages.
+It will automatically resolve and install all listed RPMs and their dependencies.
 
-As an example, to install the `yq` package (a package that simplifies working with YAML) found in the PackageHub repository, we can specify the package as part of a package list and also the repository where it can be found:
+[NOTE]
+====
+More examples can be found in the https://github.com/suse-edge/edge-image-builder/blob/main/docs/installing-packages.md[upstream documentation].
+====
+
+We are going to install the `yq` RPM package found in the PackageHub repository:
 
 [,yaml]
 ----
@@ -148,7 +162,7 @@ image:
 operatingSystem:
   users:
     - username: root
-      encryptedPassword: $6$NEi4Y1pauz2Ya9gy$QUBRl/YkPgUyiJ41Iw9Zho7ngoWxbhTQL2U/ahB3b7iXmAOBc1xqw4RabfYs/2SfCo6EWi4Sg8avnczEkDjRk0
+      encryptedPassword: $6$G392FCbxVgnLaFw1$Ujt00mdpJ3tDHxEg1snBU3GjujQf6f8kvopu7jiCBIhRbRvMmKUqwcmXAKggaSSKeUUOEtCP3ZUoZQY7zTXnC1
   packages:
     packageList:
       - yq
@@ -156,18 +170,17 @@ operatingSystem:
       - url: https://download.opensuse.org/repositories/openSUSE:Factory/standard
 ----
 
-Given this, the EIB package resolver will automatically search for and download the required RPMs for the package, as well as all the necessary dependencies. This package will then be preinstalled to the RTD image with no network connection necessary.
-
 [NOTE]
 ====
-More operating system settings can be found https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md#operating-system[here] in the Edge Image Builder documentation.
+More operating system settings can be found in the https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md#operating-system[upstream documentation].
 ====
 
 === Configuring Kubernetes cluster and user workloads
 
-Another feature of EIB is the simplified air-gapped deployment of a Kubernetes cluster with Helm charts and manifests.
+Another feature of EIB is the simplified air-gapped deployment of Kubernetes clusters and bootstrapping application workloads via Helm charts and manifests.
 
-The following addition to the definition file specifies that a single-node RKE2 Kubernetes cluster using version `v1.28.8+rke2r1` should be deployed. It also specifies that version `0.2.2` of `kubevirt` found in the `https://suse-edge.github.io/charts` repository, and the manifest found at `https://k8s.io/examples/application/nginx-app.yaml` should be automatically deployed on the generated RTD image as well.
+We will be using the following addition to the definition file to instruct EIB to provision a single-node RKE2 Kubernetes cluster.
+We are also going to install KubeVirt via the SUSE Edge Helm chart, as well as NGINX via a Kubernetes manifest.
 
 [,yaml]
 ----
@@ -178,12 +191,12 @@ kubernetes:
       - https://k8s.io/examples/application/nginx-app.yaml
   helm:
     charts:
-      - name: kubevirt
-        version: 0.2.2
+      - name: kubevirt-chart
+        version: 0.2.4
         repositoryName: suse-edge
     repositories:
       - name: suse-edge
-        url: https://suse-edge.github.io/charts
+        url: oci://registry.suse.com/edge
 ----
 
 The resulting full definition file should now look like:
@@ -198,7 +211,7 @@ image:
 operatingSystem:
   users:
     - username: root
-      encryptedPassword: $6$NEi4Y1pauz2Ya9gy$QUBRl/YkPgUyiJ41Iw9Zho7ngoWxbhTQL2U/ahB3b7iXmAOBc1xqw4RabfYs/2SfCo6EWi4Sg8avnczEkDjRk0
+      encryptedPassword: $6$G392FCbxVgnLaFw1$Ujt00mdpJ3tDHxEg1snBU3GjujQf6f8kvopu7jiCBIhRbRvMmKUqwcmXAKggaSSKeUUOEtCP3ZUoZQY7zTXnC1
   packages:
     packageList:
       - yq
@@ -211,39 +224,37 @@ kubernetes:
       - https://k8s.io/examples/application/nginx-app.yaml
   helm:
     charts:
-      - name: kubevirt
-        version: 0.2.2
+      - name: kubevirt-chart
+        version: 0.2.4
         repositoryName: suse-edge
     repositories:
       - name: suse-edge
-        url: https://suse-edge.github.io/charts
+        url: oci://registry.suse.com/edge
 ----
 
 [NOTE]
 ====
-Further examples of options such as multi-node deployments, networking, and Helm chart options/values can be seen https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md#kubernetes[here] in the Edge Image Builder documentation.
+Further examples of options such as multi-node deployments, networking, and Helm chart options/values can be seen https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md#kubernetes[upstream documentation].
 ====
 
 
 === Configuring the network
-[NOTE]
-====
-This example is designed for the `default` libvirt network. Other environments may need their own network configuration in order to work.
-====
 
 Lastly, for this quick start example, let us set up a network device.
 
-First, create the `network` directory at `$EIB/network`.
+[NOTE]
+====
+The following assumes a default `libvirt` network with an IP address range `192.168.122.1/24`.
+Adjust accordingly if this differs in your environment.
+====
 
-```
-mkdir $EIB/network
-```
-
-Within the `network` directory, create a file named `host1.local.yaml` containing the following:
+Let's create a file describing the desired network state in the respective network directory:
 
 [,console]
 ----
-cat << EOF > $EIB/network/host1.local.yaml
+mkdir $CONFIG_DIR/network
+
+cat << EOF > $CONFIG_DIR/network/host1.local.yaml
 routes:
   config:
   - destination: 0.0.0.0/0
@@ -277,28 +288,29 @@ interfaces:
 EOF
 ----
 
-[NOTE]
+[WARNING]
 ====
-EIB networking is MAC address-dependent. In the case of virtual machines, you may be able to set the MAC address at boot. For physical machines, you need to know the MAC address ahead of time.
+EIB networking is MAC address-dependent. In the case of virtual machines, you may be able to set the MAC address at boot.
+For physical machines, you need to know the MAC address ahead of time.
 ====
-
-
-// [WARNING]
-// ====
-// Be sure to specify the correct 
-// ====
 
 The resulting file structure should look like:
 [,console]
 ----
-├── eib-iso-definition.yaml
+├── iso-definition.yaml
 ├── base-images/
-│   └ slemicro.iso
+│   └── slemicro.iso
 └── network/  
-    └ host1.local.yaml
+    └── host1.local.yaml
 ----
 
-This will be turned into the necessary https://github.com/nmstate/nmstate[nmstate] configuration files when the image is built. These files will be automatically applied during the provisioning of the RTD image, resulting in a complete network configuration.
+The network configuration we just created will be parsed and converted to the necessary NetworkManager connection files.
+These files will be applied during the provisioning of the host, resulting in a complete network configuration.
+
+[NOTE]
+====
+Please refer to the <<components-nmc, Edge Networking component>> for comprehensive explanation and examples of this feature.
+====
 
 == Building the image
 
@@ -306,9 +318,9 @@ To build the image, we can run:
 
 [,bash]
 ----
-podman run --rm -it --privileged -v $EIB:/eib \
-registry.opensuse.org/isv/suse/edge/edgeimagebuilder/containerfile/suse/edge-image-builder:1.0.0.rc3 \
-build --definition-file eib-iso-definition.yaml
+podman run --rm -it --privileged -v $CONFIG_DIR:/eib \
+registry.suse.com/edge/edge-image-builder:1.0.1 \
+build --definition-file iso-definition.yaml
 ----
 
 The output of the command should be similar to:
@@ -329,43 +341,50 @@ Rpm .......................... [SUCCESS]
 Systemd ...................... [SKIPPED]
 Elemental .................... [SKIPPED]
 Suma ......................... [SKIPPED]
-Downloading file: dl-manifest-1.yaml 100% | (498/498 B, 4.2 MB/s)        
+Downloading file: dl-manifest-1.yaml 100%  (498/498 B, 5.9 MB/s)
+Populating Embedded Artifact Registry... 100%  (3/3, 11 it/min)
 Embedded Artifact Registry ... [SUCCESS]
 Keymap ....................... [SUCCESS]
 Configuring Kubernetes component...
 The Kubernetes CNI is not explicitly set, defaulting to 'cilium'.
-Downloading file: rke2-images-core.linux-amd64.tar.zst 100% | (780/780 MB, 116 MB/s)        
-Downloading file: rke2-images-cilium.linux-amd64.tar.zst 100% | (367/367 MB, 32 MB/s)         
-Downloading file: rke2.linux-amd64.tar.gz 100% | (34/34 MB, 102 MB/s)        
-Downloading file: sha256sum-amd64.txt 100% | (3.9/3.9 kB, 32 MB/s)        
-Downloading file: dl-manifest-1.yaml 100% | (498/498 B, 6.8 MB/s)        
+Downloading file: rke2_installer.sh
+Downloading file: rke2-images-core.linux-amd64.tar.zst 100% (782/782 MB, 98 MB/s)
+Downloading file: rke2-images-cilium.linux-amd64.tar.zst 100% (367/367 MB, 100 MB/s)
+Downloading file: rke2.linux-amd64.tar.gz 100%  (34/34 MB, 101 MB/s)
+Downloading file: sha256sum-amd64.txt 100%  (3.9/3.9 kB, 1.5 MB/s)
+Downloading file: dl-manifest-1.yaml 100%  (498/498 B, 7.2 MB/s)
 Kubernetes ................... [SUCCESS]
 Certificates ................. [SKIPPED]
 Building ISO image...
 Kernel Params ................ [SKIPPED]
-Image build complete.
+Image build complete!
 ----
 
-The generated RTD `ISO` image will be created at `$EIB/eib-image.iso`:
+The built ISO image is stored at `$CONFIG_DIR/eib-image.iso`:
 
 [,console]
 ----
-├── eib-iso-definition.yaml
+├── iso-definition.yaml
 ├── eib-image.iso
 ├── _build
-│   └ build-XYZ
+│   └── cache/
+│       └── ...
+│   └── build-<timestamp>/
+│       └── ...
 ├── base-images/
-│   └ slemicro.iso
+│   └── slemicro.iso
 └── network/
+    └── host1.local.yaml
 ----
 
-Each build creates a time-stamped folder in `$EIB/_build/` that includes the logs of the build, the artifacts used during the build, and the `combustion` directory which contains all the artifacts that are added to the RTD image.
+Each build creates a time-stamped folder in `$CONFIG_DIR/_build/` that includes the logs of the build, the artifacts used during the build,
+and the `combustion` and `artefacts` directories which contain all the scripts and artifacts that are added to the CRB image.
 
 The contents of this directory should look like:
 [,console]
 ----
-├── build-XYZ
-├── combustion
+├── build-<timestamp>/
+│   │── combustion/
 │   │   ├── 05-configure-network.sh
 │   │   ├── 10-rpm-install.sh
 │   │   ├── 12-keymap-setup.sh
@@ -373,43 +392,46 @@ The contents of this directory should look like:
 │   │   ├── 20-k8s-install.sh
 │   │   ├── 26-embedded-registry.sh
 │   │   ├── 48-message.sh
-│   │   ├── hauler
-│   │   ├── kubernetes
-│   │   │   ├── images
-│   │   │   │   ├── rke2-images-cilium.linux-amd64.tar.zst
-│   │   │   │   └── rke2-images-core.linux-amd64.tar.zst
-│   │   │   ├── install
-│   │   │   │   ├── rke2.linux-amd64.tar.gz
-│   │   │   │   └── sha256sum-amd64.txt
-│   │   │   └── manifests
-│   │   │       ├── dl-manifest-1.yaml
-│   │   │       └── kubevirt.yaml
-│   │   ├── network
-│   │   │   ├── host1.local
+│   │   ├── network/
+│   │   │   ├── host1.local/
 │   │   │   │   └── eth0.nmconnection
 │   │   │   └── host_config.yaml
 │   │   ├── nmc
-│   │   ├── registries.yaml
-│   │   ├── registry
-│   │   │   └── embedded-registry.tar.zst
-│   │   ├── rke2_installer.sh
-│   │   ├── rpm-repo
-│   │   │   ├── addrepo0
-│   │   │   │   └── x86_64
-│   │   │   │       ├── ...
-│   │   │   ├── repodata
-│   │   │   │   ├── ...
-│   │   │   └── zypper-success
-│   │   ├── script
-│   │   └── server.yaml
+│   │   └── script
+│   │── artefacts/
+│   │   │── registry/
+│   │   │   ├── hauler
+│   │   │   ├── nginx:1.14.2-registry.tar.zst
+│   │   │   ├── rancher_kubectl:v1.28.7-registry.tar.zst
+│   │   │   └── registry.suse.com_suse_sles_15.5_virt-operator:1.1.1-150500.8.12.1-registry.tar.zst
+│   │   │── rpms/
+│   │   │   ├── rpm-repo
+│   │   │   │   ├── addrepo0
+│   │   │   │   │   └── x86_64
+│   │   │   │   │       ├── ...
+│   │   │   │   ├── repodata
+│   │   │   │   │   ├── ...
+│   │   │   │   └── zypper-success
+│   │   │── kubernetes/
+│   │   │   ├── rke2_installer.sh
+│   │   │   ├── registries.yaml
+│   │   │   ├── server.yaml
+│   │   │   ├── images/
+│   │   │   │   ├── rke2-images-cilium.linux-amd64.tar.zst
+│   │   │   │   └── rke2-images-core.linux-amd64.tar.zst
+│   │   │   ├── install/
+│   │   │   │   ├── rke2.linux-amd64.tar.gz
+│   │   │   │   └── sha256sum-amd64.txt
+│   │   │   └── manifests/
+│   │   │       ├── dl-manifest-1.yaml
+│   │   │       └── kubevirt-chart.yaml
 │   ├── createrepo.log
 │   ├── eib-build.log
 │   ├── embedded-registry.log
-│   ├── hauler-manifest.yaml
 │   ├── helm
-│   │   └── kubevirt-0.2.2.tgz
+│   │   └── kubevirt-chart
+│   │       └── kubevirt-0.2.4.tgz
 │   ├── helm-pull.log
-│   ├── helm-repo-add.log
 │   ├── helm-template.log
 │   ├── iso-build.log
 │   ├── iso-build.sh
@@ -432,12 +454,13 @@ The contents of this directory should look like:
     ├── ...
 ----
 
-If the build fails, `eib-build.log` is the first log that contains information. From there, it will direct you to the component that failed for debugging.
+If the build fails, `eib-build.log` is the first log that contains information.
+From there, it will direct you to the component that failed for debugging.
 
 == Debugging the image build process
 
-If the image build process fails, refer to the https://github.com/dbw7/edge-image-builder/blob/main/docs/debugging.md[EIB debugging guide].
+If the image build process fails, refer to the https://github.com/suse-edge/edge-image-builder/blob/main/docs/debugging.md[upstream debugging guide].
 
 == Testing your newly built image
 
-For instructions on how to test the newly build RTD image, refer to the https://github.com/suse-edge/edge-image-builder/blob/main/docs/testing-guide.md[EIB image testing guide].
+For instructions on how to test the newly built CRB image, refer to the https://github.com/suse-edge/edge-image-builder/blob/main/docs/testing-guide.md[upstream image testing guide].
