@@ -1,0 +1,266 @@
+== Setup
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+The following section describes the minimal steps needed to setup a single-node `Rancher Management Cluster`. 
+
+The setup can be separated in 3 logical tasks:
+
+. Boot the <<components-slmicro,SUSE Linux Enterprise Micro>> OS
+. Deploy <<components-rke2,RKE2>> Kubernetes distribution
+. Deploy <<components-rancher,Rancher>> chart
+
+The recommended way of doing this is by using the <<components-eib,Edge Image Builder>> tool to provide a single image that will do the above mentioned tasks when it is first booted. This significantly decreases the operation cost of deploying a `Rancher Management Cluster`.
+
+In the sections below you can find information on how to use the `Edge Image Builder` tool to prepare and build a ready to boot `Rancher Management Cluster` image.
+
+=== Requirements
+
+Typically EIB is run from inside a container, so a container runtime such as https://podman.io[Podman] or https://rancherdesktop.io[Rancher Desktop] needs to be present on the machine beforehand. For more information, check the <<quickstart-eib,Edge Image Builder Quick Start>> and https://github.com/suse-edge/edge-image-builder[GitHub] pages.
+
+[#day2-prepare-eib-image]
+=== Prepare EIB Image
+
+EIB works from a specific *configuration* directory that contains all the necessary files for a successful EIB image build. 
+
+To prepare an EIB image containing the components for a `Rancher Management Cluster`, at a minimum, this directory should hold:
+
+* A `base-images` directory holding the base image from which EIB will build the management image
+
+* A `kubernetes` directory holding the override values configuration for the Rancher chart
+
+* An image definition file describing the EIB management image that should be built
+
+* An *optional* `network` directory holding custom network configuration data. Useful if you do not have a hostname to assign to the Rancher helm chart.
+
+.Example structure for both _raw_ and _iso_ formats of management image:
+[,bash]
+----
+.
+|-- base-images
+|   |-- SLE-Micro.x86_64-5.5.0-Default-GM.raw
+|   `-- SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM.install.iso
+|-- kubernetes
+|   `-- helm
+|       `-- values
+|           `-- rancher-values.yaml
+|-- mgmt-cluster-iso.yaml
+|-- mgmt-cluster-raw.yaml
+`-- network
+    `-- mgmt-cluster-network.yaml
+----
+
+==== Base images
+
+Base images should be downloaded from https://scc.suse.com[SUSE Customer Center] or https://www.suse.com/download/sle-micro[SUSE Download page] and put under the `base-images` directory. Edge Image Builder supports both `iso` and `raw` image formats.
+
+==== Kubernetes directory
+
+The `kubernetes` directory can be used to inject cluster specific configurations, apply manifests and install Helm charts.
+
+In the context of this documentation, we specify the values override file `kubernetes/helm/values/rancher-values.yaml`. There we will provide custom configurations to the Rancher helm chart that will be configured as part of the EIB image definition file.
+
+At a minimum the `rancher-values.yaml` file should hold:
+
+* The `hostname` at which Rancher will be accessible
+
+* The `bootstrapPassword` which the admin will use to login to the Rancher instance
+
+[NOTE]
+====
+These are the minimum required configurations for the Rancher chart. If your setup requires additional configurations, you can add them to this file as well. Supported properties can be viewed https://ranchermanager.docs.rancher.com/getting-started/installation-and-upgrade/installation-references/helm-chart-options[here].
+====
+
+.*rancher-values.yaml* with minimum configurations:
+[,yaml]
+----
+hostname: foo.bar
+bootstrapPassword: foobar
+----
+
+If you do not have a FQDN ready for the rancher `hostname`, you can use a dummy DNS service such as https://sslip.io[sslip.io] instead. Refer to the below section for further details.
+
+===== Configure Rancher with sslip.io hostname
+
+NOTE: This section is *optional* and only needed if you do not have a FQDN to use for the Rancher hostname.
+
+Since *sslip.io* queries the request to an IP address embedded inside of the provided hostname, we need to configure a static IP address for the `Rancher Management Cluster` image that *EIB* will build. 
+
+Network configurations for *EIB generated images* are defined in the `network` directory. Create this directory under the root of your EIB *configuration* directory and add a file named `mgmt-cluster-network.yaml`.
+
+.mgmt-cluster-network.yaml example:
+[,yaml]
+----
+routes:
+  config:
+  - destination: 0.0.0.0/0
+    metric: 100
+    next-hop-address: 192.168.122.1
+    next-hop-interface: eth0
+    table-id: 254
+  - destination: 192.168.122.0/24
+    metric: 100
+    next-hop-address:
+    next-hop-interface: eth0
+    table-id: 254
+dns-resolver:
+  config:
+    server:
+    - 192.168.122.1
+    - 8.8.8.8
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mac-address: 52:54:00:33:e6:64
+  ipv4:
+    address:
+    - ip: 192.168.122.117
+      prefix-length: 24
+    dhcp: false
+    enabled: true
+  ipv6:
+    enabled: false
+----
+
+The network configration above defines a static IP address (*_192.168.122.117_*) from the *_192.168.122.0/24_* network. *_52:54:00:33:e6:64_* is the MAC address for the machine where the image will be booted. For more information, see <<quickstart-eib-network>>.
+
+Taking the above example into account, our `kubernetes/helm/values/rancher-values.yaml` would look like this:
+
+.*rancher-values.yaml* with a sslip.io hostname:
+[,yaml]
+----
+hostname: rancher-192.168.122.117.sslip.io
+bootstrapPassword: foobar
+----
+
+==== Image definition files
+
+Image definition files are mandatory configuration files which instruct how EIB should build a given image. They should be placed under the root of the EIB *configuration* directory.
+
+Below you can find examples for an EIB `Rancher Management Cluster` image definition with the following configurations:
+
+* `SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM.install.iso` as a base image
+
+* `root` user with `root` password
+
+* Unattended image installation on `/dev/sda` device
+
+* Kubernetes version `v1.28.8+rke2r1`
+
+* Deploy the following Kubernetes applications:
+
+** `cert-manager` version `1.14.4`
+
+** `rancher-prime` verison `2.8.3`
+
+.Image definition file for a `Rancher Management Cluster` using `iso` as base:
+[,yaml]
+----
+# mgmt-cluster-iso.yaml
+apiVersion: 1.0
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM.install.iso
+  outputImageName: eib-mgmt-cluster-image.iso
+operatingSystem:
+  users:
+  - username: root
+    encryptedPassword: $6$djShT68COdFybrdw$n8EgYB.ZTRpauS70luGpW.VKIedBIdCMjnfsKXhJBYX.75RgZU1jk3E4k9qd13RjKu/qws.h4fEbr8SLFLAw21
+  isoConfiguration:
+    installDevice: /dev/sda
+  systemd:
+    disable:
+      - rebootmgr
+kubernetes:
+  version: v1.28.8+rke2r1
+  manifests:
+    urls:
+    - https://github.com/cert-manager/cert-manager/releases/download/v1.14.4/cert-manager.crds.yaml
+  helm:
+    charts:
+    - name: cert-manager
+      repositoryName: jetstack
+      targetNamespace: cert-manager
+      createNamespace: true
+      version: v1.14.4
+    - name: rancher
+      repositoryName: rancher-prime
+      targetNamespace: cattle-system
+      createNamespace: true
+      valuesFile: rancher-values.yaml
+      version: 2.8.3
+    repositories:
+    - name: jetstack
+      url: https://charts.jetstack.io
+    - name: rancher-prime
+      url: https://charts.rancher.com/server-charts/prime
+----
+
+To build an EIB image using `.raw` as base, you need to remove the `operatingSystem.isoConfiguration` and add `operatingSystem.rawConfiguration`, everything else remains the same.
+
+For a detailed description on the configuration sections in an image definition file, refer to <<quickstart-eib-definition-file>>.
+
+=== Build EIB image
+
+Once you have prepared EIB's image configuration directory, to build the `Rancher Management Cluster` image you need to run this command:
+
+[,bash]
+----
+podman run --rm --privileged -it -v ${EIB_IMAGE_CONF_DIR}:/eib registry.suse.com/edge/edge-image-builder:1.0.1 build --definition-file ${DEFINITION_FILE}
+----
+
+* `$\{EIB_IMAGE_CONF_DIR\}` - is the configuration directory path that you prepared in the <<day2-prepare-eib-image,Prepare EIB Image>> section of this documentation
+
+* `$\{DEFINITION_FILE\}` - is the EIB image definition file name as seen in the `$\{EIB_IMAGE_CONF_DIR\}` directory.
+
+Once you execute this command, EIB will build an image containing the needed components for a `Rancher Management Cluster`. The produced image type will be of either `.iso` or `.raw` type, depending on your definition file configuration.
+
+The output of the command should be similar to:
+
+[,bash]
+----
+Getting image source signatures
+Copying blob 3d11e68c5d47 done   | 
+Copying blob c168f8260e4b done   | 
+Copying config bb846d25b2 done   | 
+Writing manifest to image destination
+Generating image customization components...
+Identifier ................... [SUCCESS]
+Custom Files ................. [SKIPPED]
+Time ......................... [SKIPPED]
+Network ...................... [SUCCESS]
+Groups ....................... [SKIPPED]
+Users ........................ [SUCCESS]
+Proxy ........................ [SKIPPED]
+Rpm .......................... [SKIPPED]
+Systemd ...................... [SKIPPED]
+Elemental .................... [SKIPPED]
+Suma ......................... [SKIPPED]
+Downloading file: dl-manifest-1.yaml 100% | (437/437 kB, 9.4 MB/s)        
+Embedded Artifact Registry ... [SUCCESS]
+Keymap ....................... [SUCCESS]
+Configuring Kubernetes component...
+The Kubernetes CNI is not explicitly set, defaulting to 'cilium'.
+Downloading file: rke2-images-core.linux-amd64.tar.zst 100% | (776/776 MB, 106 MB/s)        
+Downloading file: rke2-images-cilium.linux-amd64.tar.zst 100% | (367/367 MB, 104 MB/s)        
+Downloading file: rke2.linux-amd64.tar.gz 100% | (34/34 MB, 99 MB/s)        
+Downloading file: sha256sum-amd64.txt 100% | (3.9/3.9 kB, 9.3 MB/s)        
+Downloading file: dl-manifest-1.yaml 100% | (437/437 kB, 131 MB/s)        
+Kubernetes ................... [SUCCESS]
+Certificates ................. [SKIPPED]
+Building RAW image...
+Kernel Params ................ [SKIPPED]
+Image build complete!
+----
+
+The generated EIB image should be at `$\{EIB_IMAGE_CONF_DIR\}/$\{OUTPUT_IMAGE_NAME\}`. Where `$\{OUTPUT_IMAGE_NAME\}` is the value you have provided in your definition file under `image.outputImageName`.
