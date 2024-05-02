@@ -1,0 +1,231 @@
+== OS package update
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+:toc: auto
+
+=== Components
+
+This section covers the general components that are used to achieve an update of the OS pacakges:
+
+* <<components-rancher,Rancher>> - Located on the <<day2-mgmt-cluster,Rancher Management Cluster>>; responsible for the downstream cluster management. *For use-cases where you want to utilise <<components-fleet,Fleet>> without Rancher, you can skip the Rancher component all together.*
+
+* <<components-fleet,Fleet>> - Service offered by the `Rancher` component; responsible for muti-cluster resource deployment. Alternatively, if you are not using `Rancher`, `Fleet` can be deployed as a standalone component. For more information, see link:https://fleet.rancher.io/installation[Installation Details].
+
+* link:https://github.com/rancher/system-upgrade-controller[system-upgrade-controller] (*SUC*) - Located on each downstream cluster; responsible for executing tasks on specified nodes based on configuration data providede throguh a custom resource, called a `Plan`. For information on how to setup *SUC*, see <<day2-suc-deployment-guide>>
+
+* `edge-update.service` - link:https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html[systemd.service] located on each downstream cluster node; responsible for performing the OS packages update using the `transactional-update` command. Shipped to each downstream cluster through the `system-upgrade-controller` Plan resource.
+
+=== Requirements
+
+_General:_
+
+. *SCC registered machine* - All downstream cluster nodes should be registered to `https://scc.suse.com/`. This is needed so that the `edge-update.service` can successfully connect to the needed OS RPM repositories.
+
+. *Make sure that SUC Plan tollerations match node tollerations* - If your Kubernetes cluster nodes have custom *taints*, make sure to add link:https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/[tollerations] for those taints in the *SUC Plans*. By default *SUC Plans* have tollerations only for *control-plane* nodes. Default tollerations include: 
+
+* _CriticalAddonsOnly=true:NoExecute_
+
+* _node-role.kubernetes.io/control-plane:NoSchedule_
+
+* _node-role.kubernetes.io/etcd:NoExecute_
++
+Additional tollerations need to be added under `.spec.tollerations` of each Plan. Information on where to locate the specific Plans for your use-case, can be found in the <<update_procedure>>.
+
+. *Make sure you are using the correct update mechanism* - The `edge-update.service` that is shipped with the *SUC OS package update Plans* performs a link:https://en.opensuse.org/SDB:Zypper_usage#Distribution_upgrade[distribution upgrade] (`dup`) by default. If you wish to use a link:https://en.opensuse.org/SDB:Zypper_usage#Updating_packages[normal upgrade] method, create a `edge-update.conf` file under `/etc/edge/` on each node. Inside this file, add the `UPDATE_METHOD=up` variable
+
+_Air-gapped:_
+
+. *Mirror SUSE RPM repositories* - OS RPM repositories should be locally mirrored so that `edge-update.service` can have access to them. This can be achieved using link:https://github.com/SUSE/rmt[RMT].
+
+[#update_procedure]
+=== Update procedure
+
+[IMPORTANT]
+====
+The corresponding node operating system will be rebooted *one minute* after a successful package update.
+====
+
+To orchestrate the deployment of *SUC Plans* for OS pakcage updates, we use Fleet's link:https://fleet.rancher.io/ref-gitrepo[GitRepo] or link:https://fleet.rancher.io/bundle-add[Bundle] resources.
+
+Both resources have their use-cases, from an OS package update point of view:
+
+. `GitRepo` - normally used for *non air-gapped* package updates on environments that utilise a Fleet GitOps approach. Alternatively, if you mirror your repository setup through a *local git server*, it can also be used on an *air-gapped* environment.
+
+. `Bundle` - normally used for *air-gapped* package updates on environments that do not have a *local git server* setup, or do not adopt a GitOps workflow approach. Depending on your use-case, it can also be used on a *non air-gapped* environment.
+
+The Edge team maintains a ready to use `GitRepo` and `Bundle` resources for the *SUC Plans* responsible for OS package updages. These resources can be found in each of our `suse-edge/fleet-examples` link:https://github.com/ipetrov117/fleet-examples/releases[releases]. 
+
+[NOTE]
+====
+For use-cases where no additional configurations to the OS package update *SUC Plans* are needed, users can directly use the Plans from the link:https://github.com/ipetrov117/fleet-examples[suse-edge/fleet-examples] repository. For use-cases where custom configurations need to be added to the Plans (e.g. to add custom tollerations to the Plan), users would have to use their own repository to host the custom configured OS package update Plans.
+====
+
+==== OS package update using a GitRepo resource
+
+This section covers how to create a `GitRepo` resource that will ship the OS package udpdate *SUC Plans* to all desired downstream clusters.
+
+`GitRepo` creation can be done either through the `Rancher` UI (when `Rancher` is available) or by manually deploying it in the correct `Fleet` namespace. For additional `GitRepo` information, see the link:https://fleet.rancher.io/ref-gitrepo[GitRepo Resource] documentation.
+
+Once created, to monitor the OS package update process, see <<monitor_suc_plans>>.
+
+===== GitRepo creation - Rancher UI
+
+. In the upper left corner, *☰ -> Continuous Delivery*
+
+. Go to *Git Repos -> Add Repository*
+
+If you use the `suse-edge/fleet-examples` repository:
+
+. *Repository URL* - `https://github.com/ipetrov117/fleet-examples.git`
+
+. *Watch -> Revision* - choose a link:https://github.com/ipetrov117/fleet-examples/releases[release] tag for the `suse-edge/fleet-examples` repository that you wish to use
+
+. Under *Paths* add the path to the OS package update Fleets that you wish to use - `fleets/day2/system-upgrade-controller-plans/os-pkg-update`
+
+. Select *Next* to move to the *target* configuration section. *Only select clusters whose node's packages you wish to upgrade*
+
+. *Create*
+
+Alternatively, if you decide to use your own repository to host these files, you would need to provide your repo data above.
+
+===== GitRepo creation - manual
+
+. Choose the desired Edge link:https://github.com/ipetrov117/fleet-examples/releases[release] tag that you wish to apply the OS *SUC update Plans* from (referenced below as `$\{REVISION\}`).
+
+. Pull the *GitRepo* resource:
++
+[,bash]
+----
+curl -o os-pkg-update-gitrepo.yaml https://raw.githubusercontent.com/ipetrov117/fleet-examples/${REVISION}/gitrepos/day2/os-pkg-update-gitrepo.yaml
+----
+
+. Edit the *GitRepo* configuration, under `spec.targets` specify your desired target list. By default the `GitRepo` resources from the `suse-edge/fleet-examples` are *NOT* mapped to any down stream clusters.
+
+** To match all clusters change the default `GitRepo` *target* to:
++
+[,yaml]
+----
+spec:
+  targets:
+  - clusterSelector: {}
+----
+
+** Alternatively, if you want a more granular cluster selection see link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters]
+
+
+. Apply the *GitRepo* resources to your *Rancher Management Cluster*:
++
+[,bash]
+----
+kubectl apply -f os-pkg-update-gitrepo.yaml
+----
+
+. View the created *GitRepo* resource under the `fleet-default` namespace:
++
+[,bash]
+----
+kubectl get gitrepo os-pkg-update -n fleet-default
+----
+
+
+==== OS package update using a Bundle resource
+
+This section covers how to create a `Bundle` resources that will ship the OS package update *SUC Plans* to all desired downstream clusters.
+
+`Bundle` creation can be done either through the `Rancher` UI (when `Rancher` is available) or by manually deploying it in the correct `Fleet` namespace. For additional `Bundle` information, see the link:https://fleet.rancher.io/bundle-add[Create a Bundle Resource]documentation.
+
+Once created, to monitor the OS package update process, see <<monitor_suc_plans>>.
+
+===== Bundle creation - Rancher UI
+
+. In the upper left corner, click *☰ -> Continuous Delivery*
+
+. Go to *Advanced* > *Bundles*
+
+. Select *Create from YAML*
+
+. From here you can create the Bundle in one of the following ways:
+
+.. By manually copying the *Bundle* content to the *Create from YAML* page. Content can be retrieved from https://raw.githubusercontent.com/ipetrov117/fleet-examples/$\{REVISION\}/bundles/day2/system-upgrade-controller-plans/os-pkg-update/pkg-update-bundle.yaml, where `$\{REVISION\}` is the Edge link:https://github.com/ipetrov117/fleet-examples/releases[release] that you are using
+
+.. By cloning the link:https://github.com/ipetrov117/fleet-examples.git[suse-edge/fleet-examples] repository to the desired link:https://github.com/ipetrov117/fleet-examples/releases[release] tag and selecting the *Read from File* option in the *Create from YAML* page. From there, navigate to `bundles/day2/system-upgrade-controller-plans/os-pkg-update` directory and select `pkg-update-bundle.yaml`. This will auto-populate the *Create from YAML* page with the Bundle content.
+
+. Change the *target* clusters for the `Bundle`:
+
+** To match all downstream clusters change the default Bundle `.spec.targets` to:
++
+[, yaml]
+----
+spec:
+  targets:
+  - clusterSelector: {}
+----
+
+** For a more granular downstream cluster mappings, see link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters].
+
+. Select *Create*
+
+===== Bundle creation - manual
+
+. Choose the desired Edge link:https://github.com/ipetrov117/fleet-examples/releases[release] tag that you wish to apply the OS package update *SUC Plans* from (referenced below as `$\{REVISION\}`).
+
+. Pull the *Bundle* resource:
++
+[,bash]
+----
+curl -o pkg-update-bundle.yaml https://raw.githubusercontent.com/ipetrov117/fleet-examples/${REVISION}/bundles/day2/system-upgrade-controller-plans/os-pkg-update/pkg-update-bundle.yaml
+----
+
+. Edit the `Bundle` *target* configurations, under `spec.targets` provide your desired target list. By default the `Bundle` resources from the `suse-edge/fleet-examples` are *NOT* mapped to any down stream clusters.
+
+** To match all clusters change the default `Bundle` *target* to:
++
+[, yaml]
+----
+spec:
+  targets:
+  - clusterSelector: {}
+----
+
+** Alternatively, if you want a more granular cluster selection see link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters]
+
+. Apply the *Bundle* resources to your *Rancher Management Cluster*:
++
+[,bash]
+----
+kubectl apply -f pkg-update-bundle.yaml
+----
+
+. View the created *Bundle* resource under the `fleet-default` namespace:
++
+[,bash]
+----
+kubectl get bundles os-pkg-update -n fleet-default
+----
+
+==== Update procedure when using a third-party GitOps workflow
+
+There might be use-cases where users would like to incorporate the OS package update *SUC Plans* to their own third-party GitOps workflow (e.g. `Flux`).
+
+To get the OS package update resources that you need, first determine the Edge link:https://github.com/ipetrov117/fleet-examples/releases[release] tag of the link:https://github.com/ipetrov117/fleet-examples.git[suse-edge/fleet-examples] repository that you would like to use.
+
+After that, resources can be found at `fleets/day2/system-upgrade-controller-plans/os-pkg-update`, where:
+
+* `plan-control-plane.yaml` - `system-upgrade-controller` Plan resource for control-plane nodes
+
+* `plan-agent.yaml` - `system-upgrade-controller` Plan resource for agent nodes
+
+* `secret.yaml` - secret that ships a script that creates the `edge-update.service` link:https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html[systemd.service]
+
+[IMPORTANT]
+====
+These `Plan` resources are interpreted by the `system-upgrade-controller` and should be deployed on each downstream cluster that you wish to upgrade. For information on how to deploy the `system-upgrade-controller`, see <<third_party_git_ops>>.
+====
