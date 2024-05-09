@@ -121,19 +121,32 @@ To ensure disaster recovery, we advise to do a Rancher backup. For information o
 This section assumes you have installed `helm` on your system. For `helm` installation instructions, check link:https://helm.sh/docs/intro/install[here].
 ====
 
-.Update your local helm cache:
+==== EIB created Rancher instance
+
+If you have chosen to deploy `Rancher` as part of EIB's <<quickstart-eib-definition-file, image definition file>>, you need to upgrade the `rancher.yaml` file that EIB creates under `/var/lib/rancher/rke2/server/manifests` on your `initializer` node. To deploy helm charts in its `image definition` file, EIB takes advantage of RKE2's manifest https://docs.rke2.io/advanced#auto-deploying-manifests[auto-deploy] functionality.
+
+. Locate the `initializer` node
+
+** For multi-node clusters - in your EIB image definition file, you should have specified the `initializer: true` property for one of your nodes. If you have not specified this property, the initializer node will be the first *server* node in your node list.
+
+** For single-node clusters - the initializer is the currently running node
+
+. SSH to the `initializer` node:
++
 [source,bash]
 ----
-helm repo update
+ssh root@<node_ip>
 ----
 
-.Get `Rancher Prime` helm repo:
+. Add the `Rancher Prime` Helm repository:
++
 [source,bash]
 ----
 helm repo add rancher-prime https://charts.rancher.com/server-charts/prime
 ----
 
-.Fetch the latest `Rancher Prime` helm chart version:
+. Fetch the latest `Rancher Prime` helm chart version:
++
 [source,bash]
 ----
 helm fetch rancher-prime/rancher
@@ -142,15 +155,137 @@ helm fetch rancher-prime/rancher
 helm fetch rancher-prime/rancher --version=X.Y.Z
 ----
 
+. Encode `.tgz` archive so that it can be passed to a `HelmChart` CR config:
++
+[source,bash]
+----
+base64 -w 0 rancher-X.Y.Z.tgz  > rancher-X.Y.Z-encoded.txt
+
+# Example for Rancher 2.8.3
+base64 -w 0 rancher-2.8.3.tgz  > rancher-2.8.3-encoded.txt
+----
+
+. Make a copy of the `rancher.yaml` file that we will edit:
++
+[source, bash]
+----
+cp /var/lib/rancher/rke2/server/manifests/rancher.yaml ./rancher.yaml
+----
+
+. Change the `chartContent` and `version` configurations of the `rancher.yaml` file:
++
+[source,bash]
+----
+sed -i -e "s|chartContent:.*|chartContent: $(<rancher-X.Y.Z-encoded.txt)|" -e "s|version:.*|version: X.Y.Z|" rancher.yaml
+
+# Example for Rancher 2.8.3
+sed -i -e "s|chartContent:.*|chartContent: $(<rancher-2.8.3-encoded.txt)|" -e "s|version:.*|version: 2.8.3|" rancher.yaml
+----
++
+[NOTE]
+====
+If you need to do any additional upgrade changes to the chart (e.g. adding *new* custom chart values), you need to manually edit the `rancher.yaml` file.
+====
+
+. Replace the original `rancher.yaml` file:
++
+[source,bash]
+----
+cp rancher.yaml /var/lib/rancher/rke2/server/manifests/
+----
+
+
+The above commands will trigger an upgrade of the `Rancher` instance. The upgrade will be handled by the https://github.com/k3s-io/helm-controller#helm-controller[helm-controller].
+
+To verify the update:
+
+. List pods in `default` namespace: 
++
+[source,bash]
+----
+kubectl get pods -n default
+
+# Example output
+NAME                              READY   STATUS      RESTARTS   AGE
+helm-install-cert-manager-7v7nm   0/1     Completed   0          88m
+helm-install-rancher-p99k5        0/1     Completed   0          3m21s
+----
+
+. Look at the logs of the `helm-install-rancher-*` pod:
++
+[source,bash]
+----
+kubectl logs <helm_install_rancher_pod> -n default
+
+# Example
+kubectl logs helm-install-rancher-p99k5 -n default
+----
+
+. Verify `Rancher` pods are running:
++
+[source,bash]
+----
+kubectl get pods -n cattle-system
+
+# Example output
+NAME                               READY   STATUS      RESTARTS   AGE
+helm-operation-mccvd               0/2     Completed   0          3m52s
+helm-operation-np8kn               0/2     Completed   0          106s
+helm-operation-q8lf7               0/2     Completed   0          2m53s
+rancher-648d4fbc6c-qxfpj           1/1     Running     0          5m27s
+rancher-648d4fbc6c-trdnf           1/1     Running     0          9m57s
+rancher-648d4fbc6c-wvhbf           1/1     Running     0          9m57s
+rancher-webhook-649dcc48b4-zqjs7   1/1     Running     0          100s
+----
+
+. Verify `Rancher` version upgrade:
++
+[source,bash]
+----
+kubectl get settings.management.cattle.io server-version
+
+# Example output for Rancher 2.8.3 upgrade
+NAME             VALUE
+server-version   v2.8.3
+----
+
+==== Non-EIB created Rancher instance
+
+. Update your local helm cache:
++
+[source,bash]
+----
+helm repo update
+----
+
+. Get `Rancher Prime` helm repo:
++
+[source,bash]
+----
+helm repo add rancher-prime https://charts.rancher.com/server-charts/prime
+----
+
+. Fetch the latest `Rancher Prime` helm chart version:
++
+[source,bash]
+----
+helm fetch rancher-prime/rancher
+
+# Alternatively if you want to fetch a specific verison
+helm fetch rancher-prime/rancher --version=X.Y.Z
+----
++
 This should produce a `rancher-<version>.tgz` file in your current working directory.
 
-.Get the values for the current Rancher release and print them to a `rancher-values.yaml` file
+. Get the values for the current Rancher release and print them to a `rancher-values.yaml` file
++
 [source,bash]
 ----
 helm get values rancher -n cattle-system -o yaml > rancher-values.yaml
 ----
 
-.Update the helm chart
+. Update the helm chart
++
 [source,bash]
 ----
 helm upgrade rancher rancher-prime/rancher \
