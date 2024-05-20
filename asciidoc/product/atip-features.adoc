@@ -12,7 +12,7 @@ endif::[]
 
 This section documents and explains the configuration of Telco-specific features on ATIP-deployed clusters.
 
-The direct network provisioning deployment method is used, as described in the <<atip-automated-provisioning,ATIP Automated Provision>> section.
+The directed network provisioning deployment method is used, as described in the <<atip-automated-provisioning,ATIP Automated Provision>> section.
 
 The following topics are covered in this section:
 
@@ -285,8 +285,6 @@ data:
 
 * Prepare the `daemonset` file to deploy the device plug-in.
 
-No changes are needed in the `daemonset`, so you can use the same https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin/blob/master/deployments/sriovdp-daemonset.yaml[upstream] `daemonset` file.
-
 The device plug-in supports several architectures (`arm`, `amd`, `ppc64le`), so the same file can be used for different architectures deploying several `daemonset` for each architecture.
 
 [,yaml]
@@ -419,14 +417,19 @@ This part could be done in two ways, using the `CLI` or using the `Rancher UI`.
 Install Operator from CLI::
 +
 ----
-helm repo add rancher-charts suse-edge https://suse-edge.github.io/charts
-helm install sriov-crd suse-edge/sriov-crd
-helm install install sriov-network-operator suse-edge/sriov-network-operator
+helm repo add suse-edge https://suse-edge.github.io/charts
+helm install sriov-crd suse-edge/sriov-crd -n sriov-network-operator
+helm install install sriov-network-operator suse-edge/sriov-network-operator -n sriov-network-operator
 ----
 +
 Install Operator from Rancher UI::
 +
 Once your cluster is installed, and you have access to the `Rancher UI`, you can install the `SR-IOV Operator` from the `Rancher UI` from the apps tab:
+
+[NOTE]
+====
+Make sure you select the right namespace to install the operator, for example, `sriov-network-operator`.
+====
 +
 image::features_sriov.png[sriov.png]
 
@@ -434,8 +437,8 @@ image::features_sriov.png[sriov.png]
 
 [,shell]
 ----
-$ kubectl  get crd
-$ kubectl -n kube-system get pods
+$ kubectl get crd
+$ kubectl -n sriov-network-operator get pods
 ----
 
 * Check the label in the nodes.
@@ -455,11 +458,11 @@ feature.node.kubernetes.io/network-sriov.capable: "true"
 ----
 $ kubectl get daemonset -A
 NAMESPACE             NAME                            DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR                                           AGE
-calico-system         calico-node                     1         1         1       1            1           kubernetes.io/os=linux                                  15h
-cattle-sriov-system   sriov-network-config-daemon     1         1         1       1            1           feature.node.kubernetes.io/network-sriov.capable=true   45m
-cattle-sriov-system   sriov-rancher-nfd-worker        1         1         1       1            1           <none>                                                  45m
-kube-system           rke2-ingress-nginx-controller   1         1         1       1            1           kubernetes.io/os=linux                                  15h
-kube-system           rke2-multus-ds                  1         1         1       1            1           kubernetes.io/arch=amd64,kubernetes.io/os=linux         15h
+calico-system            calico-node                     1         1         1       1            1           kubernetes.io/os=linux                                  15h
+sriov-network-operator   sriov-network-config-daemon     1         1         1       1            1           feature.node.kubernetes.io/network-sriov.capable=true   45m
+sriov-network-operator   sriov-rancher-nfd-worker        1         1         1       1            1           <none>                                                  45m
+kube-system              rke2-ingress-nginx-controller   1         1         1       1            1           kubernetes.io/os=linux                                  15h
+kube-system              rke2-multus-ds                  1         1         1       1            1           kubernetes.io/arch=amd64,kubernetes.io/os=linux         15h
 ----
 
 In a few minutes (can take up to 10 min to be updated), the nodes are detected and configured with the `SR-IOV` capabilities:
@@ -468,7 +471,7 @@ In a few minutes (can take up to 10 min to be updated), the nodes are detected a
 ----
 $ kubectl get sriovnetworknodestates.sriovnetwork.openshift.io -A
 NAMESPACE             NAME     AGE
-cattle-sriov-system   xr11-2   83s
+sriov-network-operator   xr11-2   83s
 ----
 
 * Check the interfaces detected.
@@ -486,7 +489,7 @@ items:
     creationTimestamp: "2023-06-07T09:52:37Z"
     generation: 1
     name: xr11-2
-    namespace: cattle-sriov-system
+    namespace: sriov-network-operator
     ownerReferences:
     - apiVersion: sriovnetwork.openshift.io/v1
       blockOwnerDeletion: true
@@ -532,7 +535,7 @@ If your interface is not detected here, ensure that it is present in the next co
 
 [,shell]
 ----
-$ kubectl get cm supported-nic-ids -oyaml -n cattle-sriov-system
+$ kubectl get cm supported-nic-ids -oyaml -n sriov-network-operator
 ----
 
 If your device is not there, edit the config map, adding the right values to be discovered (should be necessary to restart the `sriov-network-config-daemon` daemonset).
@@ -545,6 +548,7 @@ Some `VFs` (`numVfs`) from the device (`rootDevices`) will be created, and it wi
 [NOTE]
 ====
 The `resourceName` field must not contain any special characters and must be unique across the cluster.
+The example uses the `deviceType: vfio-pci` because `dpdk` will be used in combination with `sr-iov`. If you don't use `dpdk`, the deviceType should be `deviceType: netdevice` (default value).
 ====
 
 [,yaml]
@@ -553,7 +557,7 @@ apiVersion: sriovnetwork.openshift.io/v1
 kind: SriovNetworkNodePolicy
 metadata:
   name: policy-dpdk
-  namespace: kube-system
+  namespace: sriov-network-operator
 spec:
   nodeSelector:
     feature.node.kubernetes.io/network-sriov.capable: "true"
@@ -593,7 +597,7 @@ apiVersion: sriovnetwork.openshift.io/v1
 kind: SriovNetwork
 metadata:
   name: network-dpdk
-  namespace: kube-system
+  namespace: sriov-network-operator
 spec:
   ipam: |
     {
@@ -626,7 +630,7 @@ items:
     creationTimestamp: "2023-06-08T11:22:27Z"
     generation: 1
     name: network-dpdk
-    namespace: kube-system
+    namespace: sriov-network-operator
     resourceVersion: "13124"
     uid: df7c89f5-177c-4f30-ae72-7aef3294fb15
   spec:
