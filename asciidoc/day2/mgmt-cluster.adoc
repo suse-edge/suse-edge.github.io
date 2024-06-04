@@ -1,5 +1,5 @@
 [#day2-mgmt-cluster]
-= Rancher Management Cluster
+= Management Cluster
 :experimental:
 
 ifdef::env-github[]
@@ -12,20 +12,298 @@ ifdef::env-github[]
 endif::[]
 :toc: preamble
 
-This section explains how to setup and do *Day 2* operations on a `Rancher Management Cluster`.
+This section covers how to do various `Day 2` operations on a `management cluster`.
 
-A `Rancher Management Cluster` is made out of the following components:
+== RKE2 upgrade
 
-* `SUSE Linux Enterprise Micro` - the operating system on which the Kubernetes distribution will operate. For more information, see <<components-slmicro>>
+[NOTE]
+====
+To ensure *disaster recovery*, we advise to do a backup of the RKE2 cluster data. For information on how to do this, check link:https://docs.rke2.io/backup_restore[here]. The default location for the `rke2` binary is `/opt/rke2/bin`.
+====
 
-* `RKE2` - the Kubernetes distribution on which the management cluster will operate. For more information, see <<components-rke2>>
+You can upgrade the RKE2 version using the RKE2 installation script as follows:
 
-* `Rancher` - the management platform that will manage the lifecycle of the downstream clusters. For more information, <<components-rancher>>
+[source,bash]
+----
+curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION=vX.Y.Z+rke2rN sh -
+----
 
-Working in cohesion these components enable administrators to easily manage the lifecycle of their downstream clusters from a single location.
+Remember to restart the `rke2` process after installing:
 
-include::mgmt-cluster-single-node-setup.adoc[]
+[source,bash]
+----
+# For server nodes:
+systemctl restart rke2-server
 
-include::mgmt-cluster-multi-node-setup.adoc[]
+# For agent nodes:
+systemctl restart rke2-agent
+----
 
-include::mgmt-cluster-lifecycle.adoc[]
+[IMPORTANT]
+====
+To avoid any unforseen upgrade problems, use the following node upgrade order:
+
+. _Server nodes_ - should be upgraded *one* node at a time.
+. _Agent nodes_  - should be upgraded after *all* server node upgrades have finished. Can be upgraded in parallel.
+====
+
+_For further information, see the link:https://docs.rke2.io/upgrade/manual_upgrade#upgrade-rke2-using-the-installation-script[RKE2 upgrade documentation]._
+
+== OS upgrade
+
+NOTE: This section assumes that you have registered your system to https://scc.suse.com.
+
+SUSE regularly releases new `SLE Micro` package updates. To retrieve the updated package versions SLE Micro uses `transactional-upgrade`.
+
+`transactional-upgrade` provides an application and library to update a Linux operating system in a transactional way, i.e. the update will be performed in the background while the system continues running as it is. Only after you *reboot* the system will the update take effect. For further information, see the `transactional-update` https://github.com/openSUSE/transactional-update[GitHub] GitHub page.
+
+.To update all packages in the system, execute:
+[source,bash]
+----
+transactional-update
+----
+
+Since *rebooting* the node will result in it being unavailable for some time, if you are running a multi-node cluster, you can https://kubernetes.io/docs/reference/kubectl/generated/kubectl_cordon/[cordon] and https://kubernetes.io/docs/reference/kubectl/generated/kubectl_drain/[drain] the node before the *reboot*.
+
+.To cordon a node, execute:
+[source,bash]
+----
+kubectl cordon <node>
+----
+
+This will result in the node being taken out of the default scheduling mechanism, ensuring that no pods will be assinged to it by mistake.
+
+.To drain a node, execute:
+[source, bash]
+----
+kubectl drain <node>
+----
+
+This will ensure that all workloads on the node will be transferred to other available nodes.
+
+[NOTE]
+====
+Depending on what workloads you are running on the node, you might also need to provide additional flags (e.g. `--delete-emptydir-data`, `--ignore-daemonsets`) to the command.
+====
+
+.Reboot node:
+[source,bash]
+----
+sudo reboot
+----
+
+After a successful reboot, the packages on your node will be updated. The only thing left is to bring the node back to the default scheduling mechanism with the https://kubernetes.io/docs/reference/kubectl/generated/kubectl_uncordon/[uncordon] command.
+
+.Uncordon node:
+[source,bash]
+----
+kubectl uncordon <node>
+----
+
+[NOTE]
+====
+In case you want to revert the update, use the above steps with the following `transactional-update` command:
+
+[source,bash]
+----
+transactional-update rollback last
+----
+====
+
+== Rancher upgrade
+
+[NOTE]
+====
+To ensure disaster recovery, we advise to do a Rancher backup. For information on how to do this, check link:https://ranchermanager.docs.rancher.com/how-to-guides/new-user-guides/backup-restore-and-disaster-recovery/back-up-rancher[here].
+====
+
+[NOTE]
+====
+This section assumes you have installed `helm` on your system. For `helm` installation instructions, check link:https://helm.sh/docs/intro/install[here].
+====
+
+=== EIB created Rancher instance
+
+If you have chosen to deploy `Rancher` as part of EIB's <<quickstart-eib-definition-file, image definition file>>, you need to upgrade the `rancher.yaml` file that EIB creates under `/var/lib/rancher/rke2/server/manifests` on your `initializer` node. To deploy helm charts in its `image definition` file, EIB takes advantage of RKE2's manifest https://docs.rke2.io/advanced#auto-deploying-manifests[auto-deploy] functionality.
+
+. Locate the `initializer` node
+
+** For multi-node clusters - in your EIB image definition file, you should have specified the `initializer: true` property for one of your nodes. If you have not specified this property, the initializer node will be the first *server* node in your node list.
+
+** For single-node clusters - the initializer is the currently running node
+
+. SSH to the `initializer` node:
++
+[source,bash]
+----
+ssh root@<node_ip>
+----
+
+. Add the `Rancher Prime` Helm repository:
++
+[source,bash]
+----
+helm repo add rancher-prime https://charts.rancher.com/server-charts/prime
+----
+
+. Fetch the latest `Rancher Prime` helm chart version:
++
+[source,bash]
+----
+helm fetch rancher-prime/rancher
+
+# Alternatively if you want to fetch a specific verison
+helm fetch rancher-prime/rancher --version=X.Y.Z
+----
+
+. Encode `.tgz` archive so that it can be passed to a `HelmChart` CR config:
++
+[source,bash]
+----
+base64 -w 0 rancher-X.Y.Z.tgz  > rancher-X.Y.Z-encoded.txt
+
+# Example for Rancher 2.8.3
+base64 -w 0 rancher-2.8.3.tgz  > rancher-2.8.3-encoded.txt
+----
+
+. Make a copy of the `rancher.yaml` file that we will edit:
++
+[source, bash]
+----
+cp /var/lib/rancher/rke2/server/manifests/rancher.yaml ./rancher.yaml
+----
+
+. Change the `chartContent` and `version` configurations of the `rancher.yaml` file:
++
+[source,bash]
+----
+sed -i -e "s|chartContent:.*|chartContent: $(<rancher-X.Y.Z-encoded.txt)|" -e "s|version:.*|version: X.Y.Z|" rancher.yaml
+
+# Example for Rancher 2.8.3
+sed -i -e "s|chartContent:.*|chartContent: $(<rancher-2.8.3-encoded.txt)|" -e "s|version:.*|version: 2.8.3|" rancher.yaml
+----
++
+[NOTE]
+====
+If you need to do any additional upgrade changes to the chart (e.g. adding *new* custom chart values), you need to manually edit the `rancher.yaml` file.
+====
+
+. Replace the original `rancher.yaml` file:
++
+[source,bash]
+----
+cp rancher.yaml /var/lib/rancher/rke2/server/manifests/
+----
+
+
+The above commands will trigger an upgrade of the `Rancher` instance. The upgrade will be handled by the https://github.com/k3s-io/helm-controller#helm-controller[helm-controller].
+
+To verify the update:
+
+. List pods in `default` namespace: 
++
+[source,bash]
+----
+kubectl get pods -n default
+
+# Example output
+NAME                              READY   STATUS      RESTARTS   AGE
+helm-install-cert-manager-7v7nm   0/1     Completed   0          88m
+helm-install-rancher-p99k5        0/1     Completed   0          3m21s
+----
+
+. Look at the logs of the `helm-install-rancher-*` pod:
++
+[source,bash]
+----
+kubectl logs <helm_install_rancher_pod> -n default
+
+# Example
+kubectl logs helm-install-rancher-p99k5 -n default
+----
+
+. Verify `Rancher` pods are running:
++
+[source,bash]
+----
+kubectl get pods -n cattle-system
+
+# Example output
+NAME                               READY   STATUS      RESTARTS   AGE
+helm-operation-mccvd               0/2     Completed   0          3m52s
+helm-operation-np8kn               0/2     Completed   0          106s
+helm-operation-q8lf7               0/2     Completed   0          2m53s
+rancher-648d4fbc6c-qxfpj           1/1     Running     0          5m27s
+rancher-648d4fbc6c-trdnf           1/1     Running     0          9m57s
+rancher-648d4fbc6c-wvhbf           1/1     Running     0          9m57s
+rancher-webhook-649dcc48b4-zqjs7   1/1     Running     0          100s
+----
+
+. Verify `Rancher` version upgrade:
++
+[source,bash]
+----
+kubectl get settings.management.cattle.io server-version
+
+# Example output for Rancher 2.8.3 upgrade
+NAME             VALUE
+server-version   v2.8.3
+----
+
+=== Non-EIB created Rancher instance
+
+. Update your local helm cache:
++
+[source,bash]
+----
+helm repo update
+----
+
+. Get `Rancher Prime` helm repo:
++
+[source,bash]
+----
+helm repo add rancher-prime https://charts.rancher.com/server-charts/prime
+----
+
+. Fetch the latest `Rancher Prime` helm chart version:
++
+[source,bash]
+----
+helm fetch rancher-prime/rancher
+
+# Alternatively if you want to fetch a specific verison
+helm fetch rancher-prime/rancher --version=X.Y.Z
+----
++
+This should produce a `rancher-<version>.tgz` file in your current working directory.
+
+. Get the values for the current Rancher release and print them to a `rancher-values.yaml` file
++
+[source,bash]
+----
+helm get values rancher -n cattle-system -o yaml > rancher-values.yaml
+----
+
+. Update the helm chart
++
+[source,bash]
+----
+helm upgrade rancher rancher-prime/rancher \
+  --namespace cattle-system \
+  -f rancher-values.yaml \
+  --version=2.X.Y
+----
+
+. Verify `Rancher` version upgrade:
++
+[source,bash]
+----
+kubectl get settings.management.cattle.io server-version
+
+# Example output for Rancher 2.8.3 upgrade
+NAME             VALUE
+server-version   v2.8.3
+----
+
+_For additional information on the Rancher helm chart upgrade, check link:https://ranchermanager.docs.rancher.com/getting-started/installation-and-upgrade/install-upgrade-on-a-kubernetes-cluster/upgrades[here]._
