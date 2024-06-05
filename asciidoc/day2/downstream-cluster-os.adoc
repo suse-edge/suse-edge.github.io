@@ -14,15 +14,18 @@ endif::[]
 
 === Components
 
-This section covers the general components that are used to achieve an OS pacakge update:
+This section covers the custom components that the `OS package update` process uses over the default `Day 2` <<day2-downstream-components, components>>.
 
-* <<components-rancher,Rancher>> - Located on the `management cluster`; responsible for the downstream cluster management. *For use-cases where you want to utilise <<components-fleet,Fleet>> without Rancher, you can skip the Rancher component all together.*
+==== edge-update.service
 
-* <<components-fleet,Fleet>> - Service offered by the `Rancher` component; responsible for muti-cluster resource deployment. Alternatively, if you are not using `Rancher`, `Fleet` can be deployed as a standalone component. For more information, see link:https://fleet.rancher.io/installation[Installation Details].
+Systemd service responsible for performing the `OS package update`. Uses the link:https://kubic.opensuse.org/documentation/man-pages/transactional-update.8.html[transactional-update] command to perform a link:https://en.opensuse.org/SDB:Zypper_usage#Distribution_upgrade[distribution upgrade] (`dup`).
 
-* link:https://github.com/rancher/system-upgrade-controller[system-upgrade-controller] (*SUC*) - Located on each downstream cluster; responsible for executing tasks on specified nodes based on configuration data providede throguh a custom resource, called a `Plan`. For information on how to setup *SUC*, see <<day2-suc-deployment-guide>>
+[NOTE]
+====
+If you wish to use a link:https://en.opensuse.org/SDB:Zypper_usage#Updating_packages[normal upgrade] method, create a `edge-update.conf` file under `/etc/edge/` on each node. Inside this file, add the `UPDATE_METHOD=up` variable.
+====
 
-* `edge-update.service` - link:https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html[systemd.service] located on each downstream cluster node; responsible for performing the OS packages update using the `transactional-update` command. Shipped to each downstream cluster through the `system-upgrade-controller` Plan resource.
+Shipped through a *SUC plan*, which should be located on each *downstream cluster* that is in need of a OS package update.
 
 === Requirements
 
@@ -72,8 +75,6 @@ spec:
 ----
 ====
 
-. *Make sure you are using the correct update mechanism* - The `edge-update.service` that is shipped with the *SUC OS package update Plans* performs a link:https://en.opensuse.org/SDB:Zypper_usage#Distribution_upgrade[distribution upgrade] (`dup`) by default. If you wish to use a link:https://en.opensuse.org/SDB:Zypper_usage#Updating_packages[normal upgrade] method, create a `edge-update.conf` file under `/etc/edge/` on each node. Inside this file, add the `UPDATE_METHOD=up` variable
-
 _Air-gapped:_
 
 . *Mirror SUSE RPM repositories* - OS RPM repositories should be locally mirrored so that `edge-update.service` can have access to them. This can be achieved using link:https://github.com/SUSE/rmt[RMT].
@@ -82,63 +83,20 @@ _Air-gapped:_
 
 [NOTE]
 ====
-This section assumes you will be deploying *SUC Plans* using <<components-fleet,Fleet>>. If you intend to deploy the *SUC Plan* using a different approach, refer to <<os-pkg-suc-plan-deployment-third-party>>.
+This section assumes you will be deploying the `OS package update` *SUC Plan* using <<components-fleet,Fleet>>. If you intend to deploy the *SUC Plan* using a different approach, refer to <<os-pkg-suc-plan-deployment-third-party>>.
 ====
 
-The `OS package update procedure` revolves around deploying *SUC Plans* to downstream clusters. These plans hold information that instructs the *SUC* on how to perform OS package update on *each* of the downstream cluster nodes. For information regarding the structure of a *SUC Plan*, refer to the https://github.com/rancher/system-upgrade-controller?tab=readme-ov-file#example-plans[upstream] documentation.
+The `OS package update procedure` revolves around deploying *SUC Plans* to downstream clusters. These plans then hold information about how and on which nodes to deploy the `edge-update.service` systemd.service. For information regarding the structure of a *SUC Plan*, refer to the https://github.com/rancher/system-upgrade-controller?tab=readme-ov-file#example-plans[upstream] documentation.
 
-Deployment orchestration for these *Plans* is done by using either a *GitRepo* or a *Bundle* resource. 
+`OS package update` SUC Plans are shipped in the following ways:
 
-A *GitRepo* resource represents a Git repository from which *Fleet* creates *Bundles*. While *Bundles* are resources that hold the *raw* Kubernetes resources that will be deployed on the targeted cluster. For more information, refer to the https://fleet.rancher.io/gitrepo-add[GitRepo] and https://fleet.rancher.io/bundle-add[Bundle] documentations.
+* Through a `GitRepo` resources - <<os-pkg-suc-plan-deployment-git-repo>>
 
-Whether to use the *GitRepo* or *Bundle* resource depends on your use-case, refer to the <<os-pkg-update-determine-use-case>> section for more information.
+* Through a `Bundle` resource - <<os-pkg-suc-plan-deployment-bundle>>
+
+To determine which resource you should use, refer to <<day2-determine-use-case>>.
 
 For a full overview of what happens during the _update procedure_, refer to the <<os-pkg-update-overview>> section.
-
-[#os-pkg-update-determine-use-case]
-==== Determine use-case
-
-This section aims at helping users determine which Fleet resource (*GitRepo* or *Bundle*) is more suited to deploy the `OS package update SUC Plans` based on the environment's use-case.
-
-===== GitRepo
-
-*GitRepo* resources are normally used to deploy *SUC Plans* on *non air-gapped* environments that utilise a _Fleet GitOps_ approach.
-
-Alternatively, *GitRepo* resources can also be used to deploy *SUC Plans* on *air-gapped* environments, *if you mirror your repository setup through a local git server*.
-
-The Edge team maintains ready to use *GitRepo* resource for the *SUC Plans* related to OS package updages in our link:https://github.com/ipetrov117/fleet-examples[suse-edge/fleet-examples] repository under `gitrepos/day2/os-pkg-update-gitrepo.yaml`.
-
-[NOTE]
-====
-If your use-case does not require any additional custom configurations over the *GitRepo* resource, or any related to the resource `fleets` (e.g. the underlying update Plan resources), you can directly use the *GitRepo* from the `suse-edge/fleet-examples` repository.
-====
-
-[IMPORTANT]
-====
-If using the `suse-edge/fleet-examples` repository, make sure you are using the *GitRepo* resources from a dedicated link:https://github.com/ipetrov117/fleet-examples/releases[release] tag.
-====
-
-For information on how to deploy the *OS package update SUC Plans* using Fleet's *GitRepo* resource, refer to the <<os-pkg-suc-plan-deployment-git-repo>> section.
-
-===== Bundle
-
-*Bundle* resources are normally used to deploy *SUC Plans* on *air-gapped* environments that do not use some form of _local GitOps_ procedure (e.g. a *local git server*).
-
-Alternatively, if your use-case does not allow for a _GitOps_ workflow, *Bundle* resources could also be used to deploy *SUC Plans* on *non air-gapped* environments. 
-
-The Edge team maintains ready to use *Bundle* resource for the *SUC Plans* related to OS package updages in our link:https://github.com/ipetrov117/fleet-examples[suse-edge/fleet-examples] repository under `bundles/day2/system-upgrade-controller-plans/os-pkg-update/pkg-update-bundle.yaml`.
-
-[NOTE]
-====
-If your use-case does not require any additional custom configurations over the *Bundle* resource, you can directly use it from the `suse-edge/fleet-examples` repository.
-====
-
-[IMPORTANT]
-====
-If using the `suse-edge/fleet-examples` repository, make sure you are using the *Bundle* resource from a dedicated link:https://github.com/ipetrov117/fleet-examples/releases[release] tag.
-====
-
-For information on how to deploy the *OS package update SUC Plans* using Fleet's *Bundle* resource, refer to the <<os-pkg-suc-plan-deployment-bundle>> section.
 
 [#os-pkg-update-overview]
 ==== Overview
@@ -152,7 +110,7 @@ OS pacakge update steps:
 
 . Based on his use-case, the user determines whether to use a *GitRepo* or a *Bundle* resource for the deployment of the `OS package update SUC Plans` to the desired downstream clusters. For information on how to map a *GitRepo/Bundle* to a specific set of downstream clusters, see https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters].
 
-.. If you are unsure whether you should use a *GitRepo* or a *Bundle* resource for the *SUC Plan* deployment, refer to <<os-pkg-update-determine-use-case>>.
+.. If you are unsure whether you should use a *GitRepo* or a *Bundle* resource for the *SUC Plan* deployment, refer to <<day2-determine-use-case>>.
 
 .. For *GitRepo/Bundle* configuration options, refer to <<os-pkg-suc-plan-deployment-git-repo>> or <<os-pkg-suc-plan-deployment-bundle>>.
 
@@ -211,14 +169,15 @@ This section describes how to orchestrate the deployment of *SUC Plans* related 
 [#os-pkg-suc-plan-deployment-git-repo]
 ==== SUC Plan deployment - GitRepo resource
 
-A *GitRepo* resource, that ships the needed OS package update *SUC Plans*, can be deployed in one of the following ways:
+A *GitRepo* resource, that ships the needed `OS package update` *SUC Plans*, can be deployed in one of the following ways:
 
-. Through the `Rancher UI` - if you have a `Rancher` instance available in your environmnet.
+. Through the `Rancher UI` - <<os-pkg-suc-plan-deployment-git-repo-rancher>> (when `Rancher` is available).
 
-. By manually deploying the *GitRepo* resource in the correct *Fleet* namespace - for environments that do not have a `Rancher` instance available.
+. By <<os-pkg-suc-plan-deployment-git-repo-manual, manually deploying>> the resource to your `management cluster`.
 
 Once deployed, to monitor the OS package update process of the nodes of your targeted cluster, refer to the <<monitor_suc_plans>> documentation.
 
+[#os-pkg-suc-plan-deployment-git-repo-rancher]
 ===== GitRepo creation - Rancher UI
 
 . In the upper left corner, *☰ -> Continuous Delivery*
@@ -239,6 +198,7 @@ If you use the `suse-edge/fleet-examples` repository:
 
 Alternatively, if you decide to use your own repository to host these files, you would need to provide your repo data above.
 
+[#os-pkg-suc-plan-deployment-git-repo-manual]
 ===== GitRepo creation - manual
 
 . Choose the desired Edge link:https://github.com/ipetrov117/fleet-examples/releases[release] tag that you wish to apply the OS *SUC update Plans* from (referenced below as `$\{REVISION\}`).
@@ -285,14 +245,15 @@ os-pkg-update   https://github.com/ipetrov117/fleet-examples.git   edge-3.0.0   
 [#os-pkg-suc-plan-deployment-bundle]
 ==== SUC Plan deployment - Bundle resource
 
-A *Bundle* resource, that ships the needed OS package update *SUC Plans*, can be deployed in one of the following ways:
+A *Bundle* resource, that ships the needed `OS package update` *SUC Plans*, can be deployed in one of the following ways:
 
-. Through the `Rancher UI` - if you have a `Rancher` instance available in your environmnet.
+. Through the `Rancher UI` - <<os-pkg-suc-plan-deployment-bundle-rancher>> (when `Rancher` is available).
 
-. By manually deploying the *Bundle* resource in the correct *Fleet* namespace - for environments that do not have a `Rancher` instance available.
+. By <<os-pkg-suc-plan-deployment-bundle-manual, manually deploying>> the resource to your `management cluster`.
 
 Once deployed, to monitor the OS package update process of the nodes of your targeted cluster, refer to the <<monitor_suc_plans>> documentation.
 
+[#os-pkg-suc-plan-deployment-bundle-rancher]
 ===== Bundle creation - Rancher UI
 
 . In the upper left corner, click *☰ -> Continuous Delivery*
@@ -322,6 +283,7 @@ spec:
 
 . Select *Create*
 
+[#os-pkg-suc-plan-deployment-bundle-manual]
 ===== Bundle creation - manual
 
 . Choose the desired Edge link:https://github.com/ipetrov117/fleet-examples/releases[release] tag that you wish to apply the OS package update *SUC Plans* from (referenced below as `$\{REVISION\}`).
@@ -381,7 +343,7 @@ After that, resources can be found at `fleets/day2/system-upgrade-controller-pla
 
 [IMPORTANT]
 ====
-These `Plan` resources are interpreted by the `system-upgrade-controller` and should be deployed on each downstream cluster that you wish to upgrade. For information on how to deploy the `system-upgrade-controller`, see <<third_party_git_ops>>.
+These `Plan` resources are interpreted by the `system-upgrade-controller` and should be deployed on each downstream cluster that you wish to upgrade. For information on how to deploy the `system-upgrade-controller`, see <<day2-suc-third-party-gitops>>.
 ====
 
 To better understand how your GitOps workflow can be used to deploy the *SUC Plans* for OS package update, it can be beneficial to take a look at the <<os-pkg-update-overview,overview>> of the update procedure using `Fleet`.
