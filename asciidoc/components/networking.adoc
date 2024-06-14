@@ -62,7 +62,7 @@ The EIB container image is publicly available and can be downloaded from the SUS
 
 [,shell]
 ----
-podman pull registry.suse.com/edge/edge-image-builder:1.0.1
+podman pull registry.suse.com/edge/edge-image-builder:1.0.2
 ----
 
 === Creating the image configuration directory [[config_dir_creation]]
@@ -357,7 +357,7 @@ Now that all the necessary configurations are in place, we can build the image b
 
 [,shell]
 ----
-podman run --rm -it -v $CONFIG_DIR:/eib registry.suse.com/edge/edge-image-builder:1.0.1 build --definition-file definition.yaml
+podman run --rm -it -v $CONFIG_DIR:/eib registry.suse.com/edge/edge-image-builder:1.0.2 build --definition-file definition.yaml
 ----
 
 The output should be similar to the following:
@@ -700,10 +700,157 @@ NAME              UUID                                  TYPE      DEVICE  FILENA
 Wired Connection  300ed658-08d4-4281-9f8c-d1b8882d29b9  ethernet  eth0    /var/run/NetworkManager/system-connections/default_connection.nmconnection
 ----
 
+=== Unified node configurations
+
+There are occasions where relying on known MAC addresses is not an option. In these cases we can opt for the so-called _unified configuration_
+which allows us to specify settings in an `_all.yaml` file which will then be applied across all provisioned nodes.
+
+We will build and provision an edge node using different configuration structure. Follow all steps starting from <<config_dir_creation>> up until <<default_network_definition>>.
+
+In this example we define a desired state of two Ethernet interfaces (eth0 and eth1) - one using DHCP, and one assigned a static IP address.
+
+[,shell]
+----
+mkdir -p $CONFIG_DIR/network
+
+cat <<- EOF > $CONFIG_DIR/network/_all.yaml
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  ipv4:
+    dhcp: true
+    enabled: true
+  ipv6:
+    enabled: false
+- name: eth1
+  type: ethernet
+  state: up
+  ipv4:
+    address:
+    - ip: 10.0.0.1
+      prefix-length: 24
+    enabled: true
+    dhcp: false
+  ipv6:
+    enabled: false
+EOF
+----
+
+Let's build the image:
+
+[,shell]
+----
+podman run --rm -it -v $CONFIG_DIR:/eib registry.suse.com/edge/edge-image-builder:1.0.2 build --definition-file definition.yaml
+----
+
+Once the image is successfully built, let's create a virtual machine using it:
+
+[,shell]
+----
+virt-install --name node1 --ram 10000 --vcpus 6 --disk path=$CONFIG_DIR/modified-image.raw,format=raw --osinfo detect=on,name=sle-unknown --graphics none --console pty,target_type=serial --network default --network default --virt-type kvm --import
+----
+
+The provisioning process might take a few minutes. Once it's finished, log in to the system with the provided credentials.
+
+Verify that the routing is properly configured:
+
+[,shell]
+----
+localhost:~ # ip r
+default via 192.168.122.1 dev eth0 proto dhcp src 192.168.122.100 metric 100
+10.0.0.0/24 dev eth1 proto kernel scope link src 10.0.0.1 metric 101
+192.168.122.0/24 dev eth0 proto kernel scope link src 192.168.122.100 metric 100
+----
+
+Verify that Internet connection is available:
+
+[,shell]
+----
+localhost:~ # ping google.com
+PING google.com (142.250.72.46) 56(84) bytes of data.
+64 bytes from den16s08-in-f14.1e100.net (142.250.72.46): icmp_seq=1 ttl=56 time=14.3 ms
+64 bytes from den16s08-in-f14.1e100.net (142.250.72.46): icmp_seq=2 ttl=56 time=14.2 ms
+^C
+--- google.com ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1001ms
+rtt min/avg/max/mdev = 14.196/14.260/14.324/0.064 ms
+----
+
+Verify that the Ethernet interfaces are configured and active:
+
+[,shell]
+----
+localhost:~ # ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 52:54:00:26:44:7a brd ff:ff:ff:ff:ff:ff
+    altname enp1s0
+    inet 192.168.122.100/24 brd 192.168.122.255 scope global dynamic noprefixroute eth0
+       valid_lft 3505sec preferred_lft 3505sec
+3: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 52:54:00:ec:57:9e brd ff:ff:ff:ff:ff:ff
+    altname enp7s0
+    inet 10.0.0.1/24 brd 10.0.0.255 scope global noprefixroute eth1
+       valid_lft forever preferred_lft forever
+
+localhost:~ # nmcli -f NAME,UUID,TYPE,DEVICE,FILENAME con show
+NAME  UUID                                  TYPE      DEVICE  FILENAME
+eth0  dfd202f5-562f-5f07-8f2a-a7717756fb70  ethernet  eth0    /etc/NetworkManager/system-connections/eth0.nmconnection
+eth1  0523c0a1-5f5e-5603-bcf2-68155d5d322e  ethernet  eth1    /etc/NetworkManager/system-connections/eth1.nmconnection
+
+localhost:~ # cat /etc/NetworkManager/system-connections/eth0.nmconnection
+[connection]
+autoconnect=true
+autoconnect-slaves=-1
+id=eth0
+interface-name=eth0
+type=802-3-ethernet
+uuid=dfd202f5-562f-5f07-8f2a-a7717756fb70
+
+[ipv4]
+dhcp-client-id=mac
+dhcp-send-hostname=true
+dhcp-timeout=2147483647
+ignore-auto-dns=false
+ignore-auto-routes=false
+method=auto
+never-default=false
+
+[ipv6]
+addr-gen-mode=0
+dhcp-timeout=2147483647
+method=disabled
+
+localhost:~ # cat /etc/NetworkManager/system-connections/eth1.nmconnection
+[connection]
+autoconnect=true
+autoconnect-slaves=-1
+id=eth1
+interface-name=eth1
+type=802-3-ethernet
+uuid=0523c0a1-5f5e-5603-bcf2-68155d5d322e
+
+[ipv4]
+address0=10.0.0.1/24
+dhcp-timeout=2147483647
+method=manual
+
+[ipv6]
+addr-gen-mode=0
+dhcp-timeout=2147483647
+method=disabled
+----
+
 === Custom network configurations
 
 We have already covered the default network configuration for Edge Image Builder which relies on the NetworkManager Configurator.
-However, there is also the option to modify it via a custom script. Whilst this option is very flexible and is not MAC address dependant,
+However, there is also the option to modify it via a custom script. Whilst this option is very flexible and is also not MAC address dependant,
 its limitation stems from the fact that using it is much less convenient when bootstrapping multiple nodes with a single image.
 
 > NOTE: It is recommended to use the default network configuration via files describing the desired network states under the `/network` directory.
@@ -718,9 +865,9 @@ Let's start by storing the connection file in the `/custom/files` directory:
 
 [,shell]
 ----
-mkdir -p custom/files
+mkdir -p $CONFIG_DIR/custom/files
 
-cat << EOF > custom/files/eth0.nmconnection
+cat << EOF > $CONFIG_DIR/custom/files/eth0.nmconnection
 [connection]
 autoconnect=true
 autoconnect-slaves=-1
@@ -746,9 +893,9 @@ Now that the static configuration is created, we will also create our custom net
 
 [,shell]
 ----
-mkdir -p network
+mkdir -p $CONFIG_DIR/network
 
-cat << EOF > network/configure-network.sh
+cat << EOF > $CONFIG_DIR/network/configure-network.sh
 #!/bin/bash
 set -eux
 
@@ -763,7 +910,7 @@ cp eth0.nmconnection /etc/NetworkManager/system-connections/
 chmod 600 /etc/NetworkManager/system-connections/*.nmconnection
 EOF
 
-chmod a+x network/configure-network.sh
+chmod a+x $CONFIG_DIR/network/configure-network.sh
 ----
 
 > NOTE: The nmc binary will still be included by default, so it can also be used in the `configure-network.sh` script if necessary.
@@ -779,6 +926,9 @@ The configuration directory at this point should look like the following:
 [,console]
 ----
 ├── definition.yaml
+├── custom/
+│   └── files/
+│       └── eth0.nmconnection
 ├── network/
 │   └── configure-network.sh
 └── base-images/
@@ -789,7 +939,7 @@ Let's build the image:
 
 [,shell]
 ----
-podman run --rm -it -v $CONFIG_DIR:/eib registry.suse.com/edge/edge-image-builder:1.0.1 build --definition-file definition.yaml
+podman run --rm -it -v $CONFIG_DIR:/eib registry.suse.com/edge/edge-image-builder:1.0.2 build --definition-file definition.yaml
 ----
 
 Once the image is successfully built, let's create a virtual machine using it:
