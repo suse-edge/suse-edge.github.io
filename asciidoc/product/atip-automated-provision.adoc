@@ -237,7 +237,7 @@ Once the directory structure is prepared following the previous sections, run th
 [,shell]
 ----
 podman run --rm --privileged -it -v $PWD:/eib \
- registry.suse.com/edge/edge-image-builder:1.0.1 \
+ registry.suse.com/edge/edge-image-builder:1.0.2 \
  build --definition-file downstream-cluster-config.yaml
 ----
 
@@ -383,7 +383,7 @@ spec:
 The `RKE2ControlPlane` object specifies the control-plane configuration to be used and the `Metal3MachineTemplate` object specifies the control-plane image to be used.
 Also, it contains the information about the number of replicas to be used (in this case, one) and the `CNI` plug-in to be used (in this case, `Cilium`).
 The agentConfig block contains the `Ignition` format to be used and the `additionalUserData` to be used to configure the `RKE2` node with information like a systemd named `rke2-preinstall.service` to replace automatically the `BAREMETALHOST_UUID` and `node-name` during the provisioning process using the Ironic information.
-The last block of information contains the Kubernetes version to be used. `$\{RKE2_VERSION\}` is the version of `RKE2` to be used replacing this value (for example, `v1.28.8+rke2r1`).
+The last block of information contains the Kubernetes version to be used. `$\{RKE2_VERSION\}` is the version of `RKE2` to be used replacing this value (for example, `v1.28.9+rke2r1`).
 
 [,yaml]
 ----
@@ -639,7 +639,7 @@ The `RKE2ControlPlane` object specifies the control-plane configuration to be us
     ** The `storage` block which contains the Helm charts to be used to install the `MetalLB` and the `endpoint-copier-operator`.
     ** The `metalLB` custom resource file with the `IPaddressPool` and the `L2Advertisement` to be used (replacing `$\{EDGE_VIP_ADDRESS\}` with the `VIP` address).
     ** The `endpoint-svc.yaml` file to be used to configure the `kubernetes-vip` service to be used by the `MetalLB` to manage the `VIP` address.
-* The last block of information contains the Kubernetes version to be used. The `$\{RKE2_VERSION\}` is the version of `RKE2` to be used replacing this value (for example, `v1.28.8+rke2r1`).
+* The last block of information contains the Kubernetes version to be used. The `$\{RKE2_VERSION\}` is the version of `RKE2` to be used replacing this value (for example, `v1.28.9+rke2r1`).
 
 [,yaml]
 ----
@@ -866,6 +866,7 @@ stringData:
     - name: ${CONTROLPLANE_INTERFACE}
       type: ethernet
       state: up
+      mtu: 1500
       mac-address: "${CONTROLPLANE_MAC}"
       ipv4:
         address:
@@ -1034,7 +1035,7 @@ To make the process clear, the changes required on that block (`RKE2ControlPlane
     ** `cpu-partitioning.service` to enable the isolation cores of the `CPU` (for example, `1-30,33-62`).
     ** `sriov-custom-auto-vfs.service` to install the `sriov` Helm chart, wait until custom resources are created and run the `/var/sriov-auto-filler.sh` to replace the values in the config map `sriov-custom-auto-config` and create the `sriovnetworknodepolicy` to be used by the workloads.
 
-* The `$\{RKE2_VERSION\}` is the version of `RKE2` to be used replacing this value (for example, `v1.28.8+rke2r1`).
+* The `$\{RKE2_VERSION\}` is the version of `RKE2` to be used replacing this value (for example, `v1.28.9+rke2r1`).
 
 With all these changes mentioned, the `RKE2ControlPlane` block in the `capi-provisioning-example.yaml` will look like the following:
 
@@ -1096,6 +1097,34 @@ spec:
                 name: root
               group:
                 name: root
+            - path: /var/lib/rancher/rke2/server/manifests/sriov-crd.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChart
+                  metadata:
+                    name: sriov-crd
+                    namespace: kube-system
+                  spec:
+                    chart: oci://registry.suse.com/edge/charts/sriov-crd-chart
+                    targetNamespace: kube-system
+                    version: 1.2.2
+                    createNamespace: true
+            - path: /var/lib/rancher/rke2/server/manifests/sriov-network-operator.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChart
+                  metadata:
+                    name: sriov-network-operator
+                    namespace: kube-system
+                  spec:
+                    chart: oci://registry.suse.com/edge/charts/sriov-network-operator-chart
+                    targetNamespace: kube-system
+                    version: 1.2.2
+                    createNamespace: true
             - path: /var/sriov-auto-filler.sh
               overwrite: true
               contents:
@@ -1163,6 +1192,8 @@ spec:
             - nohz_full=${ISOLATED_CPU_CORES}
             - rcu_nocbs=${ISOLATED_CPU_CORES}
             - rcu_nocb_poll
+            - nosoftlockup
+            - nohz=on
         systemd:
           units:
             - name: rke2-preinstall.service
@@ -1217,18 +1248,14 @@ spec:
               enabled: true
               contents: |
                 [Unit]
-                Description=SR-IOV Custom Auto VF Creation
+                Description=SRIOV Custom Auto VF Creation
                 Wants=network-online.target  rke2-server.target
                 After=network.target network-online.target rke2-server.target
                 [Service]
                 User=root
                 Type=forking
                 TimeoutStartSec=900
-                ExecStart=/bin/sh -c "curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash"
-                ExecStartPost=/bin/sh -c "helm repo add suse-edge https://suse-edge.github.io/charts"
-                ExecStartPost=/bin/sh -c "while ! /var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml wait --for condition=ready nodes --all ; do sleep 2 ; done"
-                ExecStartPost=/bin/sh -c "helm --kubeconfig /etc/rancher/rke2/rke2.yaml install sriov-crd suse-edge/sriov-crd -n kube-system"
-                ExecStartPost=/bin/sh -c "helm --kubeconfig /etc/rancher/rke2/rke2.yaml install sriov-network-operator suse-edge/sriov-network-operator -n kube-system"
+                ExecStart=/bin/sh -c "while ! /var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml wait --for condition=ready nodes --all ; do sleep 2 ; done"
                 ExecStartPost=/bin/sh -c "while [ $(/var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml get sriovnetworknodestates.sriovnetwork.openshift.io --ignore-not-found --no-headers -A | wc -l) -eq 0 ]; do sleep 1; done"
                 ExecStartPost=/bin/sh -c "/var/sriov-auto-filler.sh"
                 RemainAfterExit=yes
