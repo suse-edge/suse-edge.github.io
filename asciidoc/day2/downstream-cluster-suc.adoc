@@ -1,0 +1,284 @@
+[#day2-suc-deployment-guide]
+== System upgrade controller deployment guide
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+:toc: auto
+
+The *system-upgrade-controller (SUC)* is responsible for deploying resources on specific nodes of a cluster based on configurations defined in a custom resource called a *Plan*. For more information, see the link:https://github.com/rancher/system-upgrade-controller[upstream] documentation.
+
+[NOTE]
+====
+This section focuses solely on deploying the `system-upgrade-controller`. *Plan* resources should be deployed from the following documentations:
+
+. <<day2-os-package-update, OS package update>>
+. <<day2-k8s-upgrade, Kubernetes version upgrade>>
+. <<day2-helm-upgrade, Helm chart upgrade>>
+====
+
+=== Deployment
+
+[NOTE]
+====
+This section assumes you will be using <<components-fleet,Fleet>> to orchestrate the *SUC* deployment. Users using a third-party GitOps workflow, should see <<day2-suc-third-party-gitops>> for information on what resources they need to setup in their workflow.
+====
+
+Deployment orchestration for *SUC* is done by using Fleet's <<day2-suc-dep-gitrepo,GitRepo>> or <<day2-suc-dep-bundle,Bundle>> resources. To determine what which resource to use, refer to <<day2-determine-use-case>>.
+
+[#day2-suc-dep-gitrepo]
+==== SUC deployment using a GitRepo resource
+
+This section covers how to create a `GitRepo` resource that will ship the needed `SUC Plans` for a successful *SUC* deployment to your *target* downstream clusters.
+
+The Edge team maintains a ready to use `GitRepo` resource for *SUC* in each of our `suse-edge/fleet-examples` link:https://github.com/suse-edge/fleet-examples/releases[releases] under `gitrepos/day2/system-upgrade-controller-gitrepo.yaml`.
+
+[IMPORTANT]
+====
+If using the `suse-edge/fleet-examples` repository, make sure you are using the resources from a dedicated link:https://github.com/suse-edge/fleet-examples/releases[release] tag.
+====
+
+`GitRepo` creation can be done in one of of the following ways:
+
+* Through the <<day2-suc-dep-gitrepo-rancher,Rancher UI>> (when `Rancher` is available)
+
+* By <<day2-suc-dep-gitrepo-manual, manually deploying>> the resources to your `management cluster`
+
+Once created, `Fleet` will be responsible for pickuping the resource and deploying the *SUC* resources to all your *target* clusters. For information on how to track the deployment process, see <<monitor_suc_deployment>>.
+
+[#day2-suc-dep-gitrepo-rancher]
+===== GitRepo deployment - Rancher UI
+
+. In the upper left corner, *☰ -> Continuous Delivery*
+
+. Go to *Git Repos -> Add Repository*
+
+If you use the `suse-edge/fleet-examples` repository:
+
+. *Repository URL* - `https://github.com/suse-edge/fleet-examples.git`
+
+. *Watch -> Revision* - choose a link:https://github.com/suse-edge/fleet-examples/releases[release] tag for the `suse-edge/fleet-examples` repository that you wish to use, e.g. `release-3.0.1`.
+
+. Under *Paths* add the path to the *system-upgrade-controller* as seen in the release tag - `fleets/day2/system-upgrade-controller`
+
+. Select *Next* to move to the *target* configuration section
+
+. *Only select clusters for which you wish to deploy the `system-upgrade-controller`.* When you are satisfied with your configurations, click *Create*
+
+Alternatively, if you decide to use your own repository to host these files, you would need to provide your repo data above.
+
+[#day2-suc-dep-gitrepo-manual]
+===== GitRepo creation - manual
+
+. Choose the desired Edge link:https://github.com/suse-edge/fleet-examples/releases[release] tag that you wish to deploy the *SUC* `GitRepo` from (referenced below as `$\{REVISION\}`).
+
+. Pull the *GitRepo* resource:
++
+[,bash]
+----
+curl -o system-upgrade-controller-gitrepo.yaml https://raw.githubusercontent.com/suse-edge/fleet-examples/{REVISION}/gitrepos/day2/system-upgrade-controller-gitrepo.yaml
+----
+
+. Edit the *GitRepo* configurations, under `spec.targets` specify your desired target list. By default the `GitRepo` resources from the `suse-edge/fleet-examples` are *NOT* mapped to any down stream clusters.
+
+** To match all clusters change the default `GitRepo` *target* to:
++
+[, bash]
+----
+spec:
+  targets:
+  - clusterSelector: {}
+----
+
+** Alternatively, if you want a more granular cluster selection see link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters]
+
+. Apply the *GitRepo* resource to your `management cluster`:
++
+[,bash]
+----
+kubectl apply -f system-upgrade-controller-gitrepo.yaml
+----
+
+. View the created *GitRepo* resource under the `fleet-default` namespace:
++
+[,bash]
+----
+kubectl get gitrepo system-upgrade-controller -n fleet-default
+
+# Example output
+NAME                        REPO                                               COMMIT       BUNDLEDEPLOYMENTS-READY   STATUS
+system-upgrade-controller   https://github.com/suse-edge/fleet-examples.git   release-3.0.1   0/0                       
+----
+
+[#day2-suc-dep-bundle]
+==== SUC deployment using a Bundle resource
+
+This section covers how to create a `Bundle` resource that will ship the needed `SUC Plans` for a successful *SUC* deployment to your *target* downstream clusters.
+
+The Edge team maintains a ready to use `Bundle` resources for *SUC* in each of our `suse-edge/fleet-examples` link:https://github.com/suse-edge/fleet-examples/releases[releases] under `bundles/day2/system-upgrade-controller/controller-bundle.yaml`.
+
+[IMPORTANT]
+====
+If using the `suse-edge/fleet-examples` repository, make sure you are using the resources from a dedicated link:https://github.com/suse-edge/fleet-examples/releases[release] tag.
+====
+
+`Bundle` creation can be done in one of of the following ways:
+
+* Through the <<day2-suc-dep-bundle-rancher,Rancher UI>> (when `Rancher` is available)
+
+* By <<day2-suc-dep-bundle-manual, manually deploying>> the resources to your `management cluster`
+
+Once created, `Fleet` will be responsible for pickuping the resource and deploying the *SUC* resources to all your *target* clusters. For information on how to track the deployment process, see <<monitor_suc_deployment>>.
+
+[#day2-suc-dep-bundle-rancher]
+===== Bundle creation - Rancher UI
+
+. In the upper left corner, *☰ -> Continuous Delivery*
+
+. Go to *Advanced* > *Bundles*
+
+. Select *Create from YAML*
+
+. From here you can create the Bundle in one of the following ways:
+
+** By manually copying the file content to the *Create from YAML* page. File content can be retrieved from this url - https://raw.githubusercontent.com/suse-edge/fleet-examples/$\{REVISION\}/bundles/day2/system-upgrade-controller/controller-bundle.yaml. Where `$\{REVISION\}` is the Edge link:https://github.com/suse-edge/fleet-examples/releases[release] tag that you desire (e.g. `release-3.0.1`).
+
+** By cloning the `suse-edge/fleet-examples` repository to the desired link:https://github.com/suse-edge/fleet-examples/releases[release] tag and selecting the *Read from File* option in the *Create from YAML* page. From there, navigate to `bundles/day2/system-upgrade-controller` directory and select `controller-bundle.yaml`. This will auto-populate the *Create from YAML* page with the Bundle content.
+
+. Change the *target* clusters for the `Bundle`:
+
+** To match all downstream clusters change the default Bundle `.spec.targets` to:
++
+[, bash]
+----
+spec:
+  targets:
+  - clusterSelector: {}
+----
+
+** For a more granular downstream cluster mappings, see link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters].
+
+. *Create*
+
+[#day2-suc-dep-bundle-manual]
+===== Bundle creation - manual
+
+. Choose the desired Edge link:https://github.com/suse-edge/fleet-examples/releases[release] tag that you wish to deploy the *SUC* `Bundle` from (referenced below as `$\{REVISION\}`).
+
+. Pull the *Bundle* resource:
++
+[,bash]
+----
+curl -o controller-bundle.yaml https://raw.githubusercontent.com/suse-edge/fleet-examples/${REVISION}/bundles/day2/system-upgrade-controller/controller-bundle.yaml
+----
+
+. Edit the `Bundle` *target* configurations, under `spec.targets` provide your desired target list. By default the `Bundle` resources from the `suse-edge/fleet-examples` are *NOT* mapped to any down stream clusters.
+
+** To match all clusters change the default `Bundle` *target* to:
++
+[, bash]
+----
+spec:
+  targets:
+  - clusterSelector: {}
+----
+
+** Alternatively, if you want a more granular cluster selection see link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters]
+
+. Apply the *Bundle* resource to your `management cluster`:
++
+[,bash]
+----
+kubectl apply -f controller-bundle.yaml 
+----
+
+. View the created *Bundle* resource under the `fleet-default` namespace:
++
+[,bash]
+----
+kubectl get bundles system-upgrade-controller -n fleet-default
+
+# Example output
+NAME                        BUNDLEDEPLOYMENTS-READY   STATUS
+system-upgrade-controller   0/0                       
+----
+
+[#day2-suc-third-party-gitops]
+==== Deploying system-upgrade-controller when using a third-party GitOps workflow
+
+To deploy the `system-upgrade-controller` using a third-party GitOps tool, depending on the tool, you might need information for the `system-upgrade-controller` Helm chart or Kubernetes resoruces, or both.
+
+Choose a specific Edge link:https://github.com/suse-edge/fleet-examples/releases[release] from which you wish to use the *SUC* from.
+
+From there, the *SUC* Helm chart data can be found under the `helm` configuration section of the `fleets/day2/system-upgrade-controller/fleet.ymal` file.
+
+The *SUC* Kubernetes resources can be found under the *SUC* `Bundle` configuration under `.spec.resources.content`. The location for the bundle is `bundles/day2/system-upgrade-controller/controller-bundle.yaml`.
+
+Use the above mentioned resoruces to populate the data that your third-party GitOps workflow needs in order to deploy *SUC*.
+
+=== Monitor SUC resources using Rancher
+
+This section covers how to monitor the lifecycle of the *SUC* deployment and any deployed *SUC* Plans using the Rancher UI.
+
+[#monitor_suc_deployment]
+==== Monitor SUC deployment
+
+To check the *SUC* pod logs for a specific cluster:
+
+. In the upper left corner, *☰ -> <your-cluster-name>*
+
+. Select *Workloads -> Pods*
+
+. Under the namespace drop down menu select the `cattle-system` namespace
+
++
+image::day2-monitor-suc-deployment-1.png[]
+
+. In the Pod filter bar, write the *SUC* name - `system-upgrade-controller`
+
+. On the right of the pod select *⋮ -> View Logs*
++
+image::day2-monitor-suc-deployment-2.png[]
+
+. The *SUC* logs should looks something similar to:
++
+image::day2-monitor-suc-deployment-3.png[]
+
+[#monitor_suc_plans]
+==== Monitor SUC Plans
+
+[IMPORTANT]
+====
+The *SUC Plan* Pods are kept alive for *15* minutes. After that they are removed by the corresponding Job that created them. To have access to the *SUC Plan* Pod logs, you should enable logging for your cluster. For information on how to do this in Rancher, see link:https://ranchermanager.docs.rancher.com/v2.8/integrations-in-rancher/logging[Rancher Integration with Logging Services].
+====
+
+To check *Pod* logs for the specific *SUC* plan:
+
+. In the upper left corner, *☰ -> <your-cluster-name>*
+
+. Select *Workloads -> Pods*
+
+. Under the namespace drop down menu select the `cattle-system` namespace
++
+image::day2-monitor-suc-deployment-1.png[]
+
+. In the Pod filter bar, write the name for your *SUC Plan* Pod. The name will be in the following template format: `apply-<plan_name>-on-<node_name>`
++
+.Example Kubernetes upgrade plan pods
+image::day2-k8s-plan-monitor.png[]
++
+Note how in _Figure 1_, we have one Pod in *Completed* and one in *Unknown* state. This is expected and has happened due to the Kubernetes version upgrade on the node.
++
+.Example OS pacakge update plan pods
+image::day2-os-pkg-plan-monitor.png[]
++
+.Example of upgrade plan pods for EIB deployed Helm charts on an HA cluster
+image::day2_chart_upgrade_plan_monitor.png[]
+
+. Select the pod that you want to review the logs of and navigate to *⋮ -> View Logs*
