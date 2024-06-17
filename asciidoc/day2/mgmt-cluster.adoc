@@ -71,7 +71,7 @@ Since *rebooting* the node will result in it being unavailable for some time, if
 kubectl cordon <node>
 ----
 
-This will result in the node being taken out of the default scheduling mechanism, ensuring that no pods will be assinged to it by mistake.
+This will result in the node being taken out of the default scheduling mechanism, ensuring that no pods will be assigned to it by mistake.
 
 .To drain a node, execute:
 [source, bash]
@@ -110,27 +110,34 @@ transactional-update rollback last
 ----
 ====
 
-== Rancher upgrade
-
-[NOTE]
-====
-To ensure disaster recovery, we advise to do a Rancher backup. For information on how to do this, check link:https://ranchermanager.docs.rancher.com/how-to-guides/new-user-guides/backup-restore-and-disaster-recovery/back-up-rancher[here].
-====
+== Helm upgrade
 
 [NOTE]
 ====
 This section assumes you have installed `helm` on your system. For `helm` installation instructions, check link:https://helm.sh/docs/intro/install[here].
 ====
 
-=== EIB created Rancher instance
+This section covers how to upgrade both an <<day2-mgmt-cluster-eib-helm-chart-upgrade,EIB>> and <<day2-mgmt-cluster-helm-chart-upgrade,non-EIB>> deployed helm chart.
 
-If you have chosen to deploy `Rancher` as part of EIB's <<quickstart-eib-definition-file, image definition file>>, you need to upgrade the `rancher.yaml` file that EIB creates under `/var/lib/rancher/rke2/server/manifests` on your `initializer` node. To deploy helm charts in its `image definition` file, EIB takes advantage of RKE2's manifest https://docs.rke2.io/advanced#auto-deploying-manifests[auto-deploy] functionality.
+[#day2-mgmt-cluster-eib-helm-chart-upgrade]
+=== EIB deployed helm chart
+
+EIB deploys helm charts defined in it's <<quickstart-eib-definition-file, image definition file>> by using RKE2's manifest https://docs.rke2.io/advanced#auto-deploying-manifests[auto-deploy] functionality. 
+
+In order to upgrade a chart that is deployed in such a manner, you need to upgrade the chart manifest file that EIB will create under the `/var/lib/rancher/rke2/server/manifests` directory on your `initializer` node.
+
+[NOTE]
+====
+To ensure disaster recovery, we advise that you always backup your chart manifest file as well as follow any documentation related to disaster recovery that your chart offers.
+====
+
+To upgrade the chart manifest file, follow these steps:
 
 . Locate the `initializer` node
 
-** For multi-node clusters - in your EIB image definition file, you should have specified the `initializer: true` property for one of your nodes. If you have not specified this property, the initializer node will be the first *server* node in your node list.
+** For `multi-node clusters` - in your EIB image definition file, you should have specified the `initializer: true` property for one of your nodes. If you have not specified this property, the initializer node will be the first *server* node in your node list.
 
-** For single-node clusters - the initializer is the currently running node
+** For `single-node clusters` - the initializer is the currently running node.
 
 . SSH to the `initializer` node:
 +
@@ -139,6 +146,90 @@ If you have chosen to deploy `Rancher` as part of EIB's <<quickstart-eib-definit
 ssh root@<node_ip>
 ----
 
+. link:https://helm.sh/docs/helm/helm_pull/[Pull] the helm chart: 
+
+** For helm charts hosted in a helm chart repository:
++
+[source,bash]
+----
+helm repo add <chart_repo_name> <chart_repo_urls>
+helm pull <chart_repo_name>/<chart_name>
+
+# Alternatively if you want to pull a specific verison
+helm pull <chart_repo_name>/<chart_name> --version=X.Y.Z
+----
+
+** For OCI-based helm charts:
++
+[source,bash]
+----
+helm pull oci://<chart_oci_url>
+
+# Alternatively if you want to pull a specific verison
+helm pull oci://<chart_oci_url> --version=X.Y.Z
+----
+
+. Encode the pulled `.tgz` archive so that it can be passed to a `HelmChart` CR config:
++
+[source,bash]
+----
+base64 -w 0 <chart_name>-X.Y.Z.tgz  > <chart_name>-X.Y.Z.txt
+----
+
+. Make a copy of the chart manifest file that we will edit:
++
+[source, bash]
+----
+cp /var/lib/rancher/rke2/server/manifests/<chart_name>.yaml ./<chart_name>.yaml
+----
+
+. Change the `chartContent` and `version` configurations of the `bar.yaml` file:
++
+[source,bash]
+----
+sed -i -e "s|chartContent:.*|chartContent: $(<chart-name-X.Y.Z.txt)|" -e "s|version:.*|version: X.Y.Z|" <chart_name>.yaml
+----
++
+[NOTE]
+====
+If you need to do any additional upgrade changes to the chart (e.g. adding *new* custom chart values), you need to manually edit the chart manifest file.
+====
+
+. Replace the original chart manifest file:
++
+[source,bash]
+----
+cp <chart_name>.yaml /var/lib/rancher/rke2/server/manifests/
+----
+
+The above commands will trigger an upgrade of the helm chart. The upgrade will be handled by the https://github.com/k3s-io/helm-controller#helm-controller[helm-controller].
+
+To track the helm chart upgrade you need to view the logs of the pod that the `helm-controller` creates for the chart upgrade. Refer to the <<day2-mgmt-cluster-eib-helm-chart-upgrade-examples, Examples>> section for more information.
+
+[#day2-mgmt-cluster-eib-helm-chart-upgrade-examples]
+==== Examples
+
+[NOTE]
+====
+The examples in this section assume that you have already located and connected to your `initializer` node.
+====
+
+This section offer examples on how to upgrade a:
+
+* <<day2-mgmt-cluster-eib-helm-chart-upgrade-examples-rancher, Rancher>> helm chart
+
+* <<day2-mgmt-cluster-eib-helm-chart-upgrade-examples-metal3, Metal^3^>> helm chart
+
+[#day2-mgmt-cluster-eib-helm-chart-upgrade-examples-rancher]
+===== Rancher upgrade
+
+[NOTE]
+====
+To ensure disaster recovery, we advise to do a Rancher backup. For information on how to do this, check link:https://ranchermanager.docs.rancher.com/how-to-guides/new-user-guides/backup-restore-and-disaster-recovery/back-up-rancher[here].
+====
+
+This example shows how to upgrade Rancher to the `2.8.4` version.
+
 . Add the `Rancher Prime` Helm repository:
 +
 [source,bash]
@@ -146,23 +237,17 @@ ssh root@<node_ip>
 helm repo add rancher-prime https://charts.rancher.com/server-charts/prime
 ----
 
-. Fetch the latest `Rancher Prime` helm chart version:
+. Pull the latest `Rancher Prime` helm chart version:
 +
 [source,bash]
 ----
-helm fetch rancher-prime/rancher
-
-# Alternatively if you want to fetch a specific verison
-helm fetch rancher-prime/rancher --version=X.Y.Z
+helm pull rancher-prime/rancher --version=2.8.4
 ----
 
 . Encode `.tgz` archive so that it can be passed to a `HelmChart` CR config:
 +
 [source,bash]
 ----
-base64 -w 0 rancher-X.Y.Z.tgz  > rancher-X.Y.Z-encoded.txt
-
-# Example for Rancher 2.8.4
 base64 -w 0 rancher-2.8.4.tgz  > rancher-2.8.4-encoded.txt
 ----
 
@@ -177,9 +262,6 @@ cp /var/lib/rancher/rke2/server/manifests/rancher.yaml ./rancher.yaml
 +
 [source,bash]
 ----
-sed -i -e "s|chartContent:.*|chartContent: $(<rancher-X.Y.Z-encoded.txt)|" -e "s|version:.*|version: X.Y.Z|" rancher.yaml
-
-# Example for Rancher 2.8.4
 sed -i -e "s|chartContent:.*|chartContent: $(<rancher-2.8.4-encoded.txt)|" -e "s|version:.*|version: 2.8.4|" rancher.yaml
 ----
 +
@@ -194,9 +276,6 @@ If you need to do any additional upgrade changes to the chart (e.g. adding *new*
 ----
 cp rancher.yaml /var/lib/rancher/rke2/server/manifests/
 ----
-
-
-The above commands will trigger an upgrade of the `Rancher` instance. The upgrade will be handled by the https://github.com/k3s-io/helm-controller#helm-controller[helm-controller].
 
 To verify the update:
 
@@ -245,54 +324,166 @@ rancher-webhook-649dcc48b4-zqjs7   1/1     Running     0          100s
 ----
 kubectl get settings.management.cattle.io server-version
 
-# Example output for Rancher 2.8.4 upgrade
+# Example output
 NAME             VALUE
 server-version   v2.8.4
 ----
 
-=== Non-EIB created Rancher instance
+[#day2-mgmt-cluster-eib-helm-chart-upgrade-examples-metal3]
+===== Metal^3^ upgrade
 
-. Update your local helm cache:
+This example shows how to upgrade Metal^3^ to the `0.7.1` version.
+
+. Pull the latest `Metal^3^` helm chart version:
 +
 [source,bash]
 ----
-helm repo update
+helm pull oci://registry.suse.com/edge/metal3-chart --version 0.7.1
 ----
 
-. Get `Rancher Prime` helm repo:
+. Encode `.tgz` archive so that it can be passed to a `HelmChart` CR config:
 +
 [source,bash]
 ----
-helm repo add rancher-prime https://charts.rancher.com/server-charts/prime
+base64 -w 0 metal3-chart-0.7.1.tgz  > metal3-chart-0.7.1-encoded.txt
 ----
 
-. Fetch the latest `Rancher Prime` helm chart version:
+. Make a copy of the `Metal^3^` manifest file that we will edit:
++
+[source, bash]
+----
+cp /var/lib/rancher/rke2/server/manifests/metal3.yaml ./metal3.yaml
+----
+
+. Change the `chartContent` and `version` configurations of the `Metal^3^` manifest file:
 +
 [source,bash]
 ----
-helm fetch rancher-prime/rancher
-
-# Alternatively if you want to fetch a specific verison
-helm fetch rancher-prime/rancher --version=X.Y.Z
+sed -i -e "s|chartContent:.*|chartContent: $(<metal3-chart-0.7.1-encoded.txt)|" -e "s|version:.*|version: 0.7.1|" metal3.yaml
 ----
 +
-This should produce a `rancher-<version>.tgz` file in your current working directory.
+[NOTE]
+====
+If you need to do any additional upgrade changes to the chart (e.g. adding *new* custom chart values), you need to manually edit the `metal3.yaml` file.
+====
 
-. Get the values for the current Rancher release and print them to a `rancher-values.yaml` file
+. Replace the original `Metal^3^` manifest file:
++
+[source,bash]
+----
+cp metal3.yaml /var/lib/rancher/rke2/server/manifests/
+----
+
+To verify the update:
+
+. List pods in `default` namespace: 
++
+[source,bash]
+----
+kubectl get pods -n default
+
+# Example output
+NAME                              READY   STATUS      RESTARTS   AGE
+helm-install-metal3-7p7bl         0/1     Completed   0          27s
+----
+
+. Look at the logs of the `helm-install-rancher-*` pod:
++
+[source,bash]
+----
+kubectl logs <helm_install_rancher_pod> -n default
+
+# Example
+kubectl logs helm-install-metal3-7p7bl -n default
+----
+
+. Verify `Metal^3^` pods are running:
++
+[source,bash]
+----
+kubectl get pods -n metal3-system
+
+# Example output
+NAME                                                     READY   STATUS    RESTARTS      AGE
+baremetal-operator-controller-manager-785f99c884-9z87p   2/2     Running   2 (25m ago)   36m
+metal3-metal3-ironic-96fb66cdd-lkss2                     4/4     Running   0             3m54s
+metal3-metal3-mariadb-55fd44b648-q6zhk                   1/1     Running   0             36m
+----
+
+. Verify the `HelmChart` resource version is upgraded:
++
+[source,bash]
+----
+kubectl get helmchart metal3 -n default
+
+# Example output
+NAME     JOB                   CHART   TARGETNAMESPACE   VERSION   REPO   HELMVERSION   BOOTSTRAP
+metal3   helm-install-metal3           metal3-system     0.7.1                          
+----
+
+[#day2-mgmt-cluster-helm-chart-upgrade]
+=== Non-EIB deployed helm chart
+
+. Get the values for the currently running helm chart `.yaml` file and make any changes to them *if necessary*:
++
+[source,bash]
+----
+helm get values <chart_name> -n <chart_namespace> -o yaml > <chart_name>-values.yaml
+----
+
+. Update the helm chart:
++
+[source,bash]
+----
+# For charts using a chart repository
+helm upgrade <chart_name> <chart_repo_name>/<chart_name> \
+  --namespace <chart_namespace> \
+  -f <chart_name>-values.yaml \
+  --version=X.Y.Z
+
+# For OCI based charts
+helm upgrade <chart_name> oci://<oci_registry_url>/<chart_name> \
+  --namespace <chart_namespace> \
+  -f <chart_name>-values.yaml \
+  --version=X.Y.Z
+----
+
+. Verify the chart upgrade. Depending on the chart you may need to verify different resources. For examples of chart upgrades, see the <<day2-mgmt-cluster-helm-chart-upgrade-examples, Examples>> section.
+
+[#day2-mgmt-cluster-helm-chart-upgrade-examples]
+==== Examples
+
+This section offer examples on how to upgrade a:
+
+* <<day2-mgmt-cluster-helm-chart-upgrade-examples-rancher, Rancher>> helm chart
+
+* <<day2-mgmt-cluster-helm-chart-upgrade-examples-metal3, Metal^3^>> helm chart
+
+[#day2-mgmt-cluster-helm-chart-upgrade-examples-rancher]
+===== Rancher
+
+[NOTE]
+====
+To ensure disaster recovery, we advise to do a Rancher backup. For information on how to do this, check link:https://ranchermanager.docs.rancher.com/how-to-guides/new-user-guides/backup-restore-and-disaster-recovery/back-up-rancher[here].
+====
+
+This example shows how to upgrade Rancher to the `2.8.4` version.
+
+. Get the values for the current Rancher release and print them to a `rancher-values.yaml` file:
 +
 [source,bash]
 ----
 helm get values rancher -n cattle-system -o yaml > rancher-values.yaml
 ----
 
-. Update the helm chart
+. Update the helm chart:
 +
 [source,bash]
 ----
 helm upgrade rancher rancher-prime/rancher \
   --namespace cattle-system \
   -f rancher-values.yaml \
-  --version=2.X.Y
+  --version=2.8.4
 ----
 
 . Verify `Rancher` version upgrade:
@@ -301,9 +492,56 @@ helm upgrade rancher rancher-prime/rancher \
 ----
 kubectl get settings.management.cattle.io server-version
 
-# Example output for Rancher 2.8.4 upgrade
+# Example output
 NAME             VALUE
 server-version   v2.8.4
 ----
 
 _For additional information on the Rancher helm chart upgrade, check link:https://ranchermanager.docs.rancher.com/getting-started/installation-and-upgrade/install-upgrade-on-a-kubernetes-cluster/upgrades[here]._
+
+
+[#day2-mgmt-cluster-helm-chart-upgrade-examples-metal3]
+===== Metal^3^
+
+This example shows how to upgrade Metal^3^ to the `0.7.1` version.
+
+. Get the values for the current Rancher release and print them to a `rancher-values.yaml` file:
++
+[source,bash]
+----
+helm get values metal3 -n metal3-system -o yaml > metal3-values.yaml
+----
+
+. Update the helm chart:
++
+[source,bash]
+----
+helm upgrade metal3 oci://registry.suse.com/edge/metal3-chart \
+  --namespace metal3-system \
+  -f metal3-values.yaml \
+  --version=0.7.1
+----
+
+. Verify `Metal^3^` pods are running:
++
+[source,bash]
+----
+kubectl get pods -n metal3-system
+
+# Example output
+NAME                                                     READY   STATUS    RESTARTS   AGE
+baremetal-operator-controller-manager-785f99c884-fvsx4   2/2     Running   0          12m
+metal3-metal3-ironic-96fb66cdd-j9mgf                     4/4     Running   0          2m41s
+metal3-metal3-mariadb-55fd44b648-7fmvk                   1/1     Running   0          12m
+----
+
+. Verify `Metal^3^` helm release version change:
++
+[source,bash]
+----
+helm ls -n metal3-system
+
+# Expected output
+NAME  	NAMESPACE    	REVISION	UPDATED                                	STATUS  	CHART       	APP VERSION
+metal3	metal3-system	2       	2024-06-17 12:43:06.774802846 +0000 UTC	deployed	metal3-0.7.1	1.16.0   
+----
