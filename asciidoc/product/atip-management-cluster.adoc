@@ -42,9 +42,9 @@ image::product-atip-mgmtcluster1.png[]
 
 There are three main steps to set up the management cluster using a declarative approach:
 
-. **xref:mgmt-cluster-image-preparation[Image preparation]**: The first step is to prepare the manifests and files with all the necessary configurations.
+. **xref:mgmt-cluster-image-preparation-connected[Image preparation for connected environments]**: The first step is to prepare the manifests and files with all the necessary configurations to be used in connected environments.
 
-  - xref:mgmt-cluster-directory-structure[Directory structure]: This step creates a directory structure to be used by Edge Image Builder to store the configuration files and the image itself.
+  - xref:mgmt-cluster-directory-structure[Directory structure for connected environments]: This step creates a directory structure to be used by Edge Image Builder to store the configuration files and the image itself.
   - xref:mgmt-cluster-image-definition-file[Management cluster definition file]: The `mgmt-cluster.yaml` file is the main definition file for the management cluster. It contains the following information about the image to be created:
         ** Image Information: The information related to the image to be created using the base image.
         ** Operating system: The operating system configurations to be used in the image.
@@ -58,17 +58,25 @@ There are three main steps to set up the management cluster using a declarative 
         ** Config: Contains the configuration files to be used by the management cluster.
   - xref:mgmt-cluster-network-folder[Network folder]: The `network` folder contains the network configuration files to be used by the management cluster nodes.
 
-. **xref:mgmt-cluster-image-creation[Image creation]**: This step covers the creation of the image using the Edge Image Builder tool. Check the <<components-eib,prerequisites>> to run the Edge Image Builder tool on your system.
+. **xref:mgmt-cluster-image-preparation-airgap[Image preparation for air-gap environments]**: The step is to show the differences to prepare the manifests and files to be used in an air-gap scenario.
+  - xref:mgmt-cluster-directory-structure-airgap[Directory structure for air-gap environments]: The directory structure must be modified to include the resources needed to run the management cluster in an air-gap environment.
+  - xref:mgmt-cluster-image-definition-file-airgap[Modifications in the definition file]: The `mgmt-cluster.yaml` file must be modified to include the `embeddedArtifactRegistry` section with the `images` field set to all container images to be included into the EIB output image.
+  - xref:mgmt-cluster-custom-folder-airgap[Modifications in the custom folder]: The `custom` folder must be modified to include the resources needed to run the management cluster in an air-gap environment.
+        ** Register script: The `custom/scripts/99-register.sh` script must be removed when you use an air-gap environment.
+        ** Air-gap resources: The `custom/files/airgap-resources.tar.gz` file must be included in the `custom/files` folder with all the resources needed to run the management cluster in an air-gap environment.
+        ** Scripts: The `custom/scripts/99-mgmt-setup.sh` script must be modified to extract and copy the `airgap-resources.tar.gz` file to the final location. The `custom/files/metal3.sh` script must be modified to use the local resources included in the `airgap-resources.tar.gz` file instead of downloading them from the internet.
 
-. **xref:mgmt-cluster-provision[Management Cluster Provision]**: This step covers the provisioning of the management cluster using the image created in the previous step. This step can be done using a laptop, server, VM or any other x86_64 system with a USB port.
+. **xref:mgmt-cluster-image-creation[Image creation]**: This step covers the creation of the image using the Edge Image Builder tool (for both, connected and air-gap scenarios). Check the <<components-eib,prerequisites>> to run the Edge Image Builder tool on your system.
+
+. **xref:mgmt-cluster-provision[Management Cluster Provision]**: This step covers the provisioning of the management cluster using the image created in the previous step (for both, connected and air-gap scenarios). This step can be done using a laptop, server, VM or any other x86_64 system with a USB port.
 
 [NOTE]
 ====
 For more information about Edge Image Builder, see <<components-eib,Edge Image Builder>> and <<quickstart-eib,Edge Image Builder Quick Start>>.
 ====
 
-[#mgmt-cluster-image-preparation]
-=== Image preparation
+[#mgmt-cluster-image-preparation-connected]
+=== Image preparation for connected environments
 
 Using Edge Image Builder to create the image for the management cluster, a lot of configurations can be customized, but in this document, we cover the minimal configurations necessary to set up the management cluster.
 Edge Image Builder is typically run from inside a container so, if you do not already have a way to run containers, we need to start by installing a container runtime such as https://podman.io[Podman] or https://rancherdesktop.io[Rancher Desktop]. For this guide, we assume you already have a container runtime available.
@@ -1013,10 +1021,455 @@ If you want to use DHCP to get the IP address, you can use the following configu
 - The `routes` section is used to define the routing table for the management cluster.
 ====
 
+
+[#mgmt-cluster-image-preparation-airgap]
+=== Image preparation for air-gap environments
+
+This section describes how to prepare the image for air-gap environments showing only the differences from the previous sections. The following changes to the previous section (xref:mgmt-cluster-image-preparation-connected[Image preparation for connected environments]) are required to prepare the image for air-gap environments:
+
+- The `mgmt-cluster.yaml` file must be modified to include the `embeddedArtifactRegistry` section with the `images` field set to all container images to be included into the EIB output image.
+- The `custom/scripts/99-register.sh` script must be removed when use an air-gap environment.
+- The `custom/files/airgap-resources.tar.gz` file must be included in the `custom/files` folder with all the resources needed to run the management cluster in an air-gap environment.
+- The `custom/scripts/99-mgmt-setup.sh` script must be modified to extract and copy the `airgap-resources.tar.gz` file to the final location.
+- The `custom/files/metal3.sh` script must be modified to use the local resources included in the `airgap-resources.tar.gz` file instead of downloading them from the internet.
+
+
+[#mgmt-cluster-directory-structure-airgap]
+==== Directory structure for air-gap environments
+
+The directory structure for air-gap environments is the same as for connected environments, with the differences explained as follows:
+
+[,console]
+----
+eib
+|-- base-images
+|   |-- SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso
+|-- custom
+|   |-- files
+|   |   |-- airgap-resources.tar.gz
+|   |   |-- basic-setup.sh
+|   |   |-- metal3.sh
+|   |   |-- mgmt-stack-setup.service
+|   |   |-- rancher.sh
+|   |-- scripts
+|       |-- 99-alias.sh
+|       |-- 99-mgmt-setup.sh
+|-- kubernetes
+|   |-- config
+|   |   |-- server.yaml
+|   |-- helm
+|   |   |-- values
+|   |       |-- certmanager.yaml
+|   |       |-- metal3.yaml
+|   |       |-- neuvector.yaml
+|   |       |-- rancher.yaml
+|   |-- manifests
+|       |-- neuvector-namespace.yaml
+|-- mgmt-cluster.yaml
+|-- network
+    |-- mgmt-cluster-network.yaml
+----
+
+[NOTE]
+====
+The image `SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso` must be downloaded from the https://scc.suse.com/[SUSE Customer Center] or the https://www.suse.com/download/sle-micro/[SUSE Download page], and it must be located under the `base-images` folder before starting with the process.
+
+You should check the SHA256 checksum of the image to ensure it has not been tampered with. The checksum can be found in the same location where the image was downloaded.
+
+An example of the directory structure can be found in the https://github.com/suse-edge/atip[SUSE Edge GitHub repository under the "telco-examples" folder].
+====
+
+[#mgmt-cluster-image-definition-file-airgap]
+==== Modifications in the definition file
+
+The `mgmt-cluster.yaml` file must be modified to include the `embeddedArtifactRegistry` section with the `images` field set to all container images to be included into the EIB output image. The `images` field must contain the list of all container images to be included in the output image. The following is an example of the `mgmt-cluster.yaml` file with the `embeddedArtifactRegistry` section included:
+
+[,yaml]
+----
+apiVersion: 1.0
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso
+  outputImageName: eib-mgmt-cluster-image.iso
+operatingSystem:
+  isoConfiguration:
+    installDevice: /dev/sda
+  users:
+  - username: root
+    encryptedPassword: ${ROOT_PASSWORD}
+  packages:
+    packageList:
+    - jq
+    sccRegistrationCode: ${SCC_REGISTRATION_CODE}
+kubernetes:
+  version: ${KUBERNETES_VERSION}
+  helm:
+    charts:
+      - name: cert-manager
+        repositoryName: jetstack
+        version: 1.14.2
+        targetNamespace: cert-manager
+        valuesFile: certmanager.yaml
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: longhorn-crd
+        version: 103.3.0+up1.6.1
+        repositoryName: rancher-charts
+        targetNamespace: longhorn-system
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: longhorn
+        version: 103.3.0+up1.6.1
+        repositoryName: rancher-charts
+        targetNamespace: longhorn-system
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: metal3-chart
+        version: 0.7.1
+        repositoryName: suse-edge-charts
+        targetNamespace: metal3-system
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: metal3.yaml
+      - name: neuvector-crd
+        version: 103.0.3+up2.7.6
+        repositoryName: rancher-charts
+        targetNamespace: neuvector
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: neuvector.yaml
+      - name: neuvector
+        version: 103.0.3+up2.7.6
+        repositoryName: rancher-charts
+        targetNamespace: neuvector
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: neuvector.yaml
+      - name: rancher
+        version: 2.8.4
+        repositoryName: rancher-prime
+        targetNamespace: cattle-system
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: rancher.yaml
+    repositories:
+      - name: jetstack
+        url: https://charts.jetstack.io
+      - name: rancher-charts
+        url: https://charts.rancher.io/
+      - name: suse-edge-charts
+        url: oci://registry.suse.com/edge
+      - name: rancher-prime
+        url: https://charts.rancher.com/server-charts/prime
+    network:
+      apiHost: ${API_HOST}
+      apiVIP: ${API_VIP}
+    nodes:
+      - hostname: mgmt-cluster-node1
+        initializer: true
+        type: server
+#     - hostname: mgmt-cluster-node2
+#       initializer: true
+#       type: server
+#     - hostname: mgmt-cluster-node3
+#       initializer: true
+#       type: server
+embeddedArtifactRegistry:
+  images:
+    - name: registry.rancher.com/rancher/backup-restore-operator:v4.0.2
+    - name: registry.rancher.com/rancher/calico-cni:v3.27.0-rancher1
+    - name: registry.rancher.com/rancher/cis-operator:v1.0.13
+    - name: registry.rancher.com/rancher/coreos-kube-state-metrics:v1.9.7
+    - name: registry.rancher.com/rancher/coreos-prometheus-config-reloader:v0.38.1
+    - name: registry.rancher.com/rancher/coreos-prometheus-operator:v0.38.1
+    - name: registry.rancher.com/rancher/flannel-cni:v0.3.0-rancher9
+    - name: registry.rancher.com/rancher/fleet-agent:v0.9.4
+    - name: registry.rancher.com/rancher/fleet:v0.9.4
+    - name: registry.rancher.com/rancher/gitjob:v0.9.7
+    - name: registry.rancher.com/rancher/grafana-grafana:7.1.5
+    - name: registry.rancher.com/rancher/hardened-addon-resizer:1.8.20-build20240410
+    - name: registry.rancher.com/rancher/hardened-calico:v3.27.3-build20240423
+    - name: registry.rancher.com/rancher/hardened-cluster-autoscaler:v1.8.10-build20240124
+    - name: registry.rancher.com/rancher/hardened-cni-plugins:v1.4.1-build20240325
+    - name: registry.rancher.com/rancher/hardened-coredns:v1.11.1-build20240305
+    - name: registry.rancher.com/rancher/hardened-dns-node-cache:1.22.28-build20240125
+    - name: registry.rancher.com/rancher/hardened-etcd:v3.5.9-k3s1-build20240418
+    - name: registry.rancher.com/rancher/hardened-flannel:v0.25.1-build20240423
+    - name: registry.rancher.com/rancher/hardened-k8s-metrics-server:v0.7.1-build20240401
+    - name: registry.rancher.com/rancher/hardened-kubernetes:v1.28.9-rke2r1-build20240416
+    - name: registry.rancher.com/rancher/hardened-multus-cni:v4.0.2-build20240208
+    - name: registry.rancher.com/rancher/hardened-node-feature-discovery:v0.14.1-build20230926
+    - name: registry.rancher.com/rancher/hardened-whereabouts:v0.6.3-build20240208
+    - name: registry.rancher.com/rancher/helm-project-operator:v0.2.1
+    - name: registry.rancher.com/rancher/istio-kubectl:1.5.10
+    - name: registry.rancher.com/rancher/jimmidyson-configmap-reload:v0.3.0
+    - name: registry.rancher.com/rancher/k3s-upgrade:v1.28.9-k3s1
+    - name: registry.rancher.com/rancher/klipper-helm:v0.8.3-build20240228
+    - name: registry.rancher.com/rancher/klipper-lb:v0.4.7
+    - name: registry.rancher.com/rancher/kube-api-auth:v0.2.1
+    - name: registry.rancher.com/rancher/kubectl:v1.28.7
+    - name: registry.rancher.com/rancher/library-nginx:1.19.2-alpine
+    - name: registry.rancher.com/rancher/local-path-provisioner:v0.0.26
+    - name: registry.rancher.com/rancher/machine:v0.15.0-rancher112
+    - name: registry.rancher.com/rancher/mirrored-cluster-api-controller:v1.4.4
+    - name: registry.rancher.com/rancher/nginx-ingress-controller:nginx-1.9.6-rancher1
+    - name: registry.rancher.com/rancher/pause:3.6
+    - name: registry.rancher.com/rancher/prom-alertmanager:v0.21.0
+    - name: registry.rancher.com/rancher/prom-node-exporter:v1.0.1
+    - name: registry.rancher.com/rancher/prom-prometheus:v2.18.2
+    - name: registry.rancher.com/rancher/prometheus-auth:v0.2.2
+    - name: registry.rancher.com/rancher/prometheus-federator:v0.3.4
+    - name: registry.rancher.com/rancher/pushprox-client:v0.1.0-rancher2-client
+    - name: registry.rancher.com/rancher/pushprox-proxy:v0.1.0-rancher2-proxy
+    - name: registry.rancher.com/rancher/rancher-agent:v2.8.4
+    - name: registry.rancher.com/rancher/rancher-csp-adapter:v3.0.1
+    - name: registry.rancher.com/rancher/rancher-webhook:v0.4.5
+    - name: registry.rancher.com/rancher/rancher:v2.8.4
+    - name: registry.rancher.com/rancher/rke-tools:v0.1.96
+    - name: registry.rancher.com/rancher/rke2-cloud-provider:v1.29.3-build20240412
+    - name: registry.rancher.com/rancher/rke2-runtime:v1.28.9-rke2r1
+    - name: registry.rancher.com/rancher/rke2-upgrade:v1.28.9-rke2r1
+    - name: registry.rancher.com/rancher/security-scan:v0.2.15
+    - name: registry.rancher.com/rancher/shell:v0.1.24
+    - name: registry.rancher.com/rancher/system-agent-installer-k3s:v1.28.9-k3s1
+    - name: registry.rancher.com/rancher/system-agent-installer-rke2:v1.28.9-rke2r1
+    - name: registry.rancher.com/rancher/system-agent:v0.3.6-suc
+    - name: registry.rancher.com/rancher/system-upgrade-controller:v0.13.1
+    - name: registry.rancher.com/rancher/ui-plugin-catalog:1.3.0
+    - name: registry.rancher.com/rancher/ui-plugin-operator:v0.1.1
+    - name: registry.rancher.com/rancher/webhook-receiver:v0.2.5
+    - name: registry.rancher.com/rancher/kubectl:v1.20.2
+    - name: registry.rancher.com/rancher/mirrored-longhornio-csi-attacher:v4.4.2
+    - name: registry.rancher.com/rancher/mirrored-longhornio-csi-provisioner:v3.6.2
+    - name: registry.rancher.com/rancher/mirrored-longhornio-csi-resizer:v1.9.2
+    - name: registry.rancher.com/rancher/mirrored-longhornio-csi-snapshotter:v6.3.2
+    - name: registry.rancher.com/rancher/mirrored-longhornio-csi-node-driver-registrar:v2.9.2
+    - name: registry.rancher.com/rancher/mirrored-longhornio-livenessprobe:v2.12.0
+    - name: registry.rancher.com/rancher/mirrored-longhornio-backing-image-manager:v1.6.1
+    - name: registry.rancher.com/rancher/mirrored-longhornio-longhorn-engine:v1.6.1
+    - name: registry.rancher.com/rancher/mirrored-longhornio-longhorn-instance-manager:v1.6.1
+    - name: registry.rancher.com/rancher/mirrored-longhornio-longhorn-manager:v1.6.1
+    - name: registry.rancher.com/rancher/mirrored-longhornio-longhorn-share-manager:v1.6.1
+    - name: registry.rancher.com/rancher/mirrored-longhornio-longhorn-ui:v1.6.1
+    - name: registry.rancher.com/rancher/mirrored-longhornio-support-bundle-kit:v0.0.36
+    - name: registry.suse.com/edge/cluster-api-provider-rke2-bootstrap:v0.2.6
+    - name: registry.suse.com/edge/cluster-api-provider-rke2-controlplane:v0.2.6
+    - name: registry.suse.com/edge/cluster-api-controller:v1.6.2
+    - name: registry.suse.com/edge/cluster-api-provider-metal3:v1.6.0
+    - name: registry.suse.com/edge/ip-address-manager:v1.6.0
+----
+
+
+[#mgmt-cluster-custom-folder-airgap]
+==== Modifications in the custom folder
+
+- The `custom/scripts/99-register.sh` script must be removed when using an air-gap environment. As you can see in the directory structure, the `99-register.sh` script is not included in the `custom/scripts` folder.
+
+- The `custom/scripts/99-mgmt-setup.sh` script must be modified to extract and copy the `airgap-resources.tar.gz` file to the final location. The following is an example of the `99-mgmt-setup.sh` script with the modifications to extract and copy the `airgap-resources.tar.gz` file:
++
+[,shell]
+----
+#!/bin/bash
+
+# Copy the scripts from combustion to the final location
+mkdir -p /opt/mgmt/bin/
+for script in basic-setup.sh rancher.sh metal3.sh; do
+	cp ${script} /opt/mgmt/bin/
+done
+
+# Copy the systemd unit file and enable it at boot
+cp mgmt-stack-setup.service /etc/systemd/system/mgmt-stack-setup.service
+systemctl enable mgmt-stack-setup.service
+
+# Extract the airgap resources
+tar zxf airgap-resources.tar.gz
+
+# Copy the clusterctl binary to the final location
+cp airgap-resources/clusterctl /opt/mgmt/bin/ && chmod +x /opt/mgmt/bin/clusterctl
+
+# Copy the clusterctl.yaml and override
+mkdir -p /root/cluster-api
+cp -r airgap-resources/clusterctl.yaml airgap-resources/overrides /root/cluster-api/
+----
+
+- The `custom/files/metal3.sh` script must be modified to use the local resources included in the `airgap-resources.tar.gz` file instead of downloading them from the internet. The following is an example of the `metal3.sh` script with the modifications to use the local resources:
++
+[,shell]
+----
+#!/bin/bash
+set -euo pipefail
+
+BASEDIR="$(dirname "$0")"
+source ${BASEDIR}/basic-setup.sh
+
+METAL3LOCKNAMESPACE="default"
+METAL3LOCKCMNAME="metal3-lock"
+
+trap 'catch $? $LINENO' EXIT
+
+catch() {
+  if [ "$1" != "0" ]; then
+    echo "Error $1 occurred on $2"
+    ${KUBECTL} delete configmap ${METAL3LOCKCMNAME} -n ${METAL3LOCKNAMESPACE}
+  fi
+}
+
+# Get or create the lock to run all those steps just in a single node
+# As the first node is created WAY before the others, this should be enough
+# TODO: Investigate if leases is better
+if [ $(${KUBECTL} get cm -n ${METAL3LOCKNAMESPACE} ${METAL3LOCKCMNAME} -o name | wc -l) -lt 1 ]; then
+  ${KUBECTL} create configmap ${METAL3LOCKCMNAME} -n ${METAL3LOCKNAMESPACE} --from-literal foo=bar
+else
+  exit 0
+fi
+
+# Wait for metal3
+while ! ${KUBECTL} wait --for condition=ready -n ${METAL3_CHART_TARGETNAMESPACE} $(${KUBECTL} get pods -n ${METAL3_CHART_TARGETNAMESPACE} -l app.kubernetes.io/name=metal3-ironic -o name) --timeout=10s; do sleep 2 ; done
+
+# If rancher is deployed
+if [ $(${KUBECTL} get pods -n ${RANCHER_CHART_TARGETNAMESPACE} -l app=rancher -o name | wc -l) -ge 1 ]; then
+  cat <<-EOF | ${KUBECTL} apply -f -
+	apiVersion: management.cattle.io/v3
+	kind: Feature
+	metadata:
+	  name: embedded-cluster-api
+	spec:
+	  value: false
+	EOF
+
+  # Disable Rancher webhooks for CAPI
+  ${KUBECTL} delete mutatingwebhookconfiguration.admissionregistration.k8s.io mutating-webhook-configuration
+  ${KUBECTL} delete validatingwebhookconfigurations.admissionregistration.k8s.io validating-webhook-configuration
+  ${KUBECTL} wait --for=delete namespace/cattle-provisioning-capi-system --timeout=300s
+fi
+
+# Deploy CAPI
+if [ $(${KUBECTL} get pods -n ${METAL3_CAPISYSTEMNAMESPACE} -o name | wc -l) -lt 1 ]; then
+
+  # Try this command 3 times just in case, stolen from https://stackoverflow.com/a/33354419
+  if ! (r=3; while ! /opt/mgmt/bin/clusterctl init \
+    --core "cluster-api:v${METAL3_CAPICOREVERSION}"\
+    --infrastructure "metal3:v${METAL3_CAPIMETAL3VERSION}"\
+    --bootstrap "${METAL3_CAPIPROVIDER}:v${METAL3_CAPIRKE2VERSION}"\
+    --control-plane "${METAL3_CAPIPROVIDER}:v${METAL3_CAPIRKE2VERSION}"\
+    --config /root/cluster-api/clusterctl.yaml ; do
+            ((--r))||exit
+            echo "Something went wrong, let's wait 10 seconds and retry"
+            sleep 10;done) ; then
+      echo "clusterctl failed"
+      exit 1
+  fi
+
+  # Wait for capi-controller-manager
+  while ! ${KUBECTL} wait --for condition=ready -n ${METAL3_CAPISYSTEMNAMESPACE} $(${KUBECTL} get pods -n ${METAL3_CAPISYSTEMNAMESPACE} -l cluster.x-k8s.io/provider=cluster-api -o name) --timeout=10s; do sleep 2 ; done
+
+  # Wait for capm3-controller-manager, there are two pods, the ipam and the capm3 one, just wait for the first one
+  while ! ${KUBECTL} wait --for condition=ready -n ${METAL3_CAPM3NAMESPACE} $(${KUBECTL} get pods -n ${METAL3_CAPM3NAMESPACE} -l cluster.x-k8s.io/provider=infrastructure-metal3 -o name | head -n1 ) --timeout=10s; do sleep 2 ; done
+
+  # Wait for rke2-bootstrap-controller-manager
+  while ! ${KUBECTL} wait --for condition=ready -n ${METAL3_RKE2BOOTSTRAPNAMESPACE} $(${KUBECTL} get pods -n ${METAL3_RKE2BOOTSTRAPNAMESPACE} -l cluster.x-k8s.io/provider=bootstrap-rke2 -o name) --timeout=10s; do sleep 2 ; done
+
+  # Wait for rke2-control-plane-controller-manager
+  while ! ${KUBECTL} wait --for condition=ready -n ${METAL3_RKE2CONTROLPLANENAMESPACE} $(${KUBECTL} get pods -n ${METAL3_RKE2CONTROLPLANENAMESPACE} -l cluster.x-k8s.io/provider=control-plane-rke2 -o name) --timeout=10s; do sleep 2 ; done
+
+fi
+
+# Clean up the lock cm
+
+${KUBECTL} delete configmap ${METAL3LOCKCMNAME} -n ${METAL3LOCKNAMESPACE}
+----
+
+- The `custom/files/airgap-resources.tar.gz` file must be included in the `custom/files` folder with all the resources needed to run the management cluster in an air-gap environment. This file must be prepared manually downloading all resources and compressing them into this single file. The `airgap-resources.tar.gz` file contains the following resources:
++
+[,console]
+----
+|-- clusterctl
+|-- clusterctl.yaml
+|-- overrides
+    |-- bootstrap-rke2
+    |   |-- v0.2.6
+    |       |-- bootstrap-components.yaml
+    |       |-- metadata.yaml
+    |-- cluster-api
+    |   |-- v1.6.2
+    |       |-- core-components.yaml
+    |       |-- metadata.yaml
+    |-- control-plane-rke2
+    |   |-- v0.2.6
+    |       |-- control-plane-components.yaml
+    |       |-- metadata.yaml
+    |-- infrastructure-metal3
+        |-- v1.6.0
+            |-- cluster-template.yaml
+            |-- infrastructure-components.yaml
+            |-- metadata.yaml
+----
+
+The `clusterctl.yaml` file contains the configuration to specify the images location and the overrides to be used by the `clusterctl` tool. The `overrides` folder contains `yaml` file manifests to be used instead of downloading them from the internet.
+
+[,yaml]
+----
+providers:
+  # override a pre-defined provider
+  - name: "cluster-api"
+    url: "/root/cluster-api/overrides/cluster-api/v1.6.2/core-components.yaml"
+    type: "CoreProvider"
+  - name: "metal3"
+    url: "/root/cluster-api/overrides/infrastructure-metal3/v1.6.0/infrastructure-components.yaml"
+    type: "InfrastructureProvider"
+  - name: "rke2"
+    url: "/root/cluster-api/overrides/bootstrap-rke2/v0.2.6/bootstrap-components.yaml"
+    type: "BootstrapProvider"
+  - name: "rke2"
+    url: "/root/cluster-api/overrides/control-plane-rke2/v0.2.6/control-plane-components.yaml"
+    type: "ControlPlaneProvider"
+images:
+  all:
+    repository: registry.suse.com/edge
+----
+
+The `clusterctl` and the rest of the files included in the `overrides` folder can be downloaded using the following curls commands:
+
+[,shell]
+----
+# clusterctl binary
+curl -L https://github.com/kubernetes-sigs/cluster-api/releases/download/1.6.2/clusterctl-linux-${GOARCH} -o /usr/local/bin/clusterct
+
+# boostrap-components (boostrap-rke2)
+curl -L https://github.com/rancher-sandbox/cluster-api-provider-rke2/releases/download/v0.2.6/bootstrap-components.yaml
+curl -L https://github.com/rancher-sandbox/cluster-api-provider-rke2/releases/download/v0.2.6/metadata.yaml
+
+# control-plane-components (control-plane-rke2)
+curl -L https://github.com/rancher-sandbox/cluster-api-provider-rke2/releases/download/v0.2.6/control-plane-components.yaml
+curl -L https://github.com/rancher-sandbox/cluster-api-provider-rke2/releases/download/v0.2.6/metadata.yaml
+
+# cluster-api components
+curl -L https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.6.2/core-components.yaml
+curl -L https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.6.2/metadata.yaml
+
+# infrastructure-components (infrastructure-metal3)
+curl -L https://github.com/metal3-io/cluster-api-provider-metal3/releases/download/v1.6.0/infrastructure-components.yaml
+curl -L https://github.com/metal3-io/cluster-api-provider-metal3/releases/download/v1.6.0/metadata.yaml
+----
+
+[NOTE]
+====
+If you want to use different versions of the components, you can change the version in the URL to download the specific version of the components.
+====
+
+With the previous resources downloaded, you can compress them into a single file using the following command:
+
+[,shell]
+----
+tar -czvf airgap-resources.tar.gz clusterctl clusterctl.yaml overrides
+----
+
+
 [#mgmt-cluster-image-creation]
 === Image creation
 
-Once the directory structure is prepared following the previous sections, run the following command to build the image:
+Once the directory structure is prepared following the previous sections (for both, connected and air-gap scenarios), run the following command to build the image:
 
 [,shell]
 ----
@@ -1031,3 +1484,4 @@ This creates the ISO output image file that, in our case, based on the image def
 === Provision the management cluster
 
 The previous image contains all components explained above, and it can be used to provision the management cluster using a virtual machine or a bare-metal server (using the virtual-media feature).
+
