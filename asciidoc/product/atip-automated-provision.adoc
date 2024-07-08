@@ -32,7 +32,9 @@ For more information about `NeuVector`, see <<components-neuvector>>
 
 The following sections describe the different directed network provisioning workflows and some additional features that can be added to the provisioning process:
 
-* xref:eib-edge-image[]
+* xref:eib-edge-image-connected[]
+
+* xref:eib-edge-image-airgap[]
 
 * xref:single-node[]
 
@@ -44,26 +46,28 @@ The following sections describe the different directed network provisioning work
 
 * xref:atip-private-registry[]
 
-[#eib-edge-image]
-=== Prepare downstream cluster image
+* xref:airgap-deployment[]
+
+[#eib-edge-image-connected]
+=== Prepare downstream cluster image for connected scenarios
 
 <<components-eib, Edge Image Builder>> is used to prepare a modified SLEMicro base image which is provisioned on downstream cluster hosts.
 
 Much of the configuration via Edge Image Builder is possible, but in this guide, we cover the minimal configurations necessary to set up the downstream cluster.
 
-==== Prerequisites
+==== Prerequisites for connected scenarios
 
 * A container runtime such as https://podman.io[Podman] or https://rancherdesktop.io[Rancher Desktop] is required to run Edge Image Builder.
 * The base image `SLE-Micro.x86_64-5.5.0-Default-RT-GM.raw` must be downloaded from the https://scc.suse.com/[SUSE Customer Center] or the https://www.suse.com/download/sle-micro/[SUSE Download page].
 
-==== Image configuration
+==== Image configuration for connected scenarios
 
 When running Edge Image Builder, a directory is mounted from the host, so it is necessary to create a directory structure to store the configuration files used to define the target image.
 
 * `downstream-cluster-config.yaml` is the image definition file, see <<quickstart-eib>> for more details.
 * The base image when downloaded is `xz` compressed, which must be uncompressed with `unxz` and copied/moved under the `base-images` folder.
 * The `network` folder is optional, see <<add-network-eib>> for more details.
-* The custom/scripts directory contains scripts to be run on first-boot; currently a `growfs.sh` script is required to resize the OS root partition on deployment
+* The custom/scripts directory contains scripts to be run on first-boot; currently a `01-fix-growfs.sh` script is required to resize the OS root partition on deployment
 
 [,console]
 ----
@@ -74,7 +78,7 @@ When running Edge Image Builder, a directory is mounted from the host, so it is 
 |   └ configure-network.sh
 └── custom/
     └ scripts/
-        └ growfs.sh
+        └ 01-fix-growfs.sh
 ----
 
 ===== Downstream cluster image definition file
@@ -119,7 +123,7 @@ Also note `ignition.platform.id=openstack` is mandatory, without this argument S
 [#add-custom-script-growfs]
 ===== Growfs script
 
-Currently, a custom script (`custom/scripts/growfs.sh`) is required to grow the file system to match the disk size on first-boot after provisioning. The `growfs.sh` script contains the following information:
+Currently, a custom script (`custom/scripts/01-fix-growfs.sh`) is required to grow the file system to match the disk size on first-boot after provisioning. The `01-fix-growfs.sh` script contains the following information:
 
 [,shell]
 ----
@@ -246,6 +250,226 @@ This creates the output ISO image file named `eibimage-slemicro55rt-telco.raw`, 
 The output image must then be made available via a webserver, either the media-server container enabled via the <<metal3-media-server,Management Cluster Documentation>>
 or some other locally accessible server.  In the examples below, we refer to this server as `imagecache.local:8080`
 
+[#eib-edge-image-airgap]
+=== Prepare downstream cluster image for air-gap scenarios
+
+<<components-eib, Edge Image Builder>> is used to prepare a modified SLEMicro base image which is provisioned on downstream cluster hosts.
+
+Much of the configuration is possible with Edge Image Builder, but in this guide, we cover the minimal configurations necessary to set up the downstream cluster for air-gap scenarios.
+
+==== Prerequisites for air-gap scenarios
+
+* A container runtime such as https://podman.io[Podman] or https://rancherdesktop.io[Rancher Desktop] is required to run Edge Image Builder.
+* The base image `SLE-Micro.x86_64-5.5.0-Default-RT-GM.raw` must be downloaded from the https://scc.suse.com/[SUSE Customer Center] or the https://www.suse.com/download/sle-micro/[SUSE Download page].
+* If you want to use SR-IOV or any other workload which require a container image, a local private registry must be deployed and already configured (with/without TLS and/or authentication). This registry will be used to store the images and the helm chart OCI images.
+
+==== Image configuration for air-gap scenarios
+
+When running Edge Image Builder, a directory is mounted from the host, so it is necessary to create a directory structure to store the configuration files used to define the target image.
+
+* `downstream-cluster-airgap-config.yaml` is the image definition file, see <<quickstart-eib>> for more details.
+* The base image when downloaded is `xz` compressed, which must be uncompressed with `unxz` and copied/moved under the `base-images` folder.
+* The `network` folder is optional, see <<add-network-eib>> for more details.
+* The `custom/scripts` directory contains scripts to be run on first-boot; currently a `01-fix-growfs.sh` script is required to resize the OS root partition on deployment. For air-gap scenarios, a script `02-airgap.sh` is required to copy the images to the right place during the image creation process.
+* The `custom/files` directory contains the `rke2` and the `cni` images to be copied to the image during the image creation process.
+
+[,console]
+----
+├── downstream-cluster-airgap-config.yaml
+├── base-images/
+│   └ SLE-Micro.x86_64-5.5.0-Default-RT-GM.raw
+├── network/
+|   └ configure-network.sh
+└── custom/
+    └ files/
+    |   └ install.sh
+    |   └ rke2-images-cilium.linux-amd64.tar.zst
+    |   └ rke2-images-core.linux-amd64.tar.zst
+    |   └ rke2-images-multus.linux-amd64.tar.zst
+    |   └ rke2-images.linux-amd64.tar.zst
+    |   └ rke2.linux-amd64.tar.zst
+    |   └ sha256sum-amd64.txt
+    └ scripts/
+        └ 01-fix-growfs.sh
+        └ 02-airgap.sh
+----
+
+===== Downstream cluster image definition file
+
+The `downstream-cluster-airgap-config.yaml` file is the main configuration file for the downstream cluster image and the content has been described in the previous xref:add-telco-feature-eib[section].
+
+===== Growfs script
+
+Currently, a custom script (`custom/scripts/01-fix-growfs.sh`) is required to grow the file system to match the disk size on first-boot after provisioning. The `01-fix-growfs.sh` script contains the following information:
+
+[,shell]
+----
+#!/bin/bash
+growfs() {
+  mnt="$1"
+  dev="$(findmnt --fstab --target ${mnt} --evaluate --real --output SOURCE --noheadings)"
+  # /dev/sda3 -> /dev/sda, /dev/nvme0n1p3 -> /dev/nvme0n1
+  parent_dev="/dev/$(lsblk --nodeps -rno PKNAME "${dev}")"
+  # Last number in the device name: /dev/nvme0n1p42 -> 42
+  partnum="$(echo "${dev}" | sed 's/^.*[^0-9]\([0-9]\+\)$/\1/')"
+  ret=0
+  growpart "$parent_dev" "$partnum" || ret=$?
+  [ $ret -eq 0 ] || [ $ret -eq 1 ] || exit 1
+  /usr/lib/systemd/systemd-growfs "$mnt"
+}
+growfs /
+----
+
+===== Air-gap script
+
+The following script (`custom/scripts/02-airgap.sh`) is required to copy the images to the right place during the image creation process:
+
+[,shell]
+----
+#!/bin/bash
+
+# create the folder to extract the artifacts there
+mkdir -p /opt/rke2-artifacts
+mkdir -p /var/lib/rancher/rke2/agent/images
+
+# copy the artifacts
+cp install.sh /opt/
+cp rke2-images*.tar.zst rke2.linux-amd64.tar.gz sha256sum-amd64.txt /opt/rke2-artifacts/
+----
+
+===== Custom files for air-gap scenarios
+
+The `custom/files` directory contains the `rke2` and the `cni` images to be copied to the image during the image creation process.
+To easily generate the images, prepare them locally using following https://github.com/suse-edge/fleet-examples/blob/release-3.0/scripts/day2/edge-save-rke2-images.sh[script] and the list of images https://github.com/suse-edge/fleet-examples/blob/release-3.0/scripts/day2/edge-release-rke2-images.txt[here] to generate the artifacts required to be included in `custom/files`.
+Also, you can download the latest `rke2-install` script from https://get.rke2.io/[here].
+
+[,shell]
+----
+$ ./edge-save-rke2-images.sh -o custom/files -l ~/edge-release-rke2-images.txt
+----
+
+After downloading the images, the directory structure should look like this:
+
+[,console]
+----
+└── custom/
+    └ files/
+        └ install.sh
+        └ rke2-images-cilium.linux-amd64.tar.zst
+        └ rke2-images-core.linux-amd64.tar.zst
+        └ rke2-images-multus.linux-amd64.tar.zst
+        └ rke2-images.linux-amd64.tar.zst
+        └ rke2.linux-amd64.tar.zst
+        └ sha256sum-amd64.txt
+----
+
+[#preload-private-registry]
+===== Preload your private registry with images required for air-gap scenarios and SR-IOV (optional)
+
+If you want to use SR-IOV in your air-gap scenario or any other workload images, you must preload your local private registry with the images following the next steps:
+
+* Download, extract, and push the helm-chart OCI images to the private registry
+* Download, extract, and push the rest of images required to the private registry
+
+The following scripts can be used to download, extract, and push the images to the private registry. We will show an example to preload the SR-IOV images, but you can also use the same approach to preload any other custom images:
+
+. Preload with helm-chart OCI images for SR-IOV:
++
+.. You must create a list with the helm-chart OCI images required:
++
+[,shell]
+----
+$ cat > edge-release-helm-oci-artifacts.txt <<EOF
+edge/sriov-network-operator-chart:1.2.2
+edge/sriov-crd-chart:1.2.2
+EOF
+----
++
+.. Generate a local tarball file using the following https://github.com/suse-edge/fleet-examples/blob/release-3.0/scripts/day2/edge-save-oci-artefacts.sh[script] and the list created above:
++
+[,shell]
+----
+$ ./edge-save-oci-artefacts.sh -al ./edge-release-helm-oci-artifacts.txt -s registry.suse.com
+Pulled: registry.suse.com/edge/sriov-network-operator-chart:1.2.2
+Pulled: registry.suse.com/edge/sriov-crd-chart:1.2.2
+a edge-release-oci-tgz-20240705
+a edge-release-oci-tgz-20240705/sriov-network-operator-chart-1.2.2.tgz
+a edge-release-oci-tgz-20240705/sriov-crd-chart-1.2.2.tgz
+----
++
+.. Upload your tarball file to your private registry (e.g. `myregistry:5000`) using the following https://github.com/suse-edge/fleet-examples/blob/release-3.0/scripts/day2/edge-load-oci-artefacts.sh[script] to preload your registry with the helm chart OCI images downloaded in the previous step:
++
+[,shell]
+----
+$ tar zxvf edge-release-oci-tgz-20240705.tgz
+$ ./edge-load-oci-artefacts.sh -ad edge-release-oci-tgz-20240705 -r myregistry:5000
+----
+
+. Preload with the rest of the images required for SR-IOV:
++
+.. In this case, we must include the `sr-iov container images for telco workloads (e.g. as a reference, you could get them from https://github.com/suse-edge/charts/blob/release-3.0/charts/sriov-network-operator/1.2.2%2Bup0.1.0/values.yaml[helm-chart values])
++
+[,shell]
+----
+$ cat > edge-release-images.txt <<EOF
+rancher/hardened-sriov-network-operator:v1.2.0-build20240327
+rancher/rancher/hardened-sriov-network-config-daemon:v1.2.0-build20240327
+rancher/hardened-sriov-cni:v1.2.0-build20240327
+rancher/hardened-ib-sriov-cni:v1.2.0-build20240327
+rancher/hardened-sriov-network-device-plugin:v1.2.0-build20240327
+rancher/hardened-sriov-network-resources-injector:v1.2.0-build20240327
+rancher/hardened-sriov-network-webhook:v1.2.0-build20240327
+EOF
+----
++
+.. Using the following https://github.com/suse-edge/fleet-examples/blob/release-3.0/scripts/day2/edge-save-images.sh[script] and the list created above, you must generate locally the tarball file with the images required:
++
+[,shell]
+----
+$ ./edge-save-images.sh -al ./edge-release-images.txt -s registry.suse.com
+Pulled: registry.suse.com/rancher/hardened-sriov-network-operator:v1.2.0-build20240327
+Pulled: registry.suse.com/rancher/rancher/hardened-sriov-network-config-daemon:v1.2.0-build20240327
+Pulled: registry.suse.com/rancher/hardened-sriov-cni:v1.2.0-build20240327
+Pulled: registry.suse.com/rancher/hardened-ib-sriov-cni:v1.2.0-build20240327
+Pulled: registry.suse.com/rancher/hardened-sriov-network-device-plugin:v1.2.0-build20240327
+Pulled: registry.suse.com/rancher/hardened-sriov-network-resources-injector:v1.2.0-build20240327
+Pulled: registry.suse.com/rancher/hardened-sriov-network-webhook:v1.2.0-build20240327
+a edge-release-images-tgz-20240705
+a edge-release-images-tgz-20240705/hardened-sriov-network-operator-v1.2.0-build20240327.tar.gz
+a edge-release-images-tgz-20240705/hardened-sriov-network-config-daemon-v1.2.0-build20240327.tar.gz
+a edge-release-images-tgz-20240705/hardened-sriov-cni-v1.2.0-build20240327.tar.gz
+a edge-release-images-tgz-20240705/hardened-ib-sriov-cni-v1.2.0-build20240327.tar.gz
+a edge-release-images-tgz-20240705/hardened-sriov-network-device-plugin-v1.2.0-build20240327.tar.gz
+a edge-release-images-tgz-20240705/hardened-sriov-network-resources-injector-v1.2.0-build20240327.tar.gz
+a edge-release-images-tgz-20240705/hardened-sriov-network-webhook-v1.2.0-build20240327.tar.gz
+----
++
+.. Upload your tarball file to your private registry (e.g. `myregistry:5000`) using the following https://github.com/suse-edge/fleet-examples/blob/release-3.0/scripts/day2/edge-load-images.sh[script] to preload your private registry with the images downloaded in the previous step:
++
+[,shell]
+----
+$ tar zxvf edge-release-images-tgz-20240705.tgz
+$ ./edge-load-images.sh -ad edge-release-images-tgz-20240705 -r myregistry:5000
+----
+
+
+==== Image creation for air-gap scenarios
+
+Once the directory structure is prepared following the previous sections, run the following command to build the image:
+
+[,shell]
+----
+podman run --rm --privileged -it -v $PWD:/eib \
+ registry.suse.com/edge/edge-image-builder:1.0.2 \
+ build --definition-file downstream-cluster-airgap-config.yaml
+----
+
+This creates the output ISO image file named `eibimage-slemicro55rt-telco.raw`, based on the definition described above.
+
+The output image must then be made available via a webserver, either the media-server container enabled via the <<metal3-media-server,Management Cluster Documentation>>
+or some other locally accessible server.  In the examples below, we refer to this server as `imagecache.local:8080`.
+
+
 [#single-node]
 === Downstream cluster provisioning with Direct network provisioning (single-node)
 
@@ -254,7 +478,7 @@ This is the simplest way to automate the provisioning of a downstream cluster.
 
 *Requirements*
 
-- The image generated using `EIB`, as described in the xref:eib-edge-image[previous section], with the minimal configuration to set up the downstream cluster has to be located in the management cluster exactly on the path you configured on xref:metal3-media-server[this section].
+- The image generated using `EIB`, as described in the xref:eib-edge-image-connected[previous section], with the minimal configuration to set up the downstream cluster has to be located in the management cluster exactly on the path you configured on xref:metal3-media-server[this section].
 - The management server created and available to be used on the following sections. For more information, refer to the Management Cluster section <<atip-management-cluster>>.
 
 *Workflow*
@@ -268,6 +492,7 @@ There are two different steps to automate the provisioning of a single-node down
 1. Enroll the bare-metal host to make it available for the provisioning process.
 2. Provision the bare-metal host to install and configure the operating system and the Kubernetes cluster.
 
+[#enroll-bare-metal-host]
 *Enroll the bare-metal host*
 
 The first step is to enroll the new bare-metal host in the management cluster to make it available to be provisioned.
@@ -436,7 +661,7 @@ The `Metal3MachineTemplate` object specifies the following information:
 
 - The `dataTemplate` to be used as a reference to the template.
 - The `hostSelector` to be used matching with the label created during the enrollment process.
-- The `image` to be used as a reference to the image generated using `EIB` on the previous xref:eib-edge-image[section], and the `checksum` and `checksumType` to be used to validate the image.
+- The `image` to be used as a reference to the image generated using `EIB` on the previous xref:eib-edge-image-connected[section], and the `checksum` and `checksumType` to be used to validate the image.
 
 [,yaml]
 ----
@@ -499,7 +724,7 @@ This is the simplest way to automate the provisioning of a downstream cluster. T
 
 *Requirements*
 
-- The image generated using `EIB`, as described in the xref:eib-edge-image[previous section], with the minimal configuration to set up the downstream cluster has to be located in the management cluster exactly on the path you configured on xref:metal3-media-server[this section].
+- The image generated using `EIB`, as described in the xref:eib-edge-image-connected[previous section], with the minimal configuration to set up the downstream cluster has to be located in the management cluster exactly on the path you configured on xref:metal3-media-server[this section].
 - The management server created and available to be used on the following sections. For more information, refer to the Management Cluster section: <<atip-management-cluster>>.
 
 *Workflow*
@@ -778,7 +1003,7 @@ The `Metal3MachineTemplate` object specifies the following information:
 
 - The `dataTemplate` to be used as a reference to the template.
 - The `hostSelector` to be used matching with the label created during the enrollment process.
-- The `image` to be used as a reference to the image generated using `EIB` on the previous xref:eib-edge-image[section], and `checksum` and `checksumType` to be used to validate the image.
+- The `image` to be used as a reference to the image generated using `EIB` on the previous xref:eib-edge-image-connected[section], and `checksum` and `checksumType` to be used to validate the image.
 
 [,yaml]
 ----
@@ -973,7 +1198,7 @@ The directed network provisioning workflow allows to automate the Telco features
 *Requirements*
 
 - The image generated using `EIB` has to include the specific Telco packages following xref:add-telco-feature-eib[this section].
-- The image generated using `EIB`, as described in the xref:eib-edge-image[previous section],  has to be located in the management cluster exactly on the path you configured on xref:metal3-media-server[this section].
+- The image generated using `EIB`, as described in the xref:eib-edge-image-connected[previous section],  has to be located in the management cluster exactly on the path you configured on xref:metal3-media-server[this section].
 - The management server created and available to be used on the following sections. For more information, refer to the Management Cluster section: <<atip-management-cluster>>.
 
 *Configuration*
@@ -1381,3 +1606,335 @@ spec:
 ----
 
 Where the `registry.example.com` is the example name of the private registry to be used by the downstream cluster, and it should be replaced with the real values.
+
+
+[#airgap-deployment]
+=== Downstream cluster provisioning in air-gapped scenarios
+
+The directed network provisioning workflow allows to automate the provisioning of downstream clusters in air-gapped scenarios.
+
+==== Requirements for air-gapped scenarios
+
+. The `raw` image generated using `EIB` must include the specific container images (helm-chart OCI and container images) required to run the downstream cluster in an air-gapped scenario. For more information, refer to xref:eib-edge-image-airgap[this section].
+
+. In case of using SR-IOV or any other custom workload, the images required to run the workloads must be preloaded in your private registry following the xref:preload-private-registry[preload private registry section].
+
+==== Enroll the bare metal hosts in air-gap scenarios
+
+The process to enroll the bare metal hosts in the management cluster is the same as described in the xref:enroll-bare-metal-host[previous section].
+
+==== Provision the downstream cluster in air-gap scenarios
+
+There are some important changes required to provision the downstream cluster in air-gapped scenarios:
+
+. The `RKE2ControlPlane` block in the `capi-provisioning-example.yaml` file must include the `spec.agentConfig.airGapped: true` directive.
+
+. The private registry configuration must be included in the `RKE2ControlPlane` block in the `capi-provisioning-airgap-example.yaml` file following the xref:atip-private-registry[private registry section].
+
+. If you are using SR-IOV or any other `AdditionalUserData` configuration (combustion script) which requires the helm-chart installation, you must modify the content to reference the private registry instead of using the public registry.
+
+The following example shows the SR-IOV configuration in the `AdditionalUserData` block in the `capi-provisioning-airgap-example.yaml` file with the modifications required to reference the private registry
+
+- Private Registry secrets references
+- Helm-Chart definition using the private registry instead of the public OCI images.
+
+[,yaml]
+----
+# secret to include the private registry certificates
+apiVersion: v1
+kind: Secret
+metadata:
+  name: private-registry-cert
+  namespace: default
+data:
+  tls.crt: ${TLS_BASE64_CERT}
+  tls.key: ${TLS_BASE64_KEY}
+  ca.crt: ${CA_BASE64_CERT}
+type: kubernetes.io/tls
+---
+# secret to include the private registry auth credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: private-registry-auth
+  namespace: default
+data:
+  username: ${REGISTRY_USERNAME}
+  password: ${REGISTRY_PASSWORD}
+---
+apiVersion: controlplane.cluster.x-k8s.io/v1alpha1
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  replicas: 1
+  privateRegistriesConfig:       # Private registry configuration to add your own mirror and credentials
+    mirrors:
+      docker.io:
+        endpoint:
+          - "https://$(PRIVATE_REGISTRY_URL)"
+    configs:
+      "192.168.100.22:5000":
+        authSecret:
+          apiVersion: v1
+          kind: Secret
+          namespace: default
+          name: private-registry-auth
+        tls:
+          tlsConfigSecret:
+            apiVersion: v1
+            kind: Secret
+            namespace: default
+            name: private-registry-cert
+          insecureSkipVerify: false
+  serverConfig:
+    cni: cilium
+    cniMultusEnable: true
+  preRKE2Commands:
+    - modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
+  agentConfig:
+    airGapped: true       # Airgap true to enable airgap mode
+    format: ignition
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        storage:
+          files:
+            - path: /var/lib/rancher/rke2/server/manifests/configmap-sriov-custom-auto.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: v1
+                  kind: ConfigMap
+                  metadata:
+                    name: sriov-custom-auto-config
+                    namespace: sriov-network-operator
+                  data:
+                    config.json: |
+                      [
+                         {
+                           "resourceName": "${RESOURCE_NAME1}",
+                           "interface": "${SRIOV-NIC-NAME1}",
+                           "pfname": "${PF_NAME1}",
+                           "driver": "${DRIVER_NAME1}",
+                           "numVFsToCreate": ${NUM_VFS1}
+                         },
+                         {
+                           "resourceName": "${RESOURCE_NAME2}",
+                           "interface": "${SRIOV-NIC-NAME2}",
+                           "pfname": "${PF_NAME2}",
+                           "driver": "${DRIVER_NAME2}",
+                           "numVFsToCreate": ${NUM_VFS2}
+                         }
+                      ]
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /var/lib/rancher/rke2/server/manifests/sriov.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: v1
+                  data:
+                    .dockerconfigjson: ${REGISTRY_AUTH_DOCKERCONFIGJSON}
+                  kind: Secret
+                  metadata:
+                    name: privregauth
+                    namespace: kube-system
+                  type: kubernetes.io/dockerconfigjson
+                  ---
+                  apiVersion: v1
+                  kind: ConfigMap
+                  metadata:
+                    namespace: kube-system
+                    name: example-repo-ca
+                  data:
+                    ca.crt: |-
+                      -----BEGIN CERTIFICATE-----
+                      ${CA_BASE64_CERT}
+                      -----END CERTIFICATE-----
+                  ---
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChart
+                  metadata:
+                    name: sriov-crd
+                    namespace: kube-system
+                  spec:
+                    chart: oci://${PRIVATE_REGISTRY_URL}/sriov-crd
+                    dockerRegistrySecret:
+                      name: privregauth
+                    repoCAConfigMap:
+                      name: example-repo-ca
+                    createNamespace: true
+                    set:
+                      global.clusterCIDR: 192.168.0.0/18
+                      global.clusterCIDRv4: 192.168.0.0/18
+                      global.clusterDNS: 10.96.0.10
+                      global.clusterDomain: cluster.local
+                      global.rke2DataDir: /var/lib/rancher/rke2
+                      global.serviceCIDR: 10.96.0.0/12
+                    targetNamespace: sriov-network-operator
+                    version: ${SRIOV_CRD_VERSION}
+                  ---
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChart
+                  metadata:
+                    name: sriov-network-operator
+                    namespace: kube-system
+                  spec:
+                    chart: oci://${PRIVATE_REGISTRY_URL}/sriov-network-operator
+                    dockerRegistrySecret:
+                      name: privregauth
+                    repoCAConfigMap:
+                      name: example-repo-ca
+                    createNamespace: true
+                    set:
+                      global.clusterCIDR: 192.168.0.0/18
+                      global.clusterCIDRv4: 192.168.0.0/18
+                      global.clusterDNS: 10.96.0.10
+                      global.clusterDomain: cluster.local
+                      global.rke2DataDir: /var/lib/rancher/rke2
+                      global.serviceCIDR: 10.96.0.0/12
+                    targetNamespace: sriov-network-operator
+                    version: ${SRIOV_OPERATOR_VERSION}
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /var/sriov-auto-filler.sh
+              overwrite: true
+              contents:
+                inline: |
+                  #!/bin/bash
+                  cat <<- EOF > /var/sriov-networkpolicy-template.yaml
+                  apiVersion: sriovnetwork.openshift.io/v1
+                  kind: SriovNetworkNodePolicy
+                  metadata:
+                    name: atip-RESOURCENAME
+                    namespace: sriov-network-operator
+                  spec:
+                    nodeSelector:
+                      feature.node.kubernetes.io/network-sriov.capable: "true"
+                    resourceName: RESOURCENAME
+                    deviceType: DRIVER
+                    numVfs: NUMVF
+                    mtu: 1500
+                    nicSelector:
+                      pfNames: ["PFNAMES"]
+                      deviceID: "DEVICEID"
+                      vendor: "VENDOR"
+                      rootDevices:
+                        - PCIADDRESS
+                  EOF
+
+                  export KUBECONFIG=/etc/rancher/rke2/rke2.yaml; export KUBECTL=/var/lib/rancher/rke2/bin/kubectl
+                  while [ $(${KUBECTL} --kubeconfig=${KUBECONFIG} get sriovnetworknodestates.sriovnetwork.openshift.io -n sriov-network-operator -ojson | jq -r '.items[].status.syncStatus') != "Succeeded" ]; do sleep 1; done
+                  input=$(${KUBECTL} --kubeconfig=${KUBECONFIG} get cm sriov-custom-auto-config -n sriov-network-operator -ojson | jq -r '.data."config.json"')
+                  jq -c '.[]' <<< $input | while read i; do
+                    interface=$(echo $i | jq -r '.interface')
+                    pfname=$(echo $i | jq -r '.pfname')
+                    pciaddress=$(${KUBECTL} --kubeconfig=${KUBECONFIG} get sriovnetworknodestates.sriovnetwork.openshift.io -n sriov-network-operator -ojson | jq -r ".items[].status.interfaces[]|select(.name==\"$interface\")|.pciAddress")
+                    vendor=$(${KUBECTL} --kubeconfig=${KUBECONFIG} get sriovnetworknodestates.sriovnetwork.openshift.io -n sriov-network-operator -ojson | jq -r ".items[].status.interfaces[]|select(.name==\"$interface\")|.vendor")
+                    deviceid=$(${KUBECTL} --kubeconfig=${KUBECONFIG} get sriovnetworknodestates.sriovnetwork.openshift.io -n sriov-network-operator -ojson | jq -r ".items[].status.interfaces[]|select(.name==\"$interface\")|.deviceID")
+                    resourceName=$(echo $i | jq -r '.resourceName')
+                    driver=$(echo $i | jq -r '.driver')
+                    sed -e "s/RESOURCENAME/$resourceName/g" \
+                        -e "s/DRIVER/$driver/g" \
+                        -e "s/PFNAMES/$pfname/g" \
+                        -e "s/VENDOR/$vendor/g" \
+                        -e "s/DEVICEID/$deviceid/g" \
+                        -e "s/PCIADDRESS/$pciaddress/g" \
+                        -e "s/NUMVF/$(echo $i | jq -r '.numVFsToCreate')/g" /var/sriov-networkpolicy-template.yaml > /var/lib/rancher/rke2/server/manifests/$resourceName.yaml
+                  done
+              mode: 0755
+              user:
+                name: root
+              group:
+                name: root
+        kernel_arguments:
+          should_exist:
+            - intel_iommu=on
+            - intel_pstate=passive
+            - processor.max_cstate=1
+            - intel_idle.max_cstate=0
+            - iommu=pt
+            - mce=off
+            - hugepagesz=1G hugepages=40
+            - hugepagesz=2M hugepages=0
+            - default_hugepagesz=1G
+            - kthread_cpus=${NON-ISOLATED_CPU_CORES}
+            - irqaffinity=${NON-ISOLATED_CPU_CORES}
+            - isolcpus=${ISOLATED_CPU_CORES}
+            - nohz_full=${ISOLATED_CPU_CORES}
+            - rcu_nocbs=${ISOLATED_CPU_CORES}
+            - rcu_nocb_poll
+            - nosoftlockup
+            - nohz=on
+        systemd:
+          units:
+            - name: rke2-preinstall.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=rke2-preinstall
+                Wants=network-online.target
+                Before=rke2-install.service
+                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStartPost=/bin/sh -c "umount /mnt"
+                [Install]
+                WantedBy=multi-user.target
+            - name: cpu-partitioning.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=cpu-partitioning
+                Wants=network-online.target
+                After=network.target network-online.target
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStart=/bin/sh -c "echo isolated_cores=${ISOLATED_CPU_CORES} > /etc/tuned/cpu-partitioning-variables.conf"
+                ExecStartPost=/bin/sh -c "tuned-adm profile cpu-partitioning"
+                ExecStartPost=/bin/sh -c "systemctl enable tuned.service"
+                [Install]
+                WantedBy=multi-user.target
+            - name: sriov-custom-auto-vfs.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=SRIOV Custom Auto VF Creation
+                Wants=network-online.target  rke2-server.target
+                After=network.target network-online.target rke2-server.target
+                [Service]
+                User=root
+                Type=forking
+                TimeoutStartSec=900
+                ExecStart=/bin/sh -c "while ! /var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml wait --for condition=ready nodes --all ; do sleep 2 ; done"
+                ExecStartPost=/bin/sh -c "while [ $(/var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml get sriovnetworknodestates.sriovnetwork.openshift.io --ignore-not-found --no-headers -A | wc -l) -eq 0 ]; do sleep 1; done"
+                ExecStartPost=/bin/sh -c "/var/sriov-auto-filler.sh"
+                RemainAfterExit=yes
+                KillMode=process
+                [Install]
+                WantedBy=multi-user.target
+    kubelet:
+      extraArgs:
+        - provider-id=metal3://BAREMETALHOST_UUID
+    version: ${RKE2_VERSION}
+    nodeName: "localhost.localdomain"
+----
+
