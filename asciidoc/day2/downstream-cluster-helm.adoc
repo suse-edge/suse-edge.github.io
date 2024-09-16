@@ -25,9 +25,13 @@ Apart from the default `Day 2` <<day2-downstream-components, components>>, no ot
 
 === Preparation for air-gapped environments
 
-==== Ensure that you have access to your Helm chart's upgrade `fleet.yaml` file
+==== Ensure that you have access to your Helm chart upgrade Fleet
 
-Host the needed resources on a local git server that is accessible by your `management cluster`.
+Depending on what your environment supports, you can take one of the following options:
+
+. Host your chart's Fleet resources on a local Git server that is accessible by your `management cluster`.
+
+. Use Fleet's CLI to link:https://fleet.rancher.io/bundle-add#convert-a-helm-chart-into-a-bundle[convert a Helm chart into a Bundle] that you can directly use and will not need to host somewhere. Fleet's CLI can be retrieved from their link:https://github.com/rancher/fleet/releases[release] page, for Mac users there is a link:https://formulae.brew.sh/formula/fleet-cli[fleet-cli] Homebrew Formulae.
 
 ==== Find the required assets for your Edge release version
 
@@ -196,7 +200,7 @@ This section focuses on the following Helm upgrade procedure use-cases:
 
 . <<day2-helm-upgrade-fleet-managed-chart, I would like to upgrade a Fleet managed Helm chart>>
 
-. <<day2-helm-upgrade-eib-chart, I would like to upgrade an EIB created Helm chart>>
+. <<day2-helm-upgrade-eib-chart, I would like to upgrade an EIB deployed Helm chart>>
 
 [IMPORTANT]
 ====
@@ -214,7 +218,7 @@ For users that want to manage their Helm chart lifecycle through Fleet.
 
 .. From the selected Edge release tag revision, navigate to the Helm chart fleet - `fleets/day2/chart-templates/<chart>`
 
-.. Copy the chart Fleet directory to the Git repository that you will be using for your GitOps workflow
+.. *If you intend to use a GitOps workflow*, copy the chart Fleet directory to the Git repository that you will be doing GitOps from.
 
 .. *Optionally*, if the Helm chart requires configurations to its *values*, edit the `.helm.values` configuration inside the `fleet.yaml` file of the copied directory
 
@@ -280,17 +284,22 @@ diff:
 These are just example values that are used to illustrate custom configurations over the `longhorn` chart. They should *NOT* be treated as deployment guidelines for the `longhorn` chart.
 ====
 
-===== Create the GitRepo
+===== Deploy your Fleet
 
-After populating your repository with the chart's Fleet resources, you must create a link:https://fleet.rancher.io/ref-gitrepo[GitRepo] resource. This resource will hold information on how to access your chart's Fleet resources and to which clusters it needs to apply those resources.
+Depending if your environment supports working with a GitOps workflow, you can deploy your Chart Fleet by either using a link:https://fleet.rancher.io/ref-gitrepo[GitRepo] or link:https://fleet.rancher.io/bundle-add[Bundle].
 
-The `GitRepo` resource can be created through the Rancher UI, or by manually deploying the resource to the `management cluster`.
+[NOTE]
+====
+While deploying your Fleet, if you get a `Modified` message, make sure to add a corresponding `comparePatches` entry to the Fleet's `diff` section. For more information, see link:https://fleet.rancher.io/bundle-diffs[Generating Diffs to Ignore Modified GitRepos].
+====
 
-For information on how to create and deploy the GitRepo resource *manually*, see link:https://fleet.rancher.io/tut-deployment[Creating a Deployment].
+====== GitRepo
 
-To create a `GitRepo` resource through the *Rancher UI*, see link:https://ranchermanager.docs.rancher.com/v2.8/integrations-in-rancher/fleet/overview#accessing-fleet-in-the-rancher-ui[Accessing Fleet in the Rancher UI].
+Fleet's GitRepo resource holds information on how to access your chart's Fleet resources and to which clusters it needs to apply those resources.
 
-_Example *longhorn* `GitRepo` resource for *manual* deployment:_
+The `GitRepo` resource can be deployed through the link:https://ranchermanager.docs.rancher.com/v2.8/integrations-in-rancher/fleet/overview#accessing-fleet-in-the-rancher-ui[Rancher UI], or manually, by link:https://fleet.rancher.io/tut-deployment[deploying] the resource to the `management cluster`.
+
+_Example *Longhorn* `GitRepo` resource for *manual* deployment:_
 
 [,yaml]
 ----
@@ -314,6 +323,47 @@ spec:
   - clusterSelector: {}
 ----
 
+====== Bundle
+
+`Bundle` resoruces hold the raw Kubernetes resources that need to be deployed by Fleet. Normally it is encouraged to use the `GitRepo` approach, but for use-cases where the environment is air-gapped and cannot support a local Git server, `Bundles` can help you in propagating your Helm chart Fleet to your target clusters.
+
+The `Bundle` can be deployed either through the Rancher UI (`Continuous Delivery -> Advanced -> Bundles -> Create from YAML`) or by manually deploying the `Bundle` resource in the correct Fleet namespace. For information about Fleet namespaces, see the upstream link:https://fleet.rancher.io/namespaces#gitrepos-bundles-clusters-clustergroups[documentation].
+
+_Example *Longhorn* `Bundle` resource deployment using a *manual* approach:_
+
+. Navigate to the `Longhorn` Chart fleet located under `fleets/day2/chart-templates/longhorn`:
++
+[,bash]
+----
+cd fleets/day2/chart-templates/longhorn
+----
+
+. Create a `targets.yaml` file that will instruct Fleet to which clusters it should deploy the Helm chart. In this case we will deploy to a single downstream cluster. For information on how to map more complex targets, see link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters]:
++
+[,bash]
+----
+cat > targets.yaml <<EOF
+targets:
+- clusterName: foo
+EOF
+----
+
+. Convert the `Longhorn` Helm chart Fleet to a Bundle resources. For more information, see link:https://fleet.rancher.io/bundle-add#convert-a-helm-chart-into-a-bundle[Convert a Helm Chart into a Bundle]:
++
+[,bash]
+----
+fleet apply --compress --targets-file=targets.yaml -n fleet-default -o - longhorn-bundle > bundle.yaml
+----
+
+. Deploy the `bundle.yaml` to your `management cluster`:
++
+[,bash]
+----
+kubectl apply -f bundle.yaml
+----
+
+Following these steps will ensure that `Longhorn` is deployed on all of the specified target clusters.
+
 ===== Managing the deployed Helm chart
 
 Once deployed with Fleet, for Helm chart upgrades, see <<day2-helm-upgrade-fleet-managed-chart>>.
@@ -328,7 +378,7 @@ Once deployed with Fleet, for Helm chart upgrades, see <<day2-helm-upgrade-fleet
 . After commiting and pushing the changes to your repository, this will trigger an upgrade of the desired Helm chart
 
 [#day2-helm-upgrade-eib-chart]
-==== I would like to upgrade an EIB created Helm chart
+==== I would like to upgrade an EIB deploy Helm chart
 
 [NOTE]
 ====
