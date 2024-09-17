@@ -378,22 +378,17 @@ Once deployed with Fleet, for Helm chart upgrades, see <<day2-helm-upgrade-fleet
 . After commiting and pushing the changes to your repository, this will trigger an upgrade of the desired Helm chart
 
 [#day2-helm-upgrade-eib-chart]
-==== I would like to upgrade an EIB deploy Helm chart
+==== I would like to upgrade an EIB deployed Helm chart
 
-[NOTE]
-====
-This section assumes that you have deployed the system-upgrade-controller (SUC) beforehand, if you have not done so, or are unsure why you need it, see the default <<day2-downstream-components, Day 2 components>> list.
-====
+EIB deploys Helm charts by creating a `HelmChart` resource and utilising the `helm-controller` introduced by the link:https://docs.rke2.io/helm[RKE2]/link:https://docs.k3s.io/helm[K3s] Helm integration feature.
 
-EIB deploys Helm charts by utilizing the auto-deploy manifests functionality of link:https://docs.rke2.io/advanced#auto-deploying-manifests[rke2]/link:https://docs.k3s.io/installation/packaged-components#auto-deploying-manifests-addons[k3s]. It creates a link:https://github.com/k3s-io/helm-controller#helm-controller[HelmChart] resource definition manifest unter the `/var/lib/rancher/<rke2/k3s>/server/manifests` location of the initialiser node and lets `rke2/k3s` pick it up and auto-deploy it in the cluster.
-
-From a `Day 2` point of view this would mean that any upgrades of the Helm chart need to happen by editing the `HelmChart` manifest file of the specific chart. To automate this process for multiple clusters, this section uses *SUC Plans*.
+To ensure that an EIB deployed Helm chart is successfully upgraded, users would need to do an upgrade over the `HelmChart` resources created for the Helm chart by EIB.
 
 Below you can find information on:
 
-* The general <<day2-helm-upgrade-eib-chart-overview,overview>> of the helm chart upgrade workflow.
+* The general <<day2-helm-upgrade-eib-chart-overview,overview>> of the EIB deployed Helm chart upgrade process.
 
-* The necessary <<day2-helm-upgrade-eib-chart-upgrade-steps,upgrade steps>> needed for a successful helm chart upgrade.
+* The necessary <<day2-helm-upgrade-eib-chart-upgrade-steps,upgrade steps>> needed for a successful EIB deployed Helm chart upgrade.
 
 * An <<day2-helm-upgrade-eib-chart-example, example>> showcasing a link:https://longhorn.io[Longhorn] chart upgrade using the explained method.
 
@@ -402,391 +397,407 @@ Below you can find information on:
 [#day2-helm-upgrade-eib-chart-overview]
 ===== Overview
 
-This section is meant to give a high overview of the workflow that the user goes through in order to upgrade one or multiple Helm charts. For a detailed explanation of the steps needed for a Helm chart upgrade, see <<day2-helm-upgrade-eib-chart-upgrade-steps>>.
+This section is meant to give a high overview of the steps that need to be taken in order to upgrade one or multiple Helm charts that have been deployed by EIB. For a detailed explanation of the steps needed for a Helm chart upgrade, see <<day2-helm-upgrade-eib-chart-upgrade-steps>>.
 
 .Helm chart upgrade workflow
 image::day2_helm_chart_upgrade_diagram.png[]
 
 . The workflow begins with the user link:https://helm.sh/docs/helm/helm_pull/[pulling] the new Helm chart archive(s) that he wishes to upgrade his chart(s) to.
 
-. The archive(s) should then be _encoded_ and passed as configuration to the `eib-chart-upgrade-user-data.yaml` file that is located under the fleet directory for the related SUC Plan. This is further explained in the <<day2-helm-upgrade-eib-chart-upgrade-steps, upgrade steps>> section.
+. The archive(s) should then be placed in a directory that will be processed by the `generate-chart-upgrade-data.sh` script.
 
-. The user then proceeds to configure and deploy a `GitRepo` resource that will ship all the needed resources (SUC Plan, secrets, etc.) to the downstream clusters. 
+. The user then proceeds to execute the `generate-chart-upgrade-data.sh` script which will generate a Kubernetes link:https://kubernetes.io/docs/concepts/configuration/secret/[Secret] YAML file for each Helm chart archive in the provided archive directory. These secrets will be automatically placed under the Fleet that will be used to upgrade the Helm charts. This is further explained in the <<day2-helm-upgrade-eib-chart-upgrade-steps, upgrade steps>> section.
+
+. After the script finishes successfully, the user should continue to the configuration and deployment of either a `Bundle` or a `GitRepo` resource that will ship all the needed K8s resoruces to the target clusters. 
 
 .. The resource is deployed on the `management cluster` under the `fleet-default` namespace.
 
-. <<components-fleet,Fleet>> detects the deployed resource and deploys all the configured resources to the specified downstream clusters. Deployed resources include:
+. <<components-fleet,Fleet>> detects the deployed resource, parses its data and deploys its resources to the specified target clusters. The most notable resources that are deployed are:
 
-.. The `eib-chart-upgrade` SUC Plan that will be used by SUC to create an *Upgrade Pod* on each node.
+.. `eib-charts-upgrader` - a Job that deployes the `Chart Upgrade Pod`. The `eib-charts-upgrader-script` as well as all `helm chart upgrade data` secrets are mounted inside of the `Chart Upgrade Pod`.
 
-.. The `eib-chart-upgrade-script` Secret that ships the `upgrade script` that the *Upgrade Pod* will use to upgrade the `HelmChart` manifests on the initialiser node.
+.. `eib-charts-upgrader-script` - a Secret shipping the script that will be used by the `Chart Upgrade Pod` to patch an existing `HelmChart` resoruce.
 
-.. The `eib-chart-upgrade-user-data` Secret that ships the chart data that the `upgrade script` will use in order to understand which chart manifests it needs to upgrade.
+.. `Helm chart upgrade data` secrets - Secret YAML files created by the `generate-chart-upgrade-data.sh` script based on the user provided data. *Should not be edited.*
 
-. Once the `eib-chart-upgrade` SUC Plan has been deployed, the SUC picks it up and creates a Job which deploys the *Upgrade Pod*.
+. Once the `Chart Upgrade Pod` has been deployed, the script from the `eib-charts-upgrader-script` secret is executed, which does the follwoing:
 
-. Once deployed, the *Upgrade Pod* mounts the `eib-chart-upgrade-script` and `eib-chart-upgrade-user-data` Secrets and executes the `upgrade script` that is shipped by the `eib-chart-upgrade-script` Secret.
+.. Process all the Helm chart upgrade data provided by the other secrets.
 
-. The `upgrade script` does the following:
+.. Check if there is a `HelmChart` resource for each of the provided chart upgrade data.
 
-.. Determine whether the Pod that the script is running on has been deployed on the `initialiser` node. The `initialiser` node is the node that is hosting the `HelmChart` manifests. For a single-node cluster it is the single control-plane node. For HA clusters it is the node that you have marked as `initializer` when creating the cluster in EIB. If you have not specified the `initializer` property, then the first node from the `nodes` list is marked as `initializer`. For more information, see the link:https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md#kubernetes[upstream] documentation for EIB.
-+
-[NOTE]
-====
-If the `upgrade script` is running on a non-initialiser node, it immediately finishes its execution and does not go through the steps below.
-====
+.. Proceed to patch the `HelmChart` resource with the data provided from the secret for the corresponding Helm chart.
 
-.. Backup the manifests that will be edited in order to ensure disaster recover.
-+
-[NOTE]
-====
-By default backups of the manifests are stored under the `/tmp/eib-helm-chart-upgrade-<date>` directory. If you wish to use a custom location you can pass the `MANIFEST_BACKUP_DIR` enviroment variable to the Helm chart upgrade SUC Plan (example in the Plan).
-====
-
-.. Edit the `HelmChart` manifests. As of this version, the following properties are changed in order to trigger a chart upgrade:
-
-... The content of the `chartContent` property is replaced with the encoded archive provided in the `eib-chart-upgrade-user-data` Secret.
-
-... The value of the `version` property is replaced with the version provided in the `eib-chart-upgrade-user-data` Secret.
-
-. After the successful execution of the `upgrade script`, the Helm integration for link:https://docs.rke2.io/helm[RKE2]/link:https://docs.k3s.io/helm[K3s] will pickup the change and automatically trigger an upgrade on the Helm chart.
+. RKE2/K3s helm-controller constantly monitors for edits over the existing `HelmChart` resource. It detects the patch of the `HelmChart`, reconciles the changes and then proceeds to upgrade the chart behind the `HelmChart` resource.
 
 [#day2-helm-upgrade-eib-chart-upgrade-steps]
 ===== Upgrade Steps
 
-. Determine an Edge link:https://github.com/suse-edge/fleet-examples/releases[relase tag] from which you wish to copy the Helm chart upgrade logic.
+. Clone the link:https://github.com/suse-edge/fleet-examples[suse-edge/fleet-examples] repository from the Edge link:https://github.com/suse-edge/fleet-examples/releases[relase tag] that you wish to use.
 
-. Copy the `fleets/day2/system-upgrade-controller-plans/eib-chart-upgrade` fleet to the repository that your Fleet will be using to do GitOps from.
-
-. link:https://helm.sh/docs/helm/helm_pull/[Pull] the Helm chart archive that you wish to upgrade to:
+. Create a directory in which you will store the pulled Helm chart archive(s).
 +
 [,bash]
 ----
+mkdir archives
+----
+
+. Inside of the newly created archive directory, link:https://helm.sh/docs/helm/helm_pull/[pull] the Helm chart archive(s) that you wish to upgrade to:
++
+[,bash]
+----
+cd archives
 helm pull [chart URL | repo/chartname]
 
 # Alternatively if you want to pull a specific version:
 # helm pull [chart URL | repo/chartname] --version 0.0.0
 ----
 
-. Encode the chart archive that you pulled:
+. From the desired link:https://github.com/suse-edge/fleet-examples/releases[relase tag] download the `generate-chart-upgrade-data.sh` script
+
+. Execute the `generate-chart-upgrade-data.sh` script:
++
+[IMPORTANT]
+====
+Users should not make any changes over what the `generate-chart-upgrade-data.sh` script generates.
+====
 +
 [,bash]
 ----
-# Encode the archive and disable line wrapping
-base64 -w 0 <chart-archive>.tgz
-----
+chmod +x ./generate-chart-upgrade-data.sh
 
-. Configure the `eib-chart-upgrade-user-data.yaml` secret located under the `eib-chart-upgrade` fleet that you copied from step (2):
-
-.. The secret ships a file called `chart_upgrade_data.txt`. This file holds the chart upgrade data that the `upgrade script` will use to know which charts need to be upgraded. The file expects one-line per chart entries in the following format *"<name>|<version>|<base64_encoded_archive>"*:
-
-... `name` - is the name of the helm chart as seen in the `kubernetes.helm.charts.name[]` property of the EIB definition file.
-
-... `version` - should hold the new version of the Helm chart. During the upgrade this value will be used to replace the old `version` value of the `HelmChart` manifest.
-
-... `base64_encoded_archive` - pass the output of the `base64 -w 0 <chart-archive>.tgz` here. During upgrade this value will be used to replace the old `chartContent` value of the `HelmChart` manifest.
-+
-[NOTE]
-====
-The *<name>|<version>|<base64_encoded_archive>* line should be removed from the file before you start adding your data. It serves as an example of where and how you should configure your chart data.
-====
-
-. Configure a `GitRepo` resource that will be shipping your chart upgrade `fleet`. For more information on what a `GitRepo` is, see link:https://fleet.rancher.io/ref-gitrepo[GitRepo Resource].
-
-.. Configure `GitRepo` through the Rancher UI:
-
-... In the upper left corner, *☰ -> Continuous Delivery*
-
-... Go to *Git Repos -> Add Repository*
-
-... Here pass your *repository data* and *path* to your chart `upgrade fleet`
-
-... Select *Next* and specify the *target* clusters of which you want to upgrade the configured charts
-
-... *Create*
-
-.. If `Rancher` is not available on your setup, you can configure a `GitRepo` manually on your `management cluster`:
-
-... Populate the following template with your data:
-+
-[,yaml]
-----
-apiVersion: fleet.cattle.io/v1alpha1
-kind: GitRepo
-metadata:
-  name: CHANGE_ME
-  namespace: fleet-default
-spec:
-  # if running from a tag
-  # revision: CHANGE_ME
-  # if running from a branch
-  # branch: CHANGE_ME
-  paths:
-  # path to your chart upgrade fleet relative to your repository
-  - CHANGE_ME
-  # your repository URL
-  repo: CHANGE_ME
-  targets:
-  # Select target clusters
-  - clusterSelector: CHANGE_ME
-  # To match all clusters:
-  # - clusterSelector: {}
+./generate-chart-upgrade-data.sh --archive-dir /foo/bar/archives/ --fleet-path /foo/bar/fleet-examples/fleets/day2/eib-charts-upgrader
 ----
 +
-For more information on how to setup and deploy a `GitRepo` resource, see link:https://fleet.rancher.io/ref-gitrepo[GitRepo Resource] and link:https://fleet.rancher.io/gitrepo-add[Create a GitRepo Resource].
+The script will go through the following logic:
+
+.. Validate that the user provided `--fleet-path` points to a valid Fleet that can initiate a Helm chart upgrade.
+
+.. Process all Helm chart archives from the user-created archives dir (e.g. `/foo/bar/archives/`).
+
+.. For each Helm chart archive create a `Kubernetes Secret YAML` resource. This resource will hold:
+
+... The `name` of the `HelmChart` resource that needs to be patched.
+
+... The new `version` for the `HelmChart` resource.
+
+... The `base64` encoded Helm chart archive that will be used to replace the `HelmChart's` currently running configuration.
+
+.. Each `Kubernetes Secret YAML` resource will be transferted to the `base/secrets` directory inside of the path to the `eib-charts-upgrader` Fleet that was given under `--fleet-path`.
+
+.. Furthermore the `generate-chart-upgrade-data.sh` will ensure that the secrets that it moved will be picked up and used in the Helm chart upgrade logic. It does that by:
+
+... Editing the `base/secrets/kustomization.yaml` file to include the newly added resources.
+
+... Editing the `base/patches/job-patch.yaml` file to include the newly added secrets to the mount configurations.
+
+. After a successful `generate-chart-upgrade-data.sh` run you should have the changes inside of the following directories of the `suse-edge/fleet-examples` repository:
+
+.. `fleets/day2/eib-charts-upgrader/base/patches`
+
+.. `fleets/day2/eib-charts-upgrader/base/secrets`
+
+The steps below depend on the environment that you are running:
+
+. For an environment that supports GitOps (e.g. is non air-gapped, or is air-gapped, but allows for local Git server support):
+
+.. Copy the `fleets/day2/eib-charts-upgrader` Fleet to the repository that you will use for GitOps. Make sure that the Fleet includes the changes that have been made by the `generate-chart-upgrade-data.sh` script.
+
+.. Configure a `GitRepo` resource that will be used to ship all the resources of the `eib-charts-upgrader` Fleet.
+
+... For `GitRepo` configuration and deployment through the Rancher UI, see link:https://ranchermanager.docs.rancher.com/v2.8/integrations-in-rancher/fleet/overview#accessing-fleet-in-the-rancher-ui[Accessing Fleet in the Rancher UI].
+
+... For `GitRepo` manual configuration and deployment, see link:https://fleet.rancher.io/tut-deployment[Creating a Deployment].
+
+. For an environment that does not support GitOps (e.g. is air-gapped and does not allow local Git server usage):
+
+.. Download the `fleet-cli` binary from the `rancher/fleet` link:https://github.com/rancher/fleet/releases[releases] page. For Mac users, there is a Homebrew Formulae that can be used - link:https://formulae.brew.sh/formula/fleet-cli[fleet-cli].
+
+.. Navigate to the `eib-charts-upgrader` Fleet:
 +
-For information on how to match *taget* clusters on a more granular level, see link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters].
+[,bash]
+----
+cd /foo/bar/fleet-examples/fleets/day2/eib-charts-upgrader
+----
 
-... Deploy the configured `GitRepo` resource to the `fleet-default` namespace of the `management cluster`.
+.. Create a `targets.yaml` file that will instruct Fleet where to deploy your resources:
++
+[,bash]
+----
+cat > targets.yaml <<EOF
+targets:
+- clusterSelector: {} # Change this with your target data
+EOF
+----
++
+For information on how to map target clusters, see the upstream link:https://fleet.rancher.io/gitrepo-targets[documentation].
 
-Executing this steps should result in a successfully created `GitRepo` resource. It will then be picked up by Fleet and a Bundle will be created. This Bunlde will hold the *raw* Kubernetes resources that the `GitRepo` has configured under its fleet directory.
+.. Use the `fleet-cli` to convert the Fleet to a `Bundle` resource:
++
+[,bash]
+----
+fleet apply --compress --targets-file=targets.yaml -n fleet-default -o - eib-charts-upgrade > bundle.yaml
+----
++
+This will create a Bundle (`bundle.yaml`) that will hold all the templated resoruce from the `eib-charts-upgrader` Fleet.
++
+For more information regarding the `fleet apply` command, see link:https://fleet.rancher.io/cli/fleet-cli/fleet_apply[fleet apply].
++
+For more information regaring converting Fleets to Bundles, see link:https://fleet.rancher.io/bundle-add#convert-a-helm-chart-into-a-bundle[Convert a Helm Chart into a Bundle].
 
-Fleet will then deploy all the Kubernetes resources from the Bundle to the specified downstream clusters. One of this resources will be a SUC Plan that will trigger the chart upgrade. For a full list of the resoruces that will be deployed and the workflow of the upgrade process, refer to the <<day2-helm-upgrade-eib-chart-overview, overview>> section.
+.. Deploy the `Bundle`. This can be done in one of two ways:
 
-To track the upgrade process itself, refer to the <<monitor-suc-plans, Monitor SUC Plans>> section.
+... Through Rancher's UI - Navigate to *Continuous Delivery -> Advanced -> Bundles -> Create from YAML* and either paste the `bundle.yaml` contents, or click the `Read from File` option and pass the file itself.
+
+... Manually - Deploy the `bundle.yaml` file manually inside of your `management cluster`.
+
+Executing these steps will result in a successfully deployed `GitRepo/Bundle` resource. The resource will be picked up by Fleet and its contents will be deployed onto the target clusters that the user has specified in the previous steps. For an overview of the process, refer to the <<day2-helm-upgrade-eib-chart-overview, overview>> section.
+
+For information on how to track the upgrade process, you can refer to the <<day2-helm-upgrade-eib-chart-example, Example>> section of this documentation.
 
 [#day2-helm-upgrade-eib-chart-example]
 ===== Example
 
-The following section serves to provide a real life example to the <<day2-helm-upgrade-eib-chart-upgrade-steps>> section.
+[NOTE]
+====
+The below example illustrates how to do an upgrade of an EIB deployed Helm chart from one version to another. The versions in the example should *not* be treated as version recommendations. Version recomemendations for a specific Edge release, should be taken from the <<release-notes, release notes>>.
+====
 
-I have the following two EIB deployed clusters:
+_Use-case:_
 
-* `longhorn-single-k3s` - single node K3s cluster
+- A cluster named `doc-example` is running link:https://longhorn.io[Longhorn] `1.6.1` version.
 
-* `longhorn-ha-rke2` - HA RKE2 cluster 
-
-Both clusters are running link:https://longhorn.io[Longhorn] and have been deployed through EIB, using the following image definition _snippet_:
-
+- The cluster has been deployed through EIB, using the following image definition _snippet_:
++
 [,yaml]
 ----
 kubernetes:
-  # HA RKE2 cluster specific snippet
-  # nodes:
-  # - hostname: cp1rke2.example.com
-  #   initializer: true
-  #   type: server
-  # - hostname: cp2rke2.example.com
-  #   type: server
-  # - hostname: cp3rke2.example.com
-  #   type: server
-  # - hostname: agent1rke2.example.com
-  #   type: agent
-  # - hostname: agent2rke2.example.com
-  #   type: agent
-  # version depending on the distribution
-  version: v1.28.10+k3s1/v1.28.10+rke2r1
   helm:
     charts:
     - name: longhorn
       repositoryName: longhorn
       targetNamespace: longhorn-system
       createNamespace: true
-      version: 1.5.5
+      version: 1.6.1
     repositories:
     - name: longhorn
       url: https://charts.longhorn.io
 ...
 ----
-
-.longhorn-single-k3s installed Longhorn version
-image::day2_helm_chart_upgrade_example_k3s_old.png[]
-
-.longhorn-ha-rke2 installed Longhorn version
-image::day2_helm_chart_upgrade_example_rke2_old.png[]
-
-The problem with this is that currently `longhorn-single-k3s` and `longhorn-ha-rke2` are running with a Longhorn version that is not compatible with any Edge release.
-
-We need to upgrade the chart on both clusters to a Edge supported Longhorn version.
-
-To do this we follow these steps:
-
-. Determine the Edge link:https://github.com/suse-edge/fleet-examples/releases[relase tag] from which we want to take the upgrade logic. For example, this example will use the `release-3.0.1` release tag for which the supported Longhorn version is `1.6.1`.
-
-. Clone the `release-3.0.1` release tag and copy the `fleets/day2/system-upgrade-controller-plans/eib-chart-upgrade` directory to our own repository.
 +
-For simplicity this section works from a branch of the `suse-edge/fleet-examples` repository, so the directory structure is the same, but you can place the `eib-chart-upgrade` fleet anywhere in your repository.
+.doc-example installed Longhorn version
+image::day2_helm_chart_upgrade_example_1.png[]
+
+- `Longhorn` needs to be upgraded to a version that is compatible with the Edge 3.1 release. Meaning it needs to be upgraded to `1.7.1`.
+
+- It is assumed that the `management cluster` in charge of managing the `doc-example` cluster is *air-gapped*, without support for a local Git server and has a working Rancher setup.
+
+Following the <<day2-helm-upgrade-eib-chart-upgrade-steps, Upgrade Steps>>:
+
+. Clone the `suse-edge/fleet-example` repository from the `release-3.1.0` tag.
 +
-.Directory structure example
+[,bash]
+----
+git clone -b release-3.1.0 https://github.com/suse-edge/fleet-examples.git
+----
+
+. Create a directory where the `Longhorn` upgrade archive will be stored
++
+[,bash]
+----
+mkdir archives
+----
+
+. Pull the desired `Longhorn` chart archive version:
++
+[,bash]
+----
+# First add the Longhorn Helm repository
+helm repo add longhorn https://charts.longhorn.io
+
+# Pull the Longhorn 1.7.1 archive
+helm pull longhorn/longhorn --version 1.7.1
+----
+
+. Outside of the `archives` directory download the `generate-chart-upgrade-data.sh` script from the `release-3.1.0` release tag.
+
+. Directory setup should look similar to:
++
 [,bash]
 ----
 .
+├── archives
+│   └── longhorn-1.7.1.tgz
+├── fleet-examples
 ...
-|-- fleets
-|   `-- day2
-|       `-- system-upgrade-controller-plans
-|           `-- eib-chart-upgrade
-|               |-- eib-chart-upgrade-script.yaml
-|               |-- eib-chart-upgrade-user-data.yaml
-|               |-- fleet.yaml
-|               `-- plan.yaml
+│   ├── fleets
+│   │   ├── day2
+|   |   |   ├── ...
+│   │   │   ├── eib-charts-upgrader
+│   │   │   │   ├── base
+│   │   │   │   │   ├── job.yaml
+│   │   │   │   │   ├── kustomization.yaml
+│   │   │   │   │   ├── patches
+│   │   │   │   │   │   └── job-patch.yaml
+│   │   │   │   │   ├── rbac
+│   │   │   │   │   │   ├── cluster-role-binding.yaml
+│   │   │   │   │   │   ├── cluster-role.yaml
+│   │   │   │   │   │   ├── kustomization.yaml
+│   │   │   │   │   │   └── sa.yaml
+│   │   │   │   │   └── secrets
+│   │   │   │   │       ├── eib-charts-upgrader-script.yaml
+│   │   │   │   │       └── kustomization.yaml
+│   │   │   │   ├── fleet.yaml
+│   │   │   │   └── kustomization.yaml
+│   │   │   └── ...
+│   └── ...
+└── generate-chart-upgrade-data.sh
+----
+
+. Execute the `generate-chart-upgrade-data.sh` script:
++
+[,bash]
+----
+# First make the script executable
+chmod +x ./generate-chart-upgrade-data.sh
+
+# Then execute the script
+./generate-chart-upgrade-data.sh --archive-dir ./archives --fleet-path ./fleet-examples/fleets/day2/eib-charts-upgrader
+----
++
+The directory structure after the script execution should look similar to:
++
+[,bash]
+----
+.
+├── archives
+│   └── longhorn-1.7.1.tgz
+├── fleet-examples
 ...
+│   ├── fleets
+│   │   ├── day2
+│   │   │   ├── ...
+│   │   │   ├── eib-charts-upgrader
+│   │   │   │   ├── base
+│   │   │   │   │   ├── job.yaml
+│   │   │   │   │   ├── kustomization.yaml
+│   │   │   │   │   ├── patches
+│   │   │   │   │   │   └── job-patch.yaml
+│   │   │   │   │   ├── rbac
+│   │   │   │   │   │   ├── cluster-role-binding.yaml
+│   │   │   │   │   │   ├── cluster-role.yaml
+│   │   │   │   │   │   ├── kustomization.yaml
+│   │   │   │   │   │   └── sa.yaml
+│   │   │   │   │   └── secrets
+│   │   │   │   │       ├── eib-charts-upgrader-script.yaml
+│   │   │   │   │       ├── kustomization.yaml
+│   │   │   │   │       └── longhorn-1-7-1.yaml <- secret created by the generate-chart-upgrade-data.sh script
+│   │   │   │   ├── fleet.yaml
+│   │   │   │   └── kustomization.yaml
+│   │   │   └── ...
+│   └── ...
+└── generate-chart-upgrade-data.sh
 ----
++
+In terms of changed files in Git, it should look like this:
++
+.Changes over fleet-examples made by generate-chart-upgrade-data.sh
+image::day2_helm_chart_upgrade_example_2.png[]
 
-. Add the Longhorn chart repository:
+. Since the `management cluster` does not support for a GitOps workflow, a `Bundle` needs to be created for the `eib-charts-upgrader` Fleet:
+
+.. First, navigate to the Fleet itself:
 +
 [,bash]
 ----
-helm repo add longhorn https://charts.longhorn.io
+cd ./fleet-examples/fleets/day2/eib-charts-upgrader
 ----
 
-. Pull the Longhorn chart version `1.6.1`:
+.. Then create a `targets.yaml` file targeting the `doc-example` cluster:
 +
 [,bash]
 ----
-helm pull longhorn/longhorn --version 1.6.1
+cat > targets.yaml <<EOF
+targets:
+- clusterName: doc-example
+EOF
 ----
-+
-This will pull the longhorn as an archvie named `longhorn-1.6.1.tgz`.
 
-. Encode the Longhorn archive:
+.. Then use the `fleet-cli` binary to convert the Fleet to a Bundle:
 +
 [,bash]
 ----
-base64 -w 0 longhorn-1.6.1.tgz
-----
-+
-This will output a long one-line base64 encoded string of the archive.
-
-. Now we have all the needed data to configure the `eib-chart-upgrade-user-data.yaml` file. The file configuration should look like this:
-+
-[,yaml]
-----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: eib-chart-upgrade-user-data
-type: Opaque
-stringData:
-  # <name>|<version>|<base64_encoded_archive>
-  chart_upgrade_data.txt: |
-    longhorn|1.6.1|H4sIFAAAAAAA/ykAK2FIUjBjSE02THk5NWIzV...
+fleet apply --compress --targets-file=targets.yaml -n fleet-default -o - eib-charts-upgrade > bundle.yaml
 ----
 
-.. `longhorn` is the name of the chart as seen in my EIB definition file
+.. Now, transfer the `bundle.yaml` on your `management cluster` machine.
 
-.. `1.6.1` is the version to which I want to upgrade the `version` property of the Longhorn `HelmChart` manifest
-
-.. `H4sIFAAAAAAA/ykAK2FIUjBjSE02THk5NWIzV...` is a snippet of the encoded Longhorn `1.6.1` archive. *A snippet has been added here for better readibility. You should always provide the full base64 encoded archive string here.*
+. Since the `management cluster` is running `Rancher`, deploy the Bundle through the Rancher UI:
 +
-[NOTE]
-====
-This example shows configuration for a single chart upgrade, but if your use-case requires to upgrade multiple charts on multiple clusters, you can append the additional chart data as seen below:
-
-[,yaml]
-----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: eib-chart-upgrade-user-data
-type: Opaque
-stringData:
-  # <name>|<version>|<base64_encoded_archive>
-  chart_upgrade_data.txt: |
-    chartA|0.0.0|<chartA_base64_archive>
-    chartB|0.0.0|<chartB_base64_archive>
-    chartC|0.0.0|<chartC_base64_archive>
-    ...
-----
-====
-
-. We also decided that we do not want to keep manifest backups at `/tmp`, so the following configuration was added to the `plan.yaml` file:
+.Deploy Bundle through Rancher UI
+image::day2_helm_chart_upgrade_example_3.png[]
 +
-[,yaml]
-----
-apiVersion: upgrade.cattle.io/v1
-kind: Plan
-metadata:
-  name: eib-chart-upgrade
-spec:
-  ...
-  upgrade:
-    ...
-    # For when you want to backup your chart
-    # manifest data under a specific directory
-    # 
-    envs:
-    - name: MANIFEST_BACKUP_DIR
-      value: "/root"
-----
+From here, select *Read from File* and find the `bundle.yaml` file on your system.
 +
-This will ensure that manifest backups will be saved under the `/root` directory instead of `/tmp`.
-
-. Now that we have made all the needed configurations, what is left is to create the `GitRepo` resource. This example creates the `GitRepo` resource through the `Rancher UI`. 
-
-. Following the steps described in the <<day2-helm-upgrade-eib-chart-upgrade-steps, Upgrade Steps>>, we:
-
-.. Named the `GitRepo` "longhorn-upgrade".
-
-.. Passed the URL to the repository that will be used - https://github.com/suse-edge/fleet-examples.git
-
-.. Passed the branch of the repository - "doc-example"
-
-.. Passed the path to the `eib-chart-upgrade` fleet as seen in the repo - `fleets/day2/system-upgrade-controller-plans/eib-chart-upgrade`
-
-.. Selected the target clusters and created the resource
+This will auto-populate the `Bundle` inside of Rancher's UI:
 +
-.Successfully deployed SUC and longhorn GitRepos
-image::day2_helm_chart_upgrade_example_gitrepo.png[]
-
-Now we need to monitor the upgrade procedures on the clusters:
-
-. Check the status of the *Upgrade Pods*, following the directions from the <<monitor-suc-plans, SUC plan monitor>> section.
-
-.. A successfully completed *Upgrade Pod* that has been working on an `intialiser` node should hold logs similar to:
+.Auto-populated Bundle snippet
+image::day2_helm_chart_upgrade_example_4.png[]
 +
-.Upgrade Pod running on an initialiser node
-image::day2_helm_chart_upgrade_example_initialiser_logs.png[]
+Select *Create*.
 
-.. A successfully completed *Upgrade Pod* that has been working on a `non-initialiser` node should hold logs similar to:
+. After a successful deployment, your Bundle would look similar to:
 +
-.Upgrade Pod running on a non-initialiser node
-image::day2_helm_chart_upgrade_example_non_initialiser_logs.png[]
+.Successfully deployed Bundle
+image::day2_helm_chart_upgrade_example_5.png[]
 
-. After a successful *Upgrade Pod* completion, we would also need to wait and monitor for the pods that wil lbe created by the helm controller. These pods will do the actual upgrade based on the file chagnes that the *Upgrade Pod* has done to the `HelmChart` manifest file.
+After the successful deployment of the `Bundle`, to monitor the upgrade process:
 
-.. In your cluster, go to *Workloads -> Pods* and search for a pod that contains the `longhorn` string in the `default` namespace. This should produce a pod with the naming template `helm-install-longhorn-*`, view the logs of this pod.
+. First, verify the logs of the `Upgrade Pod`:
 +
-.Successfully completed helm-install pod
-image::day2_helm_chart_upgrade_example_helm_install.png[]
-
-.. The logs should be similar to:
+.View the upgrade pod logs
+image::day2_helm_chart_upgrade_example_6.png[]
 +
-.Successfully completed helm-install pod logs
-image::day2_helm_chart_upgrade_example_successfully_upgraded_pod.png[]
+.Logs for successfully patched Longhorn chart
+image::day2_helm_chart_upgrade_example_7.png[]
 
-Now that we have ensured that everything has completed succesfully, we need to verify the version change:
+. Now verify the logs of the Pod created for the upgrade by the helm-controller:
 
-. On the clusters we need to go to *More Resources -> Helm -> HelmCharts* and in the `default` namespace search for the `longhorn` HelmChart resource:
+.. The Pod name will be with the following template - `helm-install-longhorn-<random-suffix>`
+
+.. The Pod will be in the namespace where the `HelmChart` resource was deployed. In our case this is `default`.
 +
-.longhorn-single-k3s upgraded Longhorn version
-image::day2_helm_chart_upgrade_example_k3s_longhorn_upgrade.png[]
+.Logs for successfully upgraded Longhorn chart
+image::day2_helm_chart_upgrade_example_8.png[]
+
+. Check that the HelmChart version has been bumped:
 +
-.longhorn-ha-rke2 upgraded Longhorn version
-image::day2_helm_chart_upgrade_example_rke2_longhorn_upgrade.png[]
+.Bumped Longhorn version
+image::day2_helm_chart_upgrade_example_9.png[]
 
-This ensures that the `Longhorn` helm chart has been successfully upgraded and concludes this example.
+. Finally check that the Longhorn Pods are running:
++
+.Example for validating the longhorn-engine pod
+image::day2_helm_chart_upgrade_example_10.png[]
 
-If for some reason we would like to revert to the previous chart version of Longhorn, the previous Longhorn  manifest will be located under `/root/longhorn.yaml` on the initialiser node. This is true, because we have specified the `MANIFEST_BACKUP_DIR` in the SUC Plan.
+After making the above validations, it is safe to assume that the Longhorn Helm chart has been upgraded from `1.6.1` to `1.7.1`.
 
 [#day2-helm-upgrade-eib-chart-third-party]
 ===== Helm chart upgrade using a third-party GitOps tool
 
 There might be use-cases where users would like to use this upgrade procedure with a GitOps workflow other than Fleet (e.g. `Flux`).
 
-To get the resources related to EIB deployed Helm chart upgrades you need to first determine the Edge link:https://github.com/suse-edge/fleet-examples/releases[release] tag of the link:https://github.com/suse-edge/fleet-examples.git[suse-edge/fleet-examples] repository that you would like to use.
+To produce the resources needed for the upgrade procedure, you can use the `generate-chart-upgrade-data.sh` script to populate the `eib-charts-upgrader` Fleet with the user provided data. For more information on how to do this, see the <<day2-helm-upgrade-eib-chart-upgrade-steps, upgrade steps>>.
 
-After that, resources can be found at `fleets/day2/system-upgrade-controller-plans/eib-chart-upgrade`, where:
+After you have the full setup, you can use link:https://kustomize.io[kustomize] to generate a full working solution that you can deploy in your cluster:
 
-* `plan.yaml` - system-upgrade-controller Plan related to the upgrade procedure.
+[,bash]
+----
+cd /foo/bar/fleets/day2/eib-charts-upgrader
 
-* `eib-chart-upgrade-script.yaml` - Secret holding the `upgrade script` that is responsible for editing and upgrade the `HelmChart` manifest files.
+kustomize build .
+----
 
-* `eib-chart-upgrade-user-data.yaml` - Secret holding a file that is utilised by the `upgrade scritp`; populated by the user with relevat chart upgrade data beforehand.
+If you want to include the solution to your GitOps workflow, you can remove the `fleet.yaml` file and use what is left as a valid `Kustomize` setup. Just do not forget to first run the `generate-chart-upgrade-data.sh` script, so that it can populate the `Kustomize` setup with the data for the Helm charts that you wish to upgrade to.
 
-[IMPORTANT]
-====
-These `Plan` resources are interpreted by the `system-upgrade-controller` and should be deployed on each downstream cluster that holds charts in need of an upgrade. For information on how to deploy the `system-upgrade-controller`, see <<day2-suc-third-party-gitops>>.
-====
-
-To better understand how your GitOps workflow can be used to deploy the *SUC Plans* for the upgrade process, it can be beneficial to take a look at the <<day2-helm-upgrade-eib-chart-overview,overview>> of the process using `Fleet`.
+To understand how this workflow is intended to be used, it can be beneficial to look at the <<day2-helm-upgrade-eib-chart-overview,overview>> and <<day2-helm-upgrade-eib-chart-upgrade-steps, upgrade steps>> sections as well.
