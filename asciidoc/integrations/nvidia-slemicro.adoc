@@ -12,7 +12,7 @@ endif::[]
 
 == Intro
 
-This guide demonstrates how to implement host-level NVIDIA GPU support via the pre-built https://github.com/NVIDIA/open-gpu-kernel-modules[open-source drivers] on SLE Micro 5.5. These are drivers that are baked into the operating system rather than dynamically loaded by NVIDIA's https://github.com/NVIDIA/gpu-operator[GPU Operator]. This configuration is highly desirable for customers that want to pre-bake all artifacts required for deployment into the image, and where the dynamic selection of the driver version, that is, the user selecting the version of the driver via Kubernetes, is not a requirement. This guide initially explains how to deploy the additional components onto a system that has already been pre-deployed, but follows with a section that describes how to embed this configuration into the initial deployment via Edge Image Builder. If you do not want to run through the basics and set things up manually, skip right ahead to that section.
+This guide demonstrates how to implement host-level NVIDIA GPU support via the pre-built https://github.com/NVIDIA/open-gpu-kernel-modules[open-source drivers] on SLE Micro 6.0. These are drivers that are baked into the operating system rather than dynamically loaded by NVIDIA's https://github.com/NVIDIA/gpu-operator[GPU Operator]. This configuration is highly desirable for customers that want to pre-bake all artifacts required for deployment into the image, and where the dynamic selection of the driver version, that is, the user selecting the version of the driver via Kubernetes, is not a requirement. This guide initially explains how to deploy the additional components onto a system that has already been pre-deployed, but follows with a section that describes how to embed this configuration into the initial deployment via Edge Image Builder. If you do not want to run through the basics and set things up manually, skip right ahead to that section.
 
 It is important to call out that the support for these drivers is provided by both SUSE and NVIDIA in tight collaboration, where the driver is built and shipped by SUSE as part of the package repositories. However, if you have any concerns or questions about the combination in which you use the drivers, ask your SUSE or NVIDIA account managers for further assistance. If you plan to use https://www.nvidia.com/en-gb/data-center/products/ai-enterprise/[NVIDIA AI Enterprise] (NVAIE), ensure that you are using an https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/platform-support.html#supported-nvidia-gpus-and-systems[NVAIE certified GPU], which _may_ require the use of proprietary NVIDIA drivers. If you are unsure, speak with your NVIDIA representative.
 
@@ -22,7 +22,7 @@ Further information about NVIDIA GPU operator integration is _not_ covered in th
 
 If you are following this guide, it assumes that you have the following already available:
 
-* At least one host with SLE Micro 5.5 installed; this can be physical or virtual.
+* At least one host with SLE Micro 6.0 installed; this can be physical or virtual.
 * Your hosts are attached to a subscription as this is required for package access — an evaluation is available https://www.suse.com/download/sle-micro/[here].
 * A https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus[compatible NVIDIA GPU] installed (or _fully_ passed through to the virtual machine in which SLE Micro is running).
 * Access to the root user — these instructions assume you are the root user, and _not_ escalating your privileges via `sudo`.
@@ -36,19 +36,19 @@ Before we begin, it is important to recognize that besides the NVIDIA open-drive
 We recommend that you ensure that the driver version that you are selecting is compatible with your GPU and meets any CUDA requirements that you may have by checking:
 
 * The https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/[CUDA release notes]
-* The driver version that you plan on deploying has a matching version in the http://download.nvidia.com/suse/sle15sp5/x86_64/[NVIDIA SLE15-SP5 repository] and ensuring that you have equivalent package versions for the supporting components available 
+* The driver version that you plan on deploying has a matching version in the https://download.nvidia.com/suse/sle15sp6/x86_64/[NVIDIA SLE15-SP6 repository] and ensuring that you have equivalent package versions for the supporting components available
 
 [TIP] 
 ====
-To find the NVIDIA open-driver versions, either run `zypper se -s nvidia-open-driver` on the target machine _or_ search the SUSE Customer Center for the "nvidia-open-driver" in https://scc.suse.com/packages?name=SUSE%20Linux%20Enterprise%20Micro&version=5.5&arch=x86_64[SLE Micro 5.5 for x86_64]. 
+To find the NVIDIA open-driver versions, either run `zypper se -s nvidia-open-driver` on the target machine _or_ search the SUSE Customer Center for the "nvidia-open-driver" in https://scc.suse.com/packages?name=SUSE%20Linux%20Micro&version=6.0&arch=x86_64[SLE Micro 6.0 for x86_64].
 
-Here, you will see _four_ versions available, with _545.29.06_ being the newest:
+At the time of writing, you will see a single version available (_550.54.14_):
 
 image::scc-packages-nvidia.png[SUSE Customer Centre]
 ====
 
 
-When you have confirmed that an equivalent version is available in the NVIDIA repos, you are ready to install the packages on the host operating system. For this, we need to open up a `transactional-update` session, which creates a new read/write snapshot of the underlying operating system so we can make changes to the immutable platform (for further instructions on `transactional-update`, see https://documentation.suse.com/sle-micro/5.4/html/SLE-Micro-all/sec-transactional-udate.html[here]):
+When you have confirmed that an equivalent version is available in the NVIDIA repos, you are ready to install the packages on the host operating system. For this, we need to open up a `transactional-update` session, which creates a new read/write snapshot of the underlying operating system so we can make changes to the immutable platform (for further instructions on `transactional-update`, see https://documentation.suse.com/sle-micro/6.0/html/Micro-transactional-updates/transactional-updates.html[here]):
 
 [,shell]
 ----
@@ -59,7 +59,7 @@ When you are in your `transactional-update` shell, add an additional package rep
 
 [,shell]
 ----
-zypper ar https://download.nvidia.com/suse/sle15sp5/ nvidia-sle15sp5-main
+zypper ar https://download.nvidia.com/suse/sle15sp6/ nvidia-sle15sp6-main
 zypper --gpg-auto-import-keys refresh
 ----
 
@@ -69,7 +69,7 @@ You can then install the driver and `nvidia-compute-utils` for additional utilit
 zypper install -y --auto-agree-with-licenses nvidia-open-driver-G06-signed-kmp nvidia-compute-utils-G06
 ----
 
-NOTE: If the installation fails, this might indicate a dependency mismatch between the selected driver version and what NVIDIA ships in their repositories. Refer to the previous section to verify that your versions match. Attempt to install a different driver version. For example, if the NVIDIA repositories have an earlier version, you can try specifying `nvidia-open-driver-G06-signed-kmp=545.29.06` on your install command to specify a version that aligns.
+NOTE: If the installation fails, this might indicate a dependency mismatch between the selected driver version and what NVIDIA ships in their repositories. Refer to the previous section to verify that your versions match. Attempt to install a different driver version. For example, if the NVIDIA repositories have an earlier version, you can try specifying `nvidia-open-driver-G06-signed-kmp=550.54.14` on your install command to specify a version that aligns.
 
 Next, if you are _not_ using a supported GPU (remembering that the list can be found https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus[here]), you can see if the driver works by enabling support at the module level, but your mileage may vary — skip this step if you are using a _supported_ GPU:
 
@@ -174,7 +174,7 @@ With the machine rebooted, you can verify that the system can successfully enume
 nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
 ----
 
-This ensures that any container started on the machine can employ NVIDIA GPU devices that have been discovered. When ready, you can then run a podman-based container. Doing this via `podman` gives us a good way of validating access to the NVIDIA device from within a container, which should give confidence for doing the same with Kubernetes at a later stage. Give `podman` access to the labeled NVIDIA devices that were taken care of by the previous command, based on https://registry.suse.com/bci/bci-base-15sp5/index.html[SLE BCI], and simply run the Bash command:
+This ensures that any container started on the machine can employ NVIDIA GPU devices that have been discovered. When ready, you can then run a podman-based container. Doing this via `podman` gives us a good way of validating access to the NVIDIA device from within a container, which should give confidence for doing the same with Kubernetes at a later stage. Give `podman` access to the labeled NVIDIA devices that were taken care of by the previous command, based on https://registry.suse.com/repositories/bci-bci-base-15sp6[SLE BCI], and simply run the Bash command:
 
 [,shell]
 ----
@@ -185,7 +185,7 @@ You will now execute commands from within a temporary podman container. It does 
 
 [,shell]
 ----
-zypper ar http://developer.download.nvidia.com/compute/cuda/repos/sles15/x86_64/ cuda-sle15-sp5
+zypper ar https://developer.download.nvidia.com/compute/cuda/repos/sles15/x86_64/ cuda-sles15
 zypper in -y cuda-libraries-devel-12-3 cuda-minimal-build-12-3 cuda-demo-suite-12-3
 ----
 
@@ -463,7 +463,7 @@ operatingSystem:
       - nvidia-gl-G06
       - nvidia-container-toolkit
     additionalRepos:
-      - url: https://download.nvidia.com/suse/sle15sp5/
+      - url: https://download.nvidia.com/suse/sle15sp6/
       - url: https://nvidia.github.io/libnvidia-container/stable/rpm/x86_64
     sccRegistrationCode: <snip>
 kubernetes:
@@ -541,7 +541,7 @@ registry.suse.com/edge/3.1/edge-image-builder:1.1.0 \
 build --definition-file eib-config-iso.yaml
 ----
 
-For further instructions, please see the https://github.com/suse-edge/edge-image-builder/blob/release-1.0/docs/building-images.md[documentation] for Edge Image Builder.
+For further instructions, please see the https://github.com/suse-edge/edge-image-builder/blob/release-1.1/docs/building-images.md[documentation] for Edge Image Builder.
 
 == Resolving issues
 
