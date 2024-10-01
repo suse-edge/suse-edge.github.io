@@ -231,7 +231,9 @@ An *example* for the `longhorn` helm chart would look like:
 [,bash]
 ----
 <user_repository_root>
-└── longhorn
+├── longhorn
+│   └── fleet.yaml
+└── longhorn-crd
     └── fleet.yaml
 ----
 
@@ -244,8 +246,8 @@ defaultNamespace: longhorn-system
 helm:
   releaseName: "longhorn"
   chart: "longhorn"
-  repo: "https://charts.longhorn.io"
-  version: "1.7.1"
+  repo: "https://charts.rancher.io/"
+  version: "104.2.0+up1.7.1"
   takeOwnership: true
   # custom chart value overrides
   values: 
@@ -317,6 +319,7 @@ spec:
   paths:
   # As seen in the 'Prepare your Fleet resources' example
   - longhorn
+  - longhorn-crd
   repo: <user_repository_url>
   targets:
   # Match all clusters
@@ -331,11 +334,11 @@ The `Bundle` can be deployed either through the Rancher UI (`Continuous Delivery
 
 _Example *Longhorn* `Bundle` resource deployment using a *manual* approach:_
 
-. Navigate to the `Longhorn` Chart fleet located under `fleets/day2/chart-templates/longhorn`:
+. Navigate to the `Longhorn` Chart fleet located under `fleets/day2/chart-templates/longhorn/longhorn`:
 +
 [,bash]
 ----
-cd fleets/day2/chart-templates/longhorn
+cd fleets/day2/chart-templates/longhorn/longhorn
 ----
 
 . Create a `targets.yaml` file that will instruct Fleet to which clusters it should deploy the Helm chart. In this case, we will deploy to a single downstream cluster. For information on how to map more complex targets, see link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters]:
@@ -352,14 +355,39 @@ EOF
 +
 [,bash]
 ----
-fleet apply --compress --targets-file=targets.yaml -n fleet-default -o - longhorn-bundle > bundle.yaml
+fleet apply --compress --targets-file=targets.yaml -n fleet-default -o - longhorn-bundle > longhorn-bundle.yaml
 ----
 
-. Deploy the `bundle.yaml` to your `management cluster`:
+. Navigate to the `Longhorn CRD` Chart fleet located under `fleets/day2/chart-templates/longhorn/longhorn-crd`:
 +
 [,bash]
 ----
-kubectl apply -f bundle.yaml
+cd fleets/day2/chart-templates/longhorn/longhorn-crd
+----
+
+. Create a `targets.yaml` file that will instruct Fleet to which clusters it should deploy the Helm chart. In this case, we will deploy to a single downstream cluster. For information on how to map more complex targets, see link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters]:
++
+[,bash]
+----
+cat > targets.yaml <<EOF
+targets:
+- clusterName: foo
+EOF
+----
+
+. Convert the `Longhorn CRD` Helm chart Fleet to a Bundle resource. For more information, see link:https://fleet.rancher.io/bundle-add#convert-a-helm-chart-into-a-bundle[Convert a Helm Chart into a Bundle]:
++
+[,bash]
+----
+fleet apply --compress --targets-file=targets.yaml -n fleet-default -o - longhorn-crd-bundle > longhorn-crd-bundle.yaml
+----
+
+. Deploy `longhorn-bundle.yaml` and `longhorn-crd-bundle.yaml` to your `management cluster`:
++
+[,bash]
+----
+kubectl apply -f longhorn-crd-bundle.yaml
+kubectl apply -f longhorn-bundle.yaml
 ----
 
 Following these steps will ensure that `Longhorn` is deployed on all of the specified target clusters.
@@ -565,7 +593,7 @@ The example below illustrates how to do an upgrade of an EIB deployed Helm chart
 
 _Use-case:_
 
-- A cluster named `doc-example` is running link:https://longhorn.io[Longhorn] `1.6.1` version.
+- A cluster named `doc-example` is running Ranchers' link:https://longhorn.io[Longhorn] `103.3.0+up1.6.1` version.
 
 - The cluster has been deployed through EIB, using the following image definition _snippet_:
 +
@@ -574,21 +602,26 @@ _Use-case:_
 kubernetes:
   helm:
     charts:
-    - name: longhorn
-      repositoryName: longhorn
+    - name: longhorn-crd
+      repositoryName: rancher-charts
       targetNamespace: longhorn-system
       createNamespace: true
-      version: 1.6.1
-    repositories:
+      version: 103.3.0+up1.6.1
     - name: longhorn
-      url: https://charts.longhorn.io
+      repositoryName: rancher-charts
+      targetNamespace: longhorn-system
+      createNamespace: true
+      version: 103.3.0+up1.6.1
+    repositories:
+    - name: rancher-charts
+      url: https://charts.rancher.io/
 ...
 ----
 +
 .doc-example installed Longhorn version
 image::day2_helm_chart_upgrade_example_1.png[]
 
-- `Longhorn` needs to be upgraded to a version that is compatible with the Edge 3.1 release. Meaning it needs to be upgraded to `1.7.1`.
+- `Longhorn` needs to be upgraded to a version that is compatible with the Edge 3.1 release. Meaning it needs to be upgraded to `104.2.0+up1.7.1`.
 
 - It is assumed that the `management cluster` in charge of managing the `doc-example` cluster is *air-gapped*, without support for a local Git server and has a working Rancher setup.
 
@@ -612,11 +645,14 @@ mkdir archives
 +
 [,bash]
 ----
-# First add the Longhorn Helm repository
-helm repo add longhorn https://charts.longhorn.io
+# First add the Rancher Helm chart repository
+helm repo add rancher-charts https://charts.rancher.io/
 
-# Pull the Longhorn 1.7.1 archive
-helm pull longhorn/longhorn --version 1.7.1
+# Pull the Longhorn 1.7.1 CRD archive
+helm pull rancher-charts/longhorn-crd --version 104.2.0+up1.7.1
+
+# Pull the Longhorn 1.7.1 chart archive
+helm pull rancher-charts/longhorn --version 104.2.0+up1.7.1
 ----
 
 . Outside of the `archives` directory, download the `generate-chart-upgrade-data.sh` script from the `release-3.1.0` release tag.
@@ -627,7 +663,8 @@ helm pull longhorn/longhorn --version 1.7.1
 ----
 .
 ├── archives
-│   └── longhorn-1.7.1.tgz
+|   ├── longhorn-104.2.0+up1.7.1.tgz
+│   └── longhorn-crd-104.2.0+up1.7.1.tgz
 ├── fleet-examples
 ...
 │   ├── fleets
@@ -671,7 +708,8 @@ The directory structure after the script execution should look similar to:
 ----
 .
 ├── archives
-│   └── longhorn-1.7.1.tgz
+|   ├── longhorn-104.2.0+up1.7.1.tgz
+│   └── longhorn-crd-104.2.0+up1.7.1.tgz
 ├── fleet-examples
 ...
 │   ├── fleets
@@ -691,7 +729,8 @@ The directory structure after the script execution should look similar to:
 │   │   │   │   │   └── secrets
 │   │   │   │   │       ├── eib-charts-upgrader-script.yaml
 │   │   │   │   │       ├── kustomization.yaml
-│   │   │   │   │       └── longhorn-1-7-1.yaml <- secret created by the generate-chart-upgrade-data.sh script
+│   │   │   │   │       ├── longhorn-104-2-0-up1-7-1.yaml <- secret created by the generate-chart-upgrade-data.sh script
+│   │   │   │   │       └── longhorn-crd-104-2-0-up1-7-1.yaml <- secret created by the generate-chart-upgrade-data.sh script
 │   │   │   │   ├── fleet.yaml
 │   │   │   │   └── kustomization.yaml
 │   │   │   └── ...
@@ -757,9 +796,6 @@ After the successful deployment of the `Bundle`, to monitor the upgrade process:
 +
 .View the upgrade pod logs
 image::day2_helm_chart_upgrade_example_6.png[]
-+
-.Logs for successfully patched Longhorn chart
-image::day2_helm_chart_upgrade_example_7.png[]
 
 . Now verify the logs of the Pod created for the upgrade by the helm-controller:
 
@@ -777,10 +813,10 @@ image::day2_helm_chart_upgrade_example_9.png[]
 
 . Finally check that the Longhorn Pods are running:
 +
-.Example for validating the longhorn-engine pod
+.Example for validating the instance-manager pod
 image::day2_helm_chart_upgrade_example_10.png[]
 
-After making the above validations, it is safe to assume that the Longhorn Helm chart has been upgraded from `1.6.1` to `1.7.1`.
+After making the above validations, it is safe to assume that the Longhorn Helm chart has been upgraded from `103.3.0+up1.6.1` to `104.2.0+up1.7.1`.
 
 [#day2-helm-upgrade-eib-chart-third-party]
 ===== Helm chart upgrade using a third-party GitOps tool
