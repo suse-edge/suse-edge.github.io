@@ -12,7 +12,7 @@ ifdef::env-github[]
 endif::[]
 :toc: preamble
 
-This section offers migration guidelines for existing `Edge 3.0` *management* and *downstream* clusters to `Edge 3.1.0`.
+This section offers migration guidelines for existing `Edge 3.0` (including minor releases such as 3.0.1 and 3.0.2) *management* and *downstream* clusters to `Edge 3.1.0`.
 
 For a list of `Edge 3.1.0` component versions, refer to the <<release-notes, release notes>>.
 
@@ -21,7 +21,7 @@ For a list of `Edge 3.1.0` component versions, refer to the <<release-notes, rel
 
 This section covers how to migrate a `management` cluster from `Edge 3.0` to `Edge 3.1.0`.
 
-`Management` cluster component should be migrated in the following order:
+`Management` cluster components should be migrated in the following order:
 
 . <<day2-migration-mgmt-os, Operating System (OS)>>
 
@@ -102,6 +102,11 @@ The `--continue` option is used here in order to reuse the previous snapshot wit
 image::day2-migration-os-migration-prompt.png[]
 +
 Select the `number` that corresponds to `SUSE Linux Micro 6.0 <arch>`.
++
+[NOTE]
+====
+The `Edge 3.1.0` release supports *only* the `SUSE Linux Micro 6.0` operating system.
+====
 
 . After a successful `transactional-update` run, for the changes to take effect on the system you would need to reboot:
 +
@@ -110,7 +115,7 @@ Select the `number` that corresponds to `SUSE Linux Micro 6.0 <arch>`.
 reboot
 ----
 
-. Validate that the operating system has been migrated to `SUSE Linux Micro 6.0`:
+. After the host has been rebooted, validate that the operating system has been migrated to `SUSE Linux Micro 6.0`:
 +
 [,bash]
 ----
@@ -224,7 +229,7 @@ kubectl uncordon <node_name>
 
 [NOTE]
 ====
-This section assumes you have installed `helm` on your system. For `helm` installation instructions, check link:https://helm.sh/docs/intro/install[here].
+This section assumes you have installed `helm` on your system and you have a valid `kubeconfig` pointing to the desired cluster. For `helm` installation instructions, check link:https://helm.sh/docs/intro/install[here].
 ====
 
 This section provides guidelines for upgrading the Helm chart components that make up a specific Edge release. It covers the following topics:
@@ -274,7 +279,7 @@ kubectl patch helmchart rancher -n <namespace> --type='merge' -p '{"spec":{"set"
 [#day2-migration-mgmt-helm-capi]
 ==== Cluster API controllers migration
 
-From `Edge 3.1.0`, Cluster API (CAPI) controllers on a Metal^3^ management cluster are managed via the `Rancher Turtles` Helm chart.
+From `Edge 3.1.0`, Cluster API (CAPI) controllers on a Metal^3^ management cluster are managed via link:https://turtles.docs.rancher.com[Rancher Turtles].
 
 To migrate the CAPI controllers versions to `Edge 3.1.0` compatible versions, install the `Rancher Turtles` chart:
 
@@ -402,32 +407,30 @@ As per the link:https://docs.rke2.io/helm#automatically-deploying-manifests-and-
 > "Deleting files out of this directory will not delete the corresponding resources from the cluster."
 ====
 
-To remove any EIB deployed chart manifests, follow these steps:
+Removing any EIB deployed chart manifests involves the following steps:
 
-. Navigate to the RKE2 manifests directory:
-+
-[,bash]
-----
-cd /var/lib/rancher/rke2/server/manifests
-----
-
-. Get all EIB deployed manifests:
+. To ensure disaster recovery, make a backup of each EIB deployed manifest:
 +
 [NOTE]
 ====
-All EIB deployed manifests will have the `"edge.suse.com/source: edge-image-builder"` label.
+EIB deployed manifests will have the `"edge.suse.com/source: edge-image-builder"` label.
+====
++
+[NOTE]
+====
+Make sure that the `<backup_location>` that you provide to the below command exists.
 ====
 +
 [,bash]
 ----
-grep -rl 'edge.suse.com/source: edge-image-builder'
+grep -lrIZ 'edge.suse.com/source: edge-image-builder' /var/lib/rancher/rke2/server/manifests | xargs -0 -I{} cp {} <backup_location>
 ----
 
-. Remove each `*.yaml` chart manifest:
+. Remove all EIB deployed manifests:
 +
 [,bash]
 ----
-rm <chart_name>.yaml
+grep -lrIZ 'edge.suse.com/source: edge-image-builder' /var/lib/rancher/rke2/server/manifests | xargs -0 rm -f --
 ----
 
 [#day2-migration-mgmt-helm-upgrade-steps]
@@ -808,17 +811,17 @@ On downstream clusters, the removal of the EIB created chart manifest files is h
 
 [WARNING]
 ====
-Using the `eib-charts-migration-prep` Fleet from `main` is *not* advised. The fleet should *always* be used from a valid Edge link:https://github.com/suse-edge/fleet-examples/releases[release] tag.
+Using the `eib-charts-migration-prep` Fleet file from the `main` branch is *not* advised. The Fleet file should *always* be used from a valid Edge link:https://github.com/suse-edge/fleet-examples/releases[release] tag.
 ====
 
 [IMPORTANT]
 ====
-This process requires that SUC is already deployed. For installation details, refer to <<components-system-upgrade-controller-install, "Installing the System Upgrade Controller">>.
+This process requires that System Upgrade Controller (SUC) is already deployed. For installation details, refer to <<components-system-upgrade-controller-install, "Installing the System Upgrade Controller">>.
 ====
 
 Once created, the `eib-charts-migration-prep` Fleet ships a <<components-system-upgrade-controller,SUC>> Plan that contains a script that will do the following:
 
-. Determine whether the current node it is running on is an `initializer` node.
+. Determine whether the current node it is running on is an `initializer` node. If it is not, it won't do anything.
 
 . If the node is an `initializer`, it will:
 
@@ -907,18 +910,29 @@ Make sure that the version of the *fleet-cli* you download matches the version o
 
 ** For Linux users, the binaries are present as *assets* to each Fleet link:https://github.com/rancher/fleet/releases[release].
 
-*** Linux AMD:
+*** Retrieve the desired binary:
+
+**** Linux AMD:
 +
 [,bash]
 ----
 curl -L -o fleet-cli https://github.com/rancher/fleet/releases/download/<FLEET_VERSION>/fleet-linux-amd64
 ----
 
-*** Linux ARM:
+**** Linux ARM:
 +
 [,bash]
 ----
 curl -L -o fleet-cli https://github.com/rancher/fleet/releases/download/<FLEET_VERSION>/fleet-linux-arm64
+----
+
+*** Move the binary to `/usr/local/bin`:
++
+[,bash]
+----
+sudo mkdir -p /usr/local/bin
+sudo mv ./fleet-cli /usr/local/bin/fleet-cli
+sudo chmod 755 /usr/local/bin/fleet-cli
 ----
 
 . Clone the *suse-edge/fleet-examples* link:https://github.com/suse-edge/fleet-examples/releases[release] that you wish to use the `eib-chart-migration-prep` fleet from:
@@ -947,7 +961,7 @@ EOF
 +
 For information on how to map to downstream clusters, see link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters].
 
-. Proceed to building the Bundle:
+. Proceed to build the Bundle:
 +
 [NOTE]
 ====
