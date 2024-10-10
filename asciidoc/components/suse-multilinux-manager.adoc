@@ -1,0 +1,233 @@
+== SUSE Manager
+What is SUSE Manager.
+Set up the server
+Configure for SL Micro 6.0
+Configure your installation image with EIB
+
+
+== Keeping SLE Micro up to date
+
+TBD: Do we want to give customers options (Elemental all-in, direct registration against SCC), or is SUSE Manager the only fully supported (and documented) option (in SUSE Edge 3.1)?
+
+SUSE Manager is included in SUSE Edge to provide automation and control for keeping SLE Micro as the underlying operating system consistently up-to-date on all nodes of your edge deployment.
+
+This quickstart guide is intended to get you up to speed with SUSE Manager as quickly as possible, with the goal of providing operating system updates to your edge nodes. The quickstart guide doesn't discuss topics like sizing your storage, creating and managing additional software channels for staging purposes, or managing users, system groups, and organizations for larger deployments. For production use, we strongly recommend to get familiar with the comprehensive [SUSE Manager Documentation].
+
+The following steps are required to prepare SUSE Edge for using SUSE Manager effectively:
+
+* Deploy and configure SUSE Manager Server.
+* Sync the SLE Micro package repositories.
+* Create system groups.
+* Create activation keys.
+* Use Edge Image Builder to prepare installation media for SUSE Manager registration
+
+=== Deploy SUSE Manager Server
+
+If you already have an instance of the latest version of SUSE Manager 5.0 running, you can skip this step.
+
+FIXME: Follow the [[[https://documentation.suse.com/suma/5.0/en/suse-manager/quickstart/container-deployment/suma/quickstart-deploy-suma-server.html]]] Quick Start to deploy SUSE Manager Server.
+
+You can run SUSE Manager Server on a dedicated physical server, as a virtual machine on your own hardware, or in the cloud. Pre-configured virtual machine images for SUSE Manager Server are provided for supported public clouds.
+
+In this quick start we're using the "qcow2" image "SUSE-Manager-Server.x86_64-5.0.0-Qcow-GM.qcow2" for x86-64 that you can find at https://www.suse.com/download/suse-manager/ or in the SUSE Customer Center. This image will work as a virtual machine on hypervisors like KVM.
+
+You can also install SUSE Manager Server on any of the other supported hardware architectures.
+
+Once you have downloaded the image, create a virtual machine that meets at least the following minimal hardware specifications:
+* 16 GB RAM
+* 4 physical or virtual cores
+
+With the qcow2 image, there is no need to install the operating system. You can directly attach the image as your root partition.
+
+You will also need an additional block device to store the SUSE Manager database and all RPM packages and files SUSE Manager needs to operate. With your VM management tool, create a block device that has at least 100 GB.
+
+You need to set up the network so that your edge nodes can later access SUSE Manager Server with a fully qualified host name!
+
+When you boot SUSE Manager for the first time you need to perform some initial configuration:
+* Select your keyboard layout
+* Accept the license agreement
+* Select your time zone
+* Enter the root password for the operating system
+
+The next steps need to be done as the "root" user:
+
+FIXME: DO WE NEED TWO CODES? WHAT EXACTLY DOES SOMEONE WITH AN EDGE SUBSCRIPTION GET?
+
+For the next step you need two registration codes that you can find in the SUSE Customer Center:
+* Your registration code for SLE Micro 5.5
+* Your registration code for the SUSE Manager Extension
+
+Register SLE Micro:
+transactional-update register -r <REGCODE> -e <your_email>
+
+Register SUSE Manager:
+transactional-update register -p SUSE-Manager-Server/5.0/x86_64 -r <REGCODE>
+
+The product string depends on your hardware architecture! For example, if you are using SUSE Manager on a 64-bit Arm system, the string is
+SUSE-Manager-Server/5.0/aarch64
+
+Reboot
+
+Update the system:
+transactional-update
+
+Unless there were no changes, reboot to apply the updates.
+
+SUSE Manager is provided via a container that is managed by podman. The "mgradm" command handles the setup and configuration for you.
+
+Note: It is very important that your SUSE Manager Server has a fully qualified host name ("FQDN") that the edge nodes you want to manage can properly resolve in your network!
+
+Deploy SUSE Manager:
+mgradm install podman <FQDN>
+
+Provide the password for the CA certificate. This password should be different from your login passwords. You usually don't need to enter it later, but you should note it down.
+
+Provide the password for the "admin" user. This is the initial user for logging into SUSE Manager. You can create additional users with full or restricted rights later.
+
+=== Configure SUSE Manager
+
+Once the deployment has finished, you can log into the SUSE Manager web UI using the hostname you provided earlier.
+
+For the next step you need your Organization Credentials that you can find in SUSE Customer Center. With those credentials, SUSE Manager can synchronize all the products that you have subscriptions for.
+
+Select "Admin > Setup Wizard"
+On the "Organization Credentials" tab create a new credential with your Username and Password.
+
+Go to the next tab ("SUSE Products"). You need to wait until the first data synchronization with SUSE Customer Center has finished.
+
+Once the list is populated, you use the filter to only show "Micro 6".
+Check the box for SUSE Linux Micro 6.0 for the hardware architecture your edge nodes will run on (x86_64 or aarch64).
+
+Click "Add Products (2)". This will add the main package repository ("channel") for SLE Micro and automatically add the channel for the SUSE Manager client tools as a sub-channel.
+
+Depending on your Internet connection, the first synchronization will take a while. You can already start with the next steps:
+
+Under "System > System Groups", create at least one group that your systems will automatically join when they are onboarded. Groups are an important way of categorizing systems, so you can apply configuration or actions to a whole set of systems at once. They are conceptionally similar to labels in Kubernetes.
+
+Click "+ Create Group"
+
+Provide a short name, e.g., "Edge Nodes", and long description.
+
+Under "Systems > Activation Keys", create at least one activation key. Activation keys can be thought of as a configuration profile that is automatically applied to systems when they are onboarded to SUSE Manager. If you want certain edge nodes to be added to different groups or use different configuration, you can create separate activation keys for them and use them later in Edge Image Builder to create customized installation media.
+
+A typical advanced use case for activation keys would be to assign your test clusters to the software channels with the latest updates and your production clusters to software channels that only get those latest updates once you've tested them in the test cluster.
+
+Click "+ Create Key"
+Choose a short description, e.g., "Edge Nodes".
+Provide a unique name that identifies the key, e.g., "edge-x86_64" for your edge nodes with x86_64 hardware architecture.
+A number prefix is automatically added to the key. For the default organization, the number is always "1". If you create additional organizations in SUSE Manager and create keys for them, that number may differ.
+
+If you haven't created any cloned software channels, you can keep the setting for the Base Channel to "SUSE Manager Default". This will automatically assign the correct SUSE update repository for your edge nodes.
+
+As "Child Channel", select the "include recomended" slider for the hardware architecture your activation key is used for. This will add the "SUSE-Manager-Tools-For-SL-Micro-6.0" channel.
+
+On the "Groups" tab, add the group you've created before. All nodes that are onboarded using this activation key will automatically added to that group.
+
+=== Create a customized installation image with Edge Image Builder
+
+To use Edge Image Builder, you only need an environment where you can start a Linux-based container with podman.
+
+For a minimal lab setup, we can actually use the same virtual machine SUSE Manager Server is running on. Please make sure that you have enough disk space in the virtual machine! This is not a recommended setup for production use. See ... for host operating systems we have tested Edge Image builder with.
+
+Log into your SUSE Manager Server host as root.
+
+Pull the Edge Image Builder container:
+podman pull registry.opensuse.org/isv/suse/edge/edgeimagebuilder/containerfile-sp6/suse/edge-image-builder:1.1.0.rc2
+
+FIXME: Final version of the container!
+
+Create the directory "/opt/eib" and a sub-directory "base-images":
+
+mkdir -p /opt/eib/base-images
+
+FIXME: Create an example on github and link it.
+
+In this quickstart we're using the "self-install" flavor of the SLE Micro image. That image can latter be written to a physical USB thumb drive that you can use to install on physical servers. If your server has the option of remote-attaching installation ISOs via a BMC (Baseboard Management Controller), you can also use that approach. Finally that image can also be used with most virtualization tools.
+
+If you either want to preload the image directly to a physical node or directly start it from a VM, you can also use the "raw" image flavor.
+
+Download or copy the image
+SL-Micro.x86_64-6.0-Default-SelfInstall-GM.install.iso to the "base-images" directoy and name it "slemicro.iso".
+
+FIXME: Final image name!
+
+Building aarch64 images on an Arm-based build host is a technology preview in SUSE Edge 3.1. It will most likely work, but isn't supported yet. If you want to try it out, you need to be running podman on a 64-bit Arm machine, and you need to replace "x86_64" in all the examples and code snippets by "aarch64".
+
+In "/opt/eib", create a file called "iso-definition.yaml". This is your build definition for Edge Image Builder.
+
+Here is a simple example that installs SL Micro 6.0, sets a root password and the keymap, starts the Cockpit graphical UI and registers your node to SUSE Manager:
+
+apiVersion: 1.0
+image:
+  imageType: iso
+  arch: x64_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+  - username: root
+    createHomeDir: true
+    encryptedPassword: $6$aaBTHyqDRUMY1HAp$pmBY7.qLtoVlCGj32XR/Ogei4cngc3f4OX7fwBD/gw7HWyuNBOKYbBWnJ4pvrYwH2WUtJLKMbinVtBhMDHQIY0
+  keymap: de
+  systemd:
+    enable:
+      - cockpit.socket
+  packages:
+    noGPGCheck: true
+  suma:
+    host: ${fully qualified hostname of your SUSE Manager Server}
+    activationKey: 1-edge-x86_64
+
+Edge Image Builder can also configure the network, automatically install Kubernetes on the node, and even deploy applications via helm charts. See [here] for more comprehensive examples.
+
+For "baseImage", specify the actual name of the ISO in the "base-images" directory that you want to use.
+
+In this example, the root password would be "root". See [here] for creating password hashes for the secure password you want to use.
+
+Set the keymap to the actual keyboard layout you want the system to have after installation.
+
+We use the option "noGPGCheck: true" because we aren't going to provide a GPG key to check RPM packages. See [here] for a more secure setup that we recommend for production use.
+
+As mentioned several times, your SUSE Manager host requires a fully qualified hostname that can be resolved in the network your edge nodes will boot into.
+
+The value for "activationKey" needs to match the key you've created in SUSE Manager. 
+
+To build an installation image that automatically registers your edge nodes to SUSE Manager after installation, you also need to prepare two artifacts:
+
+* the Salt minion package that installs the management agent for SUSE Manager
+* the CA certificat of your SUSE Manager server
+
+==== Download the venv-salt-minion package
+
+In "/opt/eib", create a subdirectory "rpms".
+
+Download the package "venv-salt-minion" from your SUSE Manager server into that directory. You can either find it via the web UI by finding the package under "Software > Channel List" and download it from the SUSE-Manager-Tools ... channel or download it from the SUSE Manager "bootstrap repo" with a tool like curl:
+
+curl http://${HOSTNAME_OF_SUSE_MANAGER}/pub/repositories/slmicro/6/0/bootstrap/x86_64/venv-salt-minion-3006.0-1.1.x64_64.rpm
+
+FIXME: Exact curl command
+
+=== Download the SUSE Manager CA certificate
+
+In "/opt/eib", create a subdirectory "certificates"
+
+Download the CA certificate from SUSE Manager into that directory:
+
+curl http://${HOSTNAME_OF_SUSE_MANAGER}/pub/RHN-ORG-TRUSTED-SSL-CERT
+
+You need to rename it to "RHN-ORG-TRUSTED-SSL-CERT.crt". Edge Image Builder will make sure that the certificate is installed and activated on the edge node during installation.
+
+Now you can run Edge Image Builder:
+
+cd /opt/eib
+
+podman run --rm -it --privileged -v ./:/eib registry.opensuse.org/isv/suse/edge/edgeimagebuilder/containerfile-sp6/suse/edge-image-builder:1.1.0.rc2 build --definition-file iso-definition.yaml
+
+If you have used a different name for your YAML definition file or want to use a different version of Edge Image Builder, you need to adapt the command accordingly.
+
+After the build is finished, you'll find the installation iso in the "/opt/eib" directory as "eib-image.iso".
+
+
+
+
+
