@@ -1,0 +1,139 @@
+[#guides-kiwi-builder-images]
+= Building Updated SUSE Linux Micro Images with Kiwi
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+In this section we document how to generate updated SUSE Linux Micro base images, inclusive of SelfInstall ISO images, e.g. for usage with Edge Image Builder, or raw disk images e.g. for usage with Cluster API (CAPI) + Metal^3, or scenarios where you'll write the disk image directly to a block device. This process is useful in situations where you want the latest patches included in your initial system boot images, where you want to minimise patch transfer post-installation, or for scenarios where CAPI is used, where it's common to reinstall the operating system with a new image rather than upgrade in place.
+
+This process makes use of https://osinside.github.io/kiwi/[Kiwi] to run the image build, and SUSE Edge ships with a containerized version that simplifies the overall process with a helper utility baked in, allowing the user to specify the target *profile* that they require. The profile defines the type of output image that is required, with the common ones listed below:
+
+* "*Default*" - A raw disk image with the default kernel, and the standard "full" package set
+* "*Default-SelfInstall*" - A SelfInstall ISO image with the default kernel, and the standard "full" package set
+* "*Base*" - A raw disk image with the default kernel, but with a reduced package set
+* "*Base-SelfInstall*" - A SelfInstall ISO image with the default kernel, but with a reduced package set
+* "*Base-RT*" - A raw disk image with the Real Time kernel and a reduced package set
+* "*Base-RT-SelfInstall*" - A SelfInstall ISO image with the RealTime kernel and a reduced package set
+
+This process works for both `x86_64` and `aarch64` architectures, although not all image profiles are available for both architectures, e.g. in SUSE Edge 3.1, where SUSE Linux 6.0 is used, a profile with a real-time kernel (i.e. "Base-RT" or "Base-RT-SelfInstall") is not available for aarch64.
+
+NOTE: If you're wanting to build an `aarch64` image, you need to use an `aarch64` build host, and vice-versa for `x86_64` - cross-builds are not supported at this time.
+
+== Prerequisites
+
+For the Kiwi image builder to run successfully, you will need the following already pre-configured:
+
+* A SUSE Linux Micro 6.0 system that's already registered via `SUSEConnect` (the registration is used to pull the latest packages from the SUSE repositories)
+* An internet connection that can be used to pull the required packages, and the proxy pre-configured if required
+* SELinux disabled on the build host (as SELinux labelling takes place in the container and it can conflict with the host policy)
+* At least 10GB free disk space to accommodate the container image, the build root, and the resulting output image(s)
+
+== Getting Started
+
+Before building your first image via this process, please connect to your SUSE Linux 6.0 image build host and ensure that you've disabled SELinux:
+
+[,console]
+----
+# setenforce 0
+----
+
+Next, create an output directory that will be mounted into the Kiwi build container, and will be where the resulting images will reside:
+
+[,console]
+----
+# mkdir ~/output
+----
+
+Finally, download the latest Kiwi builder image from the SUSE Registry:
+
+[,console]
+----
+# podman pull registry.suse.com/edge/3.1/kiwi-builder-101-image:latest
+(...)
+----
+
+== Building the Default Image
+
+In this section we're going to build an image with the "Default" profile, i.e. a standard raw disk image with the default kernel and standard set of packages. This is the default behavior of the Kiwi image container if no arguments are provided during the container image run. In the following command you'll notice that we're calling Podman, but we're mounting two directories into the image, firstly the SUSE Linux Micro package repository directory from the underlying host, and secondly the output directory we created in a previous step. We'll then explicitly call the `build-image` helper script:
+
+[,console]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ./output:/tmp/output \
+    -it registry.suse.com/edge/3.1/kiwi-builder-101-image:latest build-image
+(...)
+----
+
+NOTE: It's expected that if you're running this script for the first time that it will *fail* shortly after starting with "*ERROR: Early loop device test failed, please retry the container run.*", this is a symptom of loop devices being created on the underlying host system that are not immediately visible inside of the container image. Simply re-run the command again and it should proceed without issue.
+
+Depending on the speed of your build system and the bandwidth it has to the SUSE Linux Micro package repositories, after a few minutes you should receive a message confirming a successful image build, and you can find the images in the local output directory:
+
+[,console]
+----
+(...)
+INFO: Image build successful, generated images are available in the 'output' directory.
+
+# ls -1 output/
+SLE-Micro.x86_64-6.0.changes
+SLE-Micro.x86_64-6.0.packages
+SLE-Micro.x86_64-6.0.raw
+SLE-Micro.x86_64-6.0.verified
+build
+kiwi.result
+kiwi.result.json
+----
+
+== Building images with other profiles
+
+If you wish to build a different image profile, this is possible by using the "*-p*" command option in the Kiwi container image helper script. For example, to build the "*Default-SelfInstall*" ISO image, use the following command:
+
+[,console]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ./output:/tmp/output \
+    -it registry.suse.com/edge/3.1/kiwi-builder-101-image:latest build-image -p Default-SelfInstall
+(...)
+----
+
+NOTE: If you've already previously created an image in the `output` directory, Kiwi will refuse to run, as to avoid data loss. You will need to remove the contents of the output directory before proceeding with `rm -f output/*`.
+
+Alternatively, if you wish to build a SelfInstall ISO image with the RealTime kernel ("*kernel-rt*") then you can use the following command:
+
+[,console]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ./output:/tmp/output \
+    -it registry.suse.com/edge/3.1/kiwi-builder-101-image:latest build-image -p Base-RT-SelfInstall
+(...)
+----
+
+== Building images with large sector sizes
+
+For some hardware, you may require an image with a large sector size, i.e. *4096 bytes* rather than the standard 512 bytes. The containerized Kiwi builder supports the ability to generate images with large block size, and simply requires the "*-b*" option to be specified on the command line. For example, to build a "*Default-SelfInstall*" image with a large sector size, use the following command:
+
+[,console]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ./output:/tmp/output \
+    -it registry.suse.com/edge/3.1/kiwi-builder-101-image:latest build-image -p Default-SelfInstall -b
+(...)
+----
+
+== Using a custom Kiwi image definition file
+
+For advanced use-cases, you can specify your own Kiwi image definition file, along with any necessary post-build scripts, by overriding the default definitions that are pre-packaged by the SUSE Edge team. To do this, create a new directory and mount it into the container image at the location in which the helper script is looking (`/micro-sdk/defs`):
+
+[,console]
+----
+# mkdir mydefs/
+# cp /path/to/SL-Micro.kiwi mydefs/
+# cp /path/to/config.sh mydefs/
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ./output:/tmp/output -v ./mydefs/:/micro-sdk/defs/\
+    -it registry.suse.com/edge/3.1/kiwi-builder-101-image:latest build-image
+(...)
+----
+
+NOTE: This is for advanced use-cases only, and may cause supportability issues. If you're unsure, please contact your SUSE representative who can provide further advice and guidance.
