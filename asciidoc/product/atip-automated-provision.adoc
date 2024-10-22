@@ -48,6 +48,15 @@ The following sections describe the different directed network provisioning work
 
 * xref:airgap-deployment[]
 
+
+[IMPORTANT NOTE]
+====
+The following sections show how to prepare the different scenarios for the directed network provisioning workflow using ATIP.
+For examples of the different configurations options for deployment (incl. air-gapped environments, DHCP and DHCP-less networks, private container registries, etc.), see the https://github.com/suse-edge/atip/tree/release-3.1/telco-examples/edge-clusters[SUSE ATIP repository].
+====
+
+[#single-node]
+
 [#eib-edge-image-connected]
 === Prepare downstream cluster image for connected scenarios
 
@@ -67,7 +76,11 @@ When running Edge Image Builder, a directory is mounted from the host, so it is 
 * `downstream-cluster-config.yaml` is the image definition file, see <<quickstart-eib>> for more details.
 * The base image when downloaded is `xz` compressed, which must be uncompressed with `unxz` and copied/moved under the `base-images` folder.
 * The `network` folder is optional, see <<add-network-eib>> for more details.
-* The custom/scripts directory contains scripts to be run on first-boot; currently a `01-fix-growfs.sh` script is required to resize the OS root partition on deployment
+* The `custom/scripts` directory contains scripts to be run on first-boot:
+    1. `01-fix-growfs.sh` script is required to resize the OS root partition on deployment
+    2. `02-performance.sh` script is optional and can be used to configure the system for performance tuning.
+    3. `03-sriov.sh` script is optional and can be used to configure the system for SR-IOV.
+* The `custom/files` directory contains the `performance-settings.sh` and `sriov-auto-filler.sh` files to be copied to the image during the image creation process.
 
 [,console]
 ----
@@ -78,7 +91,12 @@ When running Edge Image Builder, a directory is mounted from the host, so it is 
 |   └ configure-network.sh
 └── custom/
     └ scripts/
-        └ 01-fix-growfs.sh
+    |   └ 01-fix-growfs.sh
+    |   └ 02-performance.sh
+    |   └ 03-sriov.sh
+    └ files/
+        └ performance-settings.sh
+        └ sriov-auto-filler.sh
 ----
 
 ===== Downstream cluster image definition file
@@ -92,7 +110,7 @@ image:
   imageType: RAW
   arch: x86_64
   baseImage: SL-Micro.x86_64-6.0-Base-RT-GM2.raw
-  outputImageName: eibimage-slemicro55rt-telco.raw
+  outputImageName: eibimage-slmicro60rt-telco.raw
 operatingSystem:
   kernelArgs:
     - ignition.platform.id=openstack
@@ -100,6 +118,10 @@ operatingSystem:
   systemd:
     disable:
       - rebootmgr
+      - transactional-update.timer
+      - transactional-update-cleanup.timer
+      - fstrim
+      - time-sync.target
   users:
     - username: root
       encryptedPassword: ${ROOT_PASSWORD}
@@ -143,6 +165,41 @@ growfs() {
 growfs /
 ----
 
+[#add-custom-script-performance]
+===== Performance script
+
+The following optional script (`custom/scripts/02-performance.sh`) can be used to configure the system for performance tuning:
+
+[,shell]
+----
+#!/bin/bash
+
+# create the folder to extract the artifacts there
+mkdir -p /opt/performance-settings
+
+# copy the artifacts
+cp performance-settings.sh /opt/performance-settings/
+----
+
+The content of `custom/files/performance-settings.sh` is a script that can be used to configure the system for performance tuning and can be downloaded from the following https://github.com/suse-edge/atip/blob/release-3.1/telco-examples/edge-clusters/dhcp/eib/custom/files/performance-settings.sh[link].
+
+[#add-custom-script-sriov]
+===== SR-IOV script
+
+The following optional script (`custom/scripts/03-sriov.sh`) can be used to configure the system for SR-IOV:
+
+[,shell]
+----
+#!/bin/bash
+
+# create the folder to extract the artifacts there
+mkdir -p /opt/sriov
+# copy the artifacts
+cp sriov-auto-filler.sh /opt/sriov/sriov-auto-filler.sh
+----
+
+The content of `custom/files/sriov-auto-filler.sh` is a script that can be used to configure the system for SR-IOV and can be downloaded from the following https://github.com/suse-edge/atip/blob/release-3.1/telco-examples/edge-clusters/dhcp/eib/custom/files/sriov-auto-filler.sh[link].
+
 [NOTE]
 ====
 Add your own custom scripts to be executed during the provisioning process using the same approach.
@@ -162,7 +219,7 @@ image:
   imageType: RAW
   arch: x86_64
   baseImage: SL-Micro.x86_64-6.0-Base-RT-GM2.raw
-  outputImageName: eibimage-slemicro55rt-telco.raw
+  outputImageName: eibimage-slmicro60rt-telco.raw
 operatingSystem:
   kernelArgs:
     - ignition.platform.id=openstack
@@ -170,6 +227,10 @@ operatingSystem:
   systemd:
     disable:
       - rebootmgr
+      - transactional-update.timer
+      - transactional-update-cleanup.timer
+      - fstrim
+      - time-sync.target
   users:
     - username: root
       encryptedPassword: ${ROOT_PASSWORD}
@@ -178,12 +239,12 @@ operatingSystem:
   packages:
     packageList:
       - jq
-      - dpdk22
-      - dpdk22-tools
+      - dpdk
+      - dpdk-tools
       - libdpdk-23
       - pf-bb-config
     additionalRepos:
-      - url: https://download.opensuse.org/repositories/isv:/SUSE:/Edge:/Telco/SLEMicro5.5/
+      - url: https://download.opensuse.org/repositories/isv:/SUSE:/Edge:/Telco/SL-Micro_6.0_images/
     sccRegistrationCode: ${SCC_REGISTRATION_CODE}
 ----
 
@@ -245,7 +306,7 @@ podman run --rm --privileged -it -v $PWD:/eib \
  build --definition-file downstream-cluster-config.yaml
 ----
 
-This creates the output ISO image file named `eibimage-slemicro55rt-telco.raw`, based on the definition described above.
+This creates the output ISO image file named `eibimage-slmicro60rt-telco.raw`, based on the definition described above.
 
 The output image must then be made available via a webserver, either the media-server container enabled via the <<metal3-media-server,Management Cluster Documentation>>
 or some other locally accessible server.  In the examples below, we refer to this server as `imagecache.local:8080`
@@ -270,8 +331,12 @@ When running Edge Image Builder, a directory is mounted from the host, so it is 
 * `downstream-cluster-airgap-config.yaml` is the image definition file, see <<quickstart-eib>> for more details.
 * The base image when downloaded is `xz` compressed, which must be uncompressed with `unxz` and copied/moved under the `base-images` folder.
 * The `network` folder is optional, see <<add-network-eib>> for more details.
-* The `custom/scripts` directory contains scripts to be run on first-boot; currently a `01-fix-growfs.sh` script is required to resize the OS root partition on deployment. For air-gap scenarios, a script `02-airgap.sh` is required to copy the images to the right place during the image creation process.
-* The `custom/files` directory contains the `rke2` and the `cni` images to be copied to the image during the image creation process.
+* The `custom/scripts` directory contains scripts to be run on first-boot:
+    1. `01-fix-growfs.sh` script is required to resize the OS root partition on deployment.
+    2. `02-airgap.sh` script is required to copy the images to the right place during the image creation process for air-gapped environments.
+    3. `03-performance.sh` script is optional and can be used to configure the system for performance tuning.
+    4. `04-sriov.sh` script is optional and can be used to configure the system for SR-IOV.
+* The `custom/files` directory contains the `rke2` and the `cni` images to be copied to the image during the image creation process. Also, the optional `performance-settings.sh` and `sriov-auto-filler.sh` files can be included.
 
 [,console]
 ----
@@ -289,9 +354,13 @@ When running Edge Image Builder, a directory is mounted from the host, so it is 
     |   └ rke2-images.linux-amd64.tar.zst
     |   └ rke2.linux-amd64.tar.zst
     |   └ sha256sum-amd64.txt
+    |   └ performance-settings.sh
+    |   └ sriov-auto-filler.sh
     └ scripts/
         └ 01-fix-growfs.sh
         └ 02-airgap.sh
+        └ 03-performance.sh
+        └ 04-sriov.sh
 ----
 
 ===== Downstream cluster image definition file
@@ -336,6 +405,41 @@ mkdir -p /var/lib/rancher/rke2/agent/images
 cp install.sh /opt/
 cp rke2-images*.tar.zst rke2.linux-amd64.tar.gz sha256sum-amd64.txt /opt/rke2-artifacts/
 ----
+
+[#add-custom-script-performance2]
+===== Performance script
+
+The following optional script (`custom/scripts/03-performance.sh`) can be used to configure the system for performance tuning:
+
+[,shell]
+----
+#!/bin/bash
+
+# create the folder to extract the artifacts there
+mkdir -p /opt/performance-settings
+
+# copy the artifacts
+cp performance-settings.sh /opt/performance-settings/
+----
+
+The content of `custom/files/performance-settings.sh` is a script that can be used to configure the system for performance tuning and can be downloaded from the following https://github.com/suse-edge/atip/blob/release-3.1/telco-examples/edge-clusters/dhcp/eib/custom/files/performance-settings.sh[link].
+
+[#add-custom-script-sriov2]
+===== SR-IOV script
+
+The following optional script (`custom/scripts/04-sriov.sh`) can be used to configure the system for SR-IOV:
+
+[,shell]
+----
+#!/bin/bash
+
+# create the folder to extract the artifacts there
+mkdir -p /opt/sriov
+# copy the artifacts
+cp sriov-auto-filler.sh /opt/sriov/sriov-auto-filler.sh
+----
+
+The content of `custom/files/sriov-auto-filler.sh` is a script that can be used to configure the system for SR-IOV and can be downloaded from the following https://github.com/suse-edge/atip/blob/release-3.1/telco-examples/edge-clusters/dhcp/eib/custom/files/sriov-auto-filler.sh[link].
 
 ===== Custom files for air-gap scenarios
 
@@ -385,7 +489,7 @@ edge/sriov-crd-chart:1.3.0
 EOF
 ----
 +
-.. Generate a local tarball file using the following https://github.com/suse-edge/fleet-examples/blob/release-3.0/scripts/day2/edge-save-oci-artefacts.sh[script] and the list created above:
+.. Generate a local tarball file using the following https://github.com/suse-edge/fleet-examples/blob/release-3.1/scripts/day2/edge-save-oci-artefacts.sh[script] and the list created above:
 +
 [,shell]
 ----
@@ -397,7 +501,7 @@ a edge-release-oci-tgz-20240705/sriov-network-operator-chart-1.3.0.tgz
 a edge-release-oci-tgz-20240705/sriov-crd-chart-1.3.0.tgz
 ----
 +
-.. Upload your tarball file to your private registry (e.g. `myregistry:5000`) using the following https://github.com/suse-edge/fleet-examples/blob/release-3.0/scripts/day2/edge-load-oci-artefacts.sh[script] to preload your registry with the helm chart OCI images downloaded in the previous step:
+.. Upload your tarball file to your private registry (e.g. `myregistry:5000`) using the following https://github.com/suse-edge/fleet-examples/blob/release-3.1/scripts/day2/edge-load-oci-artefacts.sh[script] to preload your registry with the helm chart OCI images downloaded in the previous step:
 +
 [,shell]
 ----
@@ -407,37 +511,37 @@ $ ./edge-load-oci-artefacts.sh -ad edge-release-oci-tgz-20240705 -r myregistry:5
 
 . Preload with the rest of the images required for SR-IOV:
 +
-.. In this case, we must include the `sr-iov container images for telco workloads (e.g. as a reference, you could get them from https://github.com/suse-edge/charts/blob/release-3.0/charts/sriov-network-operator/1.3.0%2Bup0.1.0/values.yaml[helm-chart values])
+.. In this case, we must include the `sr-iov container images for telco workloads (e.g. as a reference, you could get them from https://github.com/suse-edge/charts/blob/release-3.1/charts/sriov-network-operator/1.3.0%2Bup0.1.0/values.yaml[helm-chart values])
 +
 [,shell]
 ----
 $ cat > edge-release-images.txt <<EOF
-rancher/hardened-sriov-network-operator:v1.2.0-build20240327
-rancher/hardened-sriov-network-config-daemon:v1.2.0-build20240327
-rancher/hardened-sriov-cni:v2.7.0-build20240327
-rancher/hardened-ib-sriov-cni:v1.0.3-build20240327
-rancher/hardened-sriov-network-device-plugin:v3.6.2-build20240327
-rancher/hardened-sriov-network-resources-injector:v1.5-build20240327
-rancher/hardened-sriov-network-webhook:v1.2.0-build20240327
+rancher/hardened-sriov-network-operator:v1.3.0-build20240816
+rancher/hardened-sriov-network-config-daemon:v1.3.0-build20240816
+rancher/hardened-sriov-cni:v2.8.1-build20240820
+rancher/hardened-ib-sriov-cni:v1.1.1-build20240816
+rancher/hardened-sriov-network-device-plugin:v3.7.0-build20240816
+rancher/hardened-sriov-network-resources-injector:v1.6.0-build20240816
+rancher/hardened-sriov-network-webhook:v1.3.0-build20240816
 EOF
 ----
 +
-.. Using the following https://github.com/suse-edge/fleet-examples/blob/release-3.0/scripts/day2/edge-save-images.sh[script] and the list created above, you must generate locally the tarball file with the images required:
+.. Using the following https://github.com/suse-edge/fleet-examples/blob/release-3.1/scripts/day2/edge-save-images.sh[script] and the list created above, you must generate locally the tarball file with the images required:
 +
 [,shell]
 ----
 $ ./edge-save-images.sh -l ./edge-release-images.txt -s registry.suse.com
-Image pull success: registry.suse.com/rancher/hardened-sriov-network-operator:v1.2.0-build20240327
-Image pull success: registry.suse.com/rancher/hardened-sriov-network-config-daemon:v1.2.0-build20240327
-Image pull success: registry.suse.com/rancher/hardened-sriov-cni:v2.7.0-build20240327
-Image pull success: registry.suse.com/rancher/hardened-ib-sriov-cni:v1.0.3-build20240327
-Image pull success: registry.suse.com/rancher/hardened-sriov-network-device-plugin:v3.6.2-build20240327
-Image pull success: registry.suse.com/rancher/hardened-sriov-network-resources-injector:v1.5-build20240327
-Image pull success: registry.suse.com/rancher/hardened-sriov-network-webhook:v1.2.0-build20240327
+Image pull success: registry.suse.com/rancher/hardened-sriov-network-operator:v1.3.0-build20240816
+Image pull success: registry.suse.com/rancher/hardened-sriov-network-config-daemon:v1.3.0-build20240816
+Image pull success: registry.suse.com/rancher/hardened-sriov-cni:v2.8.1-build20240820
+Image pull success: registry.suse.com/rancher/hardened-ib-sriov-cni:v1.1.1-build20240816
+Image pull success: registry.suse.com/rancher/hardened-sriov-network-device-plugin:v3.7.0-build20240816
+Image pull success: registry.suse.com/rancher/hardened-sriov-network-resources-injector:v1.6.0-build20240816
+Image pull success: registry.suse.com/rancher/hardened-sriov-network-webhook:v1.3.0-build20240816
 Creating edge-images.tar.gz with 7 images
 ----
 +
-.. Upload your tarball file to your private registry (e.g. `myregistry:5000`) using the following https://github.com/suse-edge/fleet-examples/blob/release-3.0/scripts/day2/edge-load-images.sh[script] to preload your private registry with the images downloaded in the previous step:
+.. Upload your tarball file to your private registry (e.g. `myregistry:5000`) using the following https://github.com/suse-edge/fleet-examples/blob/release-3.1/scripts/day2/edge-load-images.sh[script] to preload your private registry with the images downloaded in the previous step:
 +
 [,shell]
 ----
@@ -457,7 +561,7 @@ podman run --rm --privileged -it -v $PWD:/eib \
  build --definition-file downstream-cluster-airgap-config.yaml
 ----
 
-This creates the output ISO image file named `eibimage-slemicro55rt-telco.raw`, based on the definition described above.
+This creates the output ISO image file named `eibimage-slmicro60rt-telco.raw`, based on the definition described above.
 
 The output image must then be made available via a webserver, either the media-server container enabled via the <<metal3-media-server,Management Cluster Documentation>>
 or some other locally accessible server.  In the examples below, we refer to this server as `imagecache.local:8080`.
@@ -505,7 +609,7 @@ data:
 apiVersion: metal3.io/v1alpha1
 kind: BareMetalHost
 metadata:
-  name: flexran-demo
+  name: example-demo
   labels:
     cluster-role: control-plane
 spec:
@@ -601,6 +705,7 @@ spec:
 The `RKE2ControlPlane` object specifies the control-plane configuration to be used and the `Metal3MachineTemplate` object specifies the control-plane image to be used.
 Also, it contains the information about the number of replicas to be used (in this case, one) and the `CNI` plug-in to be used (in this case, `Cilium`).
 The agentConfig block contains the `Ignition` format to be used and the `additionalUserData` to be used to configure the `RKE2` node with information like a systemd named `rke2-preinstall.service` to replace automatically the `BAREMETALHOST_UUID` and `node-name` during the provisioning process using the Ironic information.
+To enable multus with cilium a file is created in the `rke2` server manifests directory named `rke2-cilium-config.yaml` with the configuration to be used.
 The last block of information contains the Kubernetes version to be used. `$\{RKE2_VERSION\}` is the version of `RKE2` to be used replacing this value (for example, `v1.30.3+rke2r1`).
 
 [,yaml]
@@ -643,6 +748,27 @@ spec:
                 ExecStartPost=/bin/sh -c "umount /mnt"
                 [Install]
                 WantedBy=multi-user.target
+        storage:
+          files:
+            # https://docs.rke2.io/networking/multus_sriov#using-multus-with-cilium
+            - path: /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChartConfig
+                  metadata:
+                    name: rke2-cilium
+                    namespace: kube-system
+                  spec:
+                    valuesContent: |-
+                      cni:
+                        exclusive: false
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
     kubelet:
       extraArgs:
         - provider-id=metal3://BAREMETALHOST_UUID
@@ -672,10 +798,10 @@ spec:
         matchLabels:
           cluster-role: control-plane
       image:
-        checksum: http://imagecache.local:8080/eibimage-slemicro55rt-telco.raw.sha256
+        checksum: http://imagecache.local:8080/eibimage-slmicro60rt-telco.raw.sha256
         checksumType: sha256
         format: raw
-        url: http://imagecache.local:8080/eibimage-slemicro55rt-telco.raw
+        url: http://imagecache.local:8080/eibimage-slmicro60rt-telco.raw
 ----
 
 The `Metal3DataTemplate` object specifies the `metaData` for the downstream cluster.
@@ -906,6 +1032,25 @@ spec:
                 WantedBy=multi-user.target
         storage:
           files:
+            # https://docs.rke2.io/networking/multus_sriov#using-multus-with-cilium
+            - path: /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChartConfig
+                  metadata:
+                    name: rke2-cilium
+                    namespace: kube-system
+                  spec:
+                    valuesContent: |-
+                      cni:
+                        exclusive: false
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
             - path: /var/lib/rancher/rke2/server/manifests/endpoint-copier-operator.yaml
               overwrite: true
               contents:
@@ -1014,10 +1159,10 @@ spec:
         matchLabels:
           cluster-role: control-plane
       image:
-        checksum: http://imagecache.local:8080/eibimage-slemicro55rt-telco.raw.sha256
+        checksum: http://imagecache.local:8080/eibimage-slmicro60rt-telco.raw.sha256
         checksumType: sha256
         format: raw
-        url: http://imagecache.local:8080/eibimage-slemicro55rt-telco.raw
+        url: http://imagecache.local:8080/eibimage-slmicro60rt-telco.raw
 ----
 
 The `Metal3DataTemplate` object specifies the `metaData` for the downstream cluster.
@@ -1137,7 +1282,7 @@ data:
 apiVersion: metal3.io/v1alpha1
 kind: BareMetalHost
 metadata:
-  name: flexran-demo
+  name: example-demo
   labels:
     cluster-role: control-plane
 spec:
@@ -1231,26 +1376,26 @@ To make the process clear, the changes required on that block (`RKE2ControlPlane
 
 |===
 | Parameter | Value | Description
-| isolcpus| 1-30,33-62| Isolate the cores 1-30 and 33-62.
+| isolcpus| domain,nohz,managed_irq,1-30,33-62| Isolate the cores 1-30 and 33-62.
 | skew_tick| 1 | Allows the kernel to skew the timer interrupts across the isolated CPUs.
 | nohz| on | Allows the kernel to run the timer tick on a single CPU when the system is idle.
 | nohz_full| 1-30,33-62 | kernel boot parameter is the current main interface to configure full dynticks along with CPU Isolation.
 | rcu_nocbs| 1-30,33-62 | Allows the kernel to run the RCU callbacks on a single CPU when the system is idle.
-| kthread_cpus| 0,31,32,63 | Allows the kernel to run the kthreads on a single CPU when the system is idle.
 | irqaffinity| 0,31,32,63 | Allows the kernel to run the interrupts on a single CPU when the system is idle.
-| processor.max_cstate| 1 | Prevents the CPU from dropping into a sleep state when idle.
-| intel_idle.max_cstate| 0 | Disables the intel_idle driver and allows acpi_idle to be used.
+| idle| poll |  Minimizes the latency of exiting the idle state.
 | iommu       | pt         | Allows to use vfio for the dpdk interfaces.
 | intel_iommu | on         | Enables the use of vfio for VFs.
 | hugepagesz | 1G    | Allows to set the size of huge pages to 1 G.
 | hugepages | 40    | Number of huge pages defined before.
 | default_hugepagesz| 1G | Default value to enable huge pages.
+| nowatchdog |  | Disables the watchdog.
+| nmi_watchdog | 0 | Disables the NMI watchdog.
 |===
 
 * The following systemd services are used to enable the following:
     ** `rke2-preinstall.service` to replace automatically the `BAREMETALHOST_UUID` and `node-name` during the provisioning process using the Ironic information.
-    ** `cpu-performance.service` to enable the CPU performance tuning. The `$\{CPU_FREQUENCY\}` has to be replaced with the real values (for example, `2500000` to set the CPU frequency to `2.5GHz`).
     ** `cpu-partitioning.service` to enable the isolation cores of the `CPU` (for example, `1-30,33-62`).
+    ** `performance-settings.service` to enable the CPU performance tuning.
     ** `sriov-custom-auto-vfs.service` to install the `sriov` Helm chart, wait until custom resources are created and run the `/var/sriov-auto-filler.sh` to replace the values in the config map `sriov-custom-auto-config` and create the `sriovnetworknodepolicy` to be used by the workloads.
 
 * The `$\{RKE2_VERSION\}` is the version of `RKE2` to be used replacing this value (for example, `v1.30.3+rke2r1`).
@@ -1271,7 +1416,7 @@ spec:
     name: single-node-cluster-controlplane
   replicas: 1
   serverConfig:
-    cni: cilium
+    cni: calico
     cniMultusEnable: true
   preRKE2Commands:
     - modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
@@ -1343,75 +1488,26 @@ spec:
                     targetNamespace: sriov-network-operator
                     version: 1.3.0
                     createNamespace: true
-            - path: /var/sriov-auto-filler.sh
-              overwrite: true
-              contents:
-                inline: |
-                  #!/bin/bash
-                  cat <<- EOF > /var/sriov-networkpolicy-template.yaml
-                  apiVersion: sriovnetwork.openshift.io/v1
-                  kind: SriovNetworkNodePolicy
-                  metadata:
-                    name: atip-RESOURCENAME
-                    namespace: sriov-network-operator
-                  spec:
-                    nodeSelector:
-                      feature.node.kubernetes.io/network-sriov.capable: "true"
-                    resourceName: RESOURCENAME
-                    deviceType: DRIVER
-                    numVfs: NUMVF
-                    mtu: 1500
-                    nicSelector:
-                      pfNames: ["PFNAMES"]
-                      deviceID: "DEVICEID"
-                      vendor: "VENDOR"
-                      rootDevices:
-                        - PCIADDRESS
-                  EOF
-
-                  export KUBECONFIG=/etc/rancher/rke2/rke2.yaml; export KUBECTL=/var/lib/rancher/rke2/bin/kubectl
-                  while [ $(${KUBECTL} --kubeconfig=${KUBECONFIG} get sriovnetworknodestates.sriovnetwork.openshift.io -n sriov-network-operator -ojson | jq -r '.items[].status.syncStatus') != "Succeeded" ]; do sleep 1; done
-                  input=$(${KUBECTL} --kubeconfig=${KUBECONFIG} get cm sriov-custom-auto-config -n kube-system -ojson | jq -r '.data."config.json"')
-                  jq -c '.[]' <<< $input | while read i; do
-                    interface=$(echo $i | jq -r '.interface')
-                    pfname=$(echo $i | jq -r '.pfname')
-                    pciaddress=$(${KUBECTL} --kubeconfig=${KUBECONFIG} get sriovnetworknodestates.sriovnetwork.openshift.io -n sriov-network-operator -ojson | jq -r ".items[].status.interfaces[]|select(.name==\"$interface\")|.pciAddress")
-                    vendor=$(${KUBECTL} --kubeconfig=${KUBECONFIG} get sriovnetworknodestates.sriovnetwork.openshift.io -n sriov-network-operator -ojson | jq -r ".items[].status.interfaces[]|select(.name==\"$interface\")|.vendor")
-                    deviceid=$(${KUBECTL} --kubeconfig=${KUBECONFIG} get sriovnetworknodestates.sriovnetwork.openshift.io -n sriov-network-operator -ojson | jq -r ".items[].status.interfaces[]|select(.name==\"$interface\")|.deviceID")
-                    resourceName=$(echo $i | jq -r '.resourceName')
-                    driver=$(echo $i | jq -r '.driver')
-                    sed -e "s/RESOURCENAME/$resourceName/g" \
-                        -e "s/DRIVER/$driver/g" \
-                        -e "s/PFNAMES/$pfname/g" \
-                        -e "s/VENDOR/$vendor/g" \
-                        -e "s/DEVICEID/$deviceid/g" \
-                        -e "s/PCIADDRESS/$pciaddress/g" \
-                        -e "s/NUMVF/$(echo $i | jq -r '.numVFsToCreate')/g" /var/sriov-networkpolicy-template.yaml > /var/lib/rancher/rke2/server/manifests/$resourceName.yaml
-                  done
-              mode: 0755
-              user:
-                name: root
-              group:
-                name: root
         kernel_arguments:
           should_exist:
             - intel_iommu=on
-            - intel_pstate=passive
-            - processor.max_cstate=1
-            - intel_idle.max_cstate=0
             - iommu=pt
+            - idle=poll
             - mce=off
             - hugepagesz=1G hugepages=40
             - hugepagesz=2M hugepages=0
             - default_hugepagesz=1G
-            - kthread_cpus=${NON-ISOLATED_CPU_CORES}
             - irqaffinity=${NON-ISOLATED_CPU_CORES}
-            - isolcpus=${ISOLATED_CPU_CORES}
+            - isolcpus=domain,nohz,managed_irq,${ISOLATED_CPU_CORES}
             - nohz_full=${ISOLATED_CPU_CORES}
             - rcu_nocbs=${ISOLATED_CPU_CORES}
             - rcu_nocb_poll
             - nosoftlockup
+            - nowatchdog
             - nohz=on
+            - nmi_watchdog=0
+            - skew_tick=1
+            - quiet
         systemd:
           units:
             - name: rke2-preinstall.service
@@ -1431,22 +1527,6 @@ spec:
                 ExecStartPost=/bin/sh -c "umount /mnt"
                 [Install]
                 WantedBy=multi-user.target
-            - name: cpu-performance.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=CPU perfomance
-                Wants=network-online.target
-                After=network.target network-online.target
-                [Service]
-                User=root
-                Type=forking
-                TimeoutStartSec=900
-                ExecStart=/bin/sh -c "cpupower frequency-set -g performance; cpupower frequency-set -u ${CPU_FREQUENCY}; cpupower frequency-set -d ${CPU_FREQUENCY}"
-                RemainAfterExit=yes
-                KillMode=process
-                [Install]
-                WantedBy=multi-user.target
             - name: cpu-partitioning.service
               enabled: true
               contents: |
@@ -1462,6 +1542,19 @@ spec:
                 ExecStartPost=/bin/sh -c "systemctl enable tuned.service"
                 [Install]
                 WantedBy=multi-user.target
+            - name: performance-settings.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=performance-settings
+                Wants=network-online.target
+                After=network.target network-online.target cpu-partitioning.service
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStart=/bin/sh -c "/opt/performance-settings/performance-settings.sh"
+                [Install]
+                WantedBy=multi-user.target
             - name: sriov-custom-auto-vfs.service
               enabled: true
               contents: |
@@ -1475,7 +1568,7 @@ spec:
                 TimeoutStartSec=900
                 ExecStart=/bin/sh -c "while ! /var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml wait --for condition=ready nodes --all ; do sleep 2 ; done"
                 ExecStartPost=/bin/sh -c "while [ $(/var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml get sriovnetworknodestates.sriovnetwork.openshift.io --ignore-not-found --no-headers -A | wc -l) -eq 0 ]; do sleep 1; done"
-                ExecStartPost=/bin/sh -c "/var/sriov-auto-filler.sh"
+                ExecStartPost=/bin/sh -c "/opt/sriov/sriov-auto-filler.sh"
                 RemainAfterExit=yes
                 KillMode=process
                 [Install]
@@ -1565,7 +1658,8 @@ spec:
             namespace: default
             name: private-registry-cert
   serverConfig:
-    cni: cilium
+    cni: calico
+    cniMultusEnable: true
   agentConfig:
     format: ignition
     additionalUserData:
@@ -1686,7 +1780,7 @@ spec:
             name: private-registry-cert
           insecureSkipVerify: false
   serverConfig:
-    cni: cilium
+    cni: calico
     cniMultusEnable: true
   preRKE2Commands:
     - modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
@@ -1803,75 +1897,26 @@ spec:
                 name: root
               group:
                 name: root
-            - path: /var/sriov-auto-filler.sh
-              overwrite: true
-              contents:
-                inline: |
-                  #!/bin/bash
-                  cat <<- EOF > /var/sriov-networkpolicy-template.yaml
-                  apiVersion: sriovnetwork.openshift.io/v1
-                  kind: SriovNetworkNodePolicy
-                  metadata:
-                    name: atip-RESOURCENAME
-                    namespace: sriov-network-operator
-                  spec:
-                    nodeSelector:
-                      feature.node.kubernetes.io/network-sriov.capable: "true"
-                    resourceName: RESOURCENAME
-                    deviceType: DRIVER
-                    numVfs: NUMVF
-                    mtu: 1500
-                    nicSelector:
-                      pfNames: ["PFNAMES"]
-                      deviceID: "DEVICEID"
-                      vendor: "VENDOR"
-                      rootDevices:
-                        - PCIADDRESS
-                  EOF
-
-                  export KUBECONFIG=/etc/rancher/rke2/rke2.yaml; export KUBECTL=/var/lib/rancher/rke2/bin/kubectl
-                  while [ $(${KUBECTL} --kubeconfig=${KUBECONFIG} get sriovnetworknodestates.sriovnetwork.openshift.io -n sriov-network-operator -ojson | jq -r '.items[].status.syncStatus') != "Succeeded" ]; do sleep 1; done
-                  input=$(${KUBECTL} --kubeconfig=${KUBECONFIG} get cm sriov-custom-auto-config -n sriov-network-operator -ojson | jq -r '.data."config.json"')
-                  jq -c '.[]' <<< $input | while read i; do
-                    interface=$(echo $i | jq -r '.interface')
-                    pfname=$(echo $i | jq -r '.pfname')
-                    pciaddress=$(${KUBECTL} --kubeconfig=${KUBECONFIG} get sriovnetworknodestates.sriovnetwork.openshift.io -n sriov-network-operator -ojson | jq -r ".items[].status.interfaces[]|select(.name==\"$interface\")|.pciAddress")
-                    vendor=$(${KUBECTL} --kubeconfig=${KUBECONFIG} get sriovnetworknodestates.sriovnetwork.openshift.io -n sriov-network-operator -ojson | jq -r ".items[].status.interfaces[]|select(.name==\"$interface\")|.vendor")
-                    deviceid=$(${KUBECTL} --kubeconfig=${KUBECONFIG} get sriovnetworknodestates.sriovnetwork.openshift.io -n sriov-network-operator -ojson | jq -r ".items[].status.interfaces[]|select(.name==\"$interface\")|.deviceID")
-                    resourceName=$(echo $i | jq -r '.resourceName')
-                    driver=$(echo $i | jq -r '.driver')
-                    sed -e "s/RESOURCENAME/$resourceName/g" \
-                        -e "s/DRIVER/$driver/g" \
-                        -e "s/PFNAMES/$pfname/g" \
-                        -e "s/VENDOR/$vendor/g" \
-                        -e "s/DEVICEID/$deviceid/g" \
-                        -e "s/PCIADDRESS/$pciaddress/g" \
-                        -e "s/NUMVF/$(echo $i | jq -r '.numVFsToCreate')/g" /var/sriov-networkpolicy-template.yaml > /var/lib/rancher/rke2/server/manifests/$resourceName.yaml
-                  done
-              mode: 0755
-              user:
-                name: root
-              group:
-                name: root
         kernel_arguments:
           should_exist:
             - intel_iommu=on
-            - intel_pstate=passive
-            - processor.max_cstate=1
-            - intel_idle.max_cstate=0
             - iommu=pt
+            - idle=poll
             - mce=off
             - hugepagesz=1G hugepages=40
             - hugepagesz=2M hugepages=0
             - default_hugepagesz=1G
-            - kthread_cpus=${NON-ISOLATED_CPU_CORES}
             - irqaffinity=${NON-ISOLATED_CPU_CORES}
-            - isolcpus=${ISOLATED_CPU_CORES}
+            - isolcpus=domain,nohz,managed_irq,${ISOLATED_CPU_CORES}
             - nohz_full=${ISOLATED_CPU_CORES}
             - rcu_nocbs=${ISOLATED_CPU_CORES}
             - rcu_nocb_poll
             - nosoftlockup
+            - nowatchdog
             - nohz=on
+            - nmi_watchdog=0
+            - skew_tick=1
+            - quiet
         systemd:
           units:
             - name: rke2-preinstall.service
@@ -1906,6 +1951,19 @@ spec:
                 ExecStartPost=/bin/sh -c "systemctl enable tuned.service"
                 [Install]
                 WantedBy=multi-user.target
+            - name: performance-settings.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=performance-settings
+                Wants=network-online.target
+                After=network.target network-online.target cpu-partitioning.service
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStart=/bin/sh -c "/opt/performance-settings/performance-settings.sh"
+                [Install]
+                WantedBy=multi-user.target
             - name: sriov-custom-auto-vfs.service
               enabled: true
               contents: |
@@ -1919,7 +1977,7 @@ spec:
                 TimeoutStartSec=900
                 ExecStart=/bin/sh -c "while ! /var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml wait --for condition=ready nodes --all ; do sleep 2 ; done"
                 ExecStartPost=/bin/sh -c "while [ $(/var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml get sriovnetworknodestates.sriovnetwork.openshift.io --ignore-not-found --no-headers -A | wc -l) -eq 0 ]; do sleep 1; done"
-                ExecStartPost=/bin/sh -c "/var/sriov-auto-filler.sh"
+                ExecStartPost=/bin/sh -c "/opt/sriov/sriov-auto-filler.sh"
                 RemainAfterExit=yes
                 KillMode=process
                 [Install]
