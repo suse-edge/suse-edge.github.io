@@ -17,6 +17,7 @@ The directed network provisioning deployment method is used, as described in the
 The following topics are covered in this section:
 
 * <<kernel-image-for-real-time,Kernel image for real time>>: Kernel image to be used by the real-time kernel.
+* <<kernel-args,Kernel arguments for low latency and high performance>>: Kernel arguments to be used by the real-time kernel for maximum performance and low latency running telco workloads.
 * <<cpu-tuned-configuration,CPU tuned configuration>>: Tuned configuration to be used by the real-time kernel.
 * <<cni-configuration,CNI configuration>>: CNI configuration to be used by the Kubernetes cluster.
 * <<sriov,SR-IOV configuration>>: SR-IOV configuration to be used by the Kubernetes workloads.
@@ -60,6 +61,38 @@ In our case, if you have installed a real-time image like `SLE Micro RT`, kernel
 For more information about the real-time kernel, visit https://www.suse.com/products/realtime/[SUSE Real Time].
 ====
 
+[#kernel-args]
+=== Kernel arguments for low latency and high performance
+
+The kernel arguments are important to be configured to enable the real-time kernel to work properly giving the best performance and low latency to run telco workloads.  There are some important concepts to keep in mind when configuring the kernel arguments for this use case:
+
+* Remove `kthread_cpus` when using SUSE real-time kernel. This parameter controls on which CPUs kernel threads are created. It also controls which CPUs are allowed for PID 1 and for loading kernel modules (the kmod user-space helper). This parameter is not
+recognized and does not have any effect.
+
+* Add `domain,nohz,managed_irq` flags to `isolcpus` kernel argument. Without any flags, `isolcpus` is equivalent to specifying only the `domain` flag. This isolates the specified CPUs from scheduling, including kernel tasks. The `nohz` flag stops the scheduler tick on the specified CPUs (if only one task is runnable on a CPU), and the `managed_irq` flag avoids routing
+managed external (device) interrupts at the specified CPUs.
+
+* Remove `intel_pstate=passive`. This option configures `intel_pstate` to work with generic cpufreq governors, but to make this work, it disables hardware-managed P-states (`HWP`) as a side effect. To reduce the hardware latency, this option is not recommended for real-time workloads.
+
+* Replace `intel_idle.max_cstate=0 processor.max_cstate=1` with `idle=poll`. To avoid C-State transitions, the `idle=poll` option is used to disable the C-State transitions and keep the CPU in the highest C-State. The `intel_idle.max_cstate=0` option disables `intel_idle`, so `acpi_idle` is used, and `acpi_idle.max_cstate=1` then sets max C-state for acpi_idle.
+On x86_64 architectures, the first ACPI C-State is always `POLL`, but it uses a `poll_idle()` function, which may introduce some tiny latency by reading the clock periodically, and restarting the main loop in `do_idle()` after a timeout (this also involves clearing and setting the `TIF_POLL` task flag).
+In contrast, `idle=poll` runs in a tight loop, busy-waiting for a task to be rescheduled. This minimizes the latency of exiting the idle state, but at the cost of keeping the CPU running at full speed in the idle thread.
+
+* Disable C1E in BIOS. This option is important to disable the C1E state in the BIOS to avoid the CPU from entering the C1E state when idle. The C1E state is a low-power state that can introduce latency when the CPU is idle.
+
+* Add `nowatchdog` to disable the soft-lockup watchdog which is implemented as a timer running in the timer hard-interrupt context. When it expires (i.e. a soft lockup is detected), it will print a warning (in the hard interrupt context), running any latency targets. Even if it never expires, it goes onto the timer list, slightly increasing the overhead of every timer interrupt.
+This option also disables the NMI watchdog, so NMIs cannot interfere.
+
+* Add `nmi_watchdog=0`. This option disables only the NMI watchdog.
+
+This is an example of the kernel argument list including the aforementioned adjustments:
+
+[,shell]
+----
+GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
+----
+
+
 [#cpu-tuned-configuration]
 === CPU tuned configuration
 
@@ -71,7 +104,7 @@ To enable and configure this feature, the first thing is to create a profile for
 ----
 $ echo "export tuned_params" >> /etc/grub.d/00_tuned
 
-$ echo "isolated_cores=1-30,33-62" >> /etc/tuned/cpu-partitioning-variables.conf
+$ echo "isolated_cores=1-18,21-38" >> /etc/tuned/cpu-partitioning-variables.conf
 
 $ tuned-adm profile cpu-partitioning
 Tuned (re)started, changes applied.
@@ -86,8 +119,8 @@ The following options are important to be customized with your current hardware 
 | parameter | value | description
 
 | isolcpus
-| 1-30,33-62
-| Isolate the cores 1-30 and 33-62
+| domain,nohz,managed_irq,1-18,21-38
+| Isolate the cores 1-18 and 21-38
 
 | skew_tick
 | 1
@@ -98,28 +131,28 @@ The following options are important to be customized with your current hardware 
 | This option allows the kernel to run the timer tick on a single CPU when the system is idle.
 
 | nohz_full
-| 1-30,33-62
+| 1-18,21-38
 | kernel boot parameter is the current main interface to configure full dynticks along with CPU Isolation.
 
 | rcu_nocbs
-| 1-30,33-62
+| 1-18,21-38
 | This option allows the kernel to run the RCU callbacks on a single CPU when the system is idle.
 
-| kthread_cpus
-| 0,31,32,63
-| This option allows the kernel to run the kthreads on a single CPU when the system is idle.
-
 | irqaffinity
-| 0,31,32,63
+| 0,19,20,39
 | This option allows the kernel to run the interrupts on a single CPU when the system is idle.
 
-| processor.max_cstate
-| 1
-| This option prevents the CPU from dropping into a sleep state when idle
+| idle
+| poll
+| This minimizes the latency of exiting the idle state, but at the cost of keeping the CPU running at full speed in the idle thread.
 
-| intel_idle.max_cstate
+| nmi_watchdog
 | 0
-| This option disables the intel_idle driver and allows acpi_idle to be used
+| This option disables only the NMI watchdog.
+
+| nowatchdog
+|
+| This option disables the soft-lockup watchdog which is implemented as a timer running in the timer hard-interrupt context.
 |===
 
 With the values shown above, we are isolating 60 cores, and we are using four cores for the OS.
@@ -130,7 +163,7 @@ Edit the `/etc/default/grub` file and add the parameters mentioned above:
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="intel_iommu=on intel_pstate=passive processor.max_cstate=1 intel_idle.max_cstate=0 iommu=pt usbcore.autosuspend=-1 selinux=0 enforcing=0 nmi_watchdog=0 crashkernel=auto softlockup_panic=0 audit=0 mce=off hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 default_hugepagesz=1G kthread_cpus=0,31,32,63 irqaffinity=0,31,32,63 isolcpus=1-30,33-62 skew_tick=1 nohz_full=1-30,33-62 rcu_nocbs=1-30,33-62 rcu_nocb_poll"
+GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
 ----
 
 Update the GRUB configuration:
@@ -146,6 +179,16 @@ To validate that the parameters are applied after the reboot, the following comm
 ----
 $ cat /proc/cmdline
 ----
+
+There is another script that can be used to tune the CPU configuration, which basically is doing the following steps:
+
+* Set the CPU governor to `performance`.
+* Unset the timer migration to the isolated CPUs.
+* Migrate the kdaemon threads to the housekeeping CPUs.
+* Set the isolated CPUs latency to the lowest possible value.
+* Delay the vmstat updates to 300 seconds.
+
+The script is available at https://raw.githubusercontent.com/suse-edge/atip/refs/heads/release-3.1/telco-examples/edge-clusters/dhcp-less/eib/custom/files/performance-settings.sh[SUSE ATIP Github repository - performance-settings.sh].
 
 [#cni-configuration]
 === CNI Configuration
@@ -324,7 +367,7 @@ spec:
       serviceAccountName: sriov-device-plugin
       containers:
       - name: kube-sriovdp
-        image: rancher/hardened-sriov-network-device-plugin:v3.5.1-build20231009-amd64
+        image: rancher/hardened-sriov-network-device-plugin:v3.7.0-build20240816
         imagePullPolicy: IfNotPresent
         args:
         - --log-dir=sriovdp
@@ -658,7 +701,7 @@ The following steps will show how to enable `DPDK` and how to create `VFs` from 
 
 [,shell]
 ----
-$ transactional-update pkg install dpdk22 dpdk22-tools libdpdk-23
+$ transactional-update pkg install dpdk dpdk-tools libdpdk-23
 $ reboot
 ----
 
@@ -683,7 +726,7 @@ To enable the parameters, add them to the `/etc/default/grub` file:
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="intel_iommu=on intel_pstate=passive processor.max_cstate=1 intel_idle.max_cstate=0 iommu=pt usbcore.autosuspend=-1 selinux=0 enforcing=0 nmi_watchdog=0 crashkernel=auto softlockup_panic=0 audit=0 mce=off hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 default_hugepagesz=1G kthread_cpus=0,31,32,63 irqaffinity=0,31,32,63 isolcpus=1-30,33-62 skew_tick=1 nohz_full=1-30,33-62 rcu_nocbs=1-30,33-62 rcu_nocb_poll"
+GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
 ----
 
 Update the GRUB configuration and reboot the system to apply the changes:
@@ -774,7 +817,7 @@ Modify the GRUB file `/etc/default/grub` to add them to the kernel command line:
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="intel_iommu=on intel_pstate=passive processor.max_cstate=1 intel_idle.max_cstate=0 iommu=pt usbcore.autosuspend=-1 selinux=0 enforcing=0 nmi_watchdog=0 crashkernel=auto softlockup_panic=0 audit=0 mce=off hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 default_hugepagesz=1G kthread_cpus=0,31,32,63 irqaffinity=0,31,32,63 isolcpus=1-30,33-62 skew_tick=1 nohz_full=1-30,33-62 rcu_nocbs=1-30,33-62 rcu_nocb_poll"
+GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
 ----
 
 Update the GRUB configuration and reboot the system to apply the changes:
@@ -885,7 +928,7 @@ Modify the GRUB file `/etc/default/grub` to add them to the kernel command line:
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="intel_iommu=on intel_pstate=passive processor.max_cstate=1 intel_idle.max_cstate=0 iommu=pt usbcore.autosuspend=-1 selinux=0 enforcing=0 nmi_watchdog=0 crashkernel=auto softlockup_panic=0 audit=0 mce=off hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 default_hugepagesz=1G kthread_cpus=0,31,32,63 irqaffinity=0,31,32,63 isolcpus=1-30,33-62 skew_tick=1 nohz_full=1-30,33-62 rcu_nocbs=1-30,33-62 rcu_nocb_poll"
+GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
 ----
 
 Update the GRUB configuration and reboot the system to apply the changes:
@@ -1077,9 +1120,10 @@ metadata:
   name: metallb
   namespace: kube-system
 spec:
-  repo: https://metallb.github.io/metallb/
-  chart: metallb
+  chart: oci://registry.suse.com/edge/3.1/metallb-chart
   targetNamespace: metallb-system
+  version: 0.14.9
+  createNamespace: true
 ---
 apiVersion: helm.cattle.io/v1
 kind: HelmChart
@@ -1087,9 +1131,10 @@ metadata:
   name: endpoint-copier-operator
   namespace: kube-system
 spec:
-  repo: https://suse-edge.github.io/endpoint-copier-operator
-  chart: endpoint-copier-operator
+  chart: oci://registry.suse.com/edge/3.1/endpoint-copier-operator-chart
   targetNamespace: endpoint-copier-operator
+  version: 0.2.1
+  createNamespace: true
 EOF
 ----
 
