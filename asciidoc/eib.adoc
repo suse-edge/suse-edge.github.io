@@ -1,0 +1,123 @@
+= *Edge Image Builder Tips and Tricks*
+
+=== This is a Work In Progress
+
+.Common 
+- Podman machines are generally low on resources (especially on MacOS), therefore you might need to increase the machine's resources to run more competitive tasks (for example downloading RPMs).
+- Make sure you're building an image for the appropriate architecture, especially if you're not on a x86_64 environment, as the installation might complete, but the applications will not start, in the best case scenario.
+
+----
+image:
+  arch: aarch64
+  imageType: iso
+  baseImage: slemicro.iso
+  outputImageName: single-node-k3s.iso
+----
+
+.Kubernetes
+- You can't create an image for a multi node kubernetes cluster without setting up a networking section in your definition file, more information https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md#kubernetes[here]
+- You can't create an image for a multi node kubernetes cluster without setting up an apiVIP (even better add an apiHost to the setup) in the network section of your definition file, more information https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md#kubernetes[here]
+
+----
+kubernetes:
+  version: v1.31.1+k3s1
+  network:
+    apiVIP: 192.168.64.11
+    apiHost: 192.168.64.11
+----
+
+- When creating an image for a multi node kubernetes cluster you need to have a way to declare which machine gets which hostname and if it's a server or agent. While the server/agent configuration is managed in the definition file, for the general networking and setting up proper hostnames for the machines you should add the network configuration files in a networking directory. The easiest approach is to use the https://github.com/suse-edge/nm-configurator[nm-configurator] approach 
+
+----
+Example:
+Definition file excerpt:
+
+---
+kubernetes:
+  version: v1.30.4+k3s1
+  network:
+    apiVIP: 192.168.64.11
+  nodes:
+    - hostname: node1.suse.com
+      type: server
+      initializer: true
+    - hostname: node2.suse.com
+      type: agent
+---
+
+- Network files location:
+├── definition.yaml
+└── network
+    ├── node1.suse.com.yaml
+    └── node2.suse.com.yaml
+
+node1.suse.com.yaml contents:
+---
+routes:
+  config:
+  - destination: 0.0.0.0/0
+    metric: 100
+    next-hop-address: 192.168.64.1
+    next-hop-interface: eth0
+    table-id: 254
+  - destination: 192.168.100.0/24
+    metric: 100
+    next-hop-address:
+    next-hop-interface: eth0
+    table-id: 254
+dns-resolver:
+  config:
+    server:
+    - 192.168.64.1
+    - 8.8.8.8
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mac-address: 34:8A:B1:4B:16:E1
+  ipv4:
+    address:
+    - ip: 192.168.64.21
+      prefix-length: 24
+    dhcp: false
+    enabled: true
+  ipv6:
+    enabled: false
+---
+
+node2.suse.com.yaml contents:
+---
+routes:
+  config:
+  - destination: 0.0.0.0/0
+    metric: 100
+    next-hop-address: 192.168.64.1
+    next-hop-interface: eth0
+    table-id: 254
+  - destination: 192.168.100.0/24
+    metric: 100
+    next-hop-address:
+    next-hop-interface: eth0
+    table-id: 254
+dns-resolver:
+  config:
+    server:
+    - 192.168.64.1
+    - 8.8.8.8
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mac-address: 34:8A:B1:4B:16:E2
+  ipv4:
+    address:
+    - ip: 192.168.64.22
+      prefix-length: 24
+    dhcp: false
+    enabled: true
+  ipv6:
+    enabled: false
+---
+
+----
+
