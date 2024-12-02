@@ -12,26 +12,35 @@ ifdef::env-github[]
 endif::[]
 
 
+Many times workloads running in edge environments need to have a way for users to interact with them through a graphical interface. To enable these workloads in SUSE Edge, we provide a set of containers and a helm chart to run your graphical applications within K3s or RKE2. 
 
-TODO: write intro
+Running your kiosk (or other HID) applications this way allows for more explicit security boundaries along with allowing for a wider range of languages/frameworks when building your app.
 
 In this guide, we will demonstrate how to manage these workloads in a secure, scalable, and maintainable way. 
 
 == Architecture
 
-TODO
+image::kiosk-architecture.png[]
+
+The Kubernetes Pod contains the three containers (X11, PulseAudio, and the workload itself)
+
+The workload communicates with both the X11 and PulseAudio containers through a unix socket that's created in EmptyDir to allow communication between containers. They also use an EmptyDir to share the Xauthority token.
+
+Both the PulseAudio and X11 containers use udev to communicate with the hardware. (That's a slight oversimplification...)
 
 == Prerequisites
 
 To run this, you will need a system with:
-- SLE Micro 5.5+ 
-- Either K3s or RKE2
+- SLE Micro 5.5+
+- Either K3s or RKE2 1.29+
 - Helm installed (if not using EIB or Fleet)
-- A display attached (when running in a VM, make sure to use a virtual display instead of just the console)
+- A display attached (when running in a VM, make sure to use a virtual display instead of the "console" output)
 
 == Deployment
 
-The preferred way to deploy on Kubernetes is through the helm chart. TODO add link to chart once published. 
+The preferred way to deploy on Kubernetes is through the helm chart.
+
+TODO add link to chart once published. 
 
 We need to install helm first with:
 [,bash]
@@ -53,22 +62,89 @@ To change the URL that's loaded:
 helm upgrade --install kiosk --namespace kiosk --create-namespace oci://link-to-chart --version=0.1.0 --set workload.url=http://<svcname>.svc.<namespace>.cluster.local
 ----
 
-=== Deployment with Fleet
-
-
 
 == Custom Workloads
 
-By default, we run Firefox in kiosk mode and use the "URL"
+By default, the helm chart runs Firefox in kiosk mode and uses the `workload.url` value to specify what page to load. 
 
-== Integrations
+If you want to replace Firefox with your own application, you need to build your application into an OCI container image then specify it through the `workload.image.repository` and `workload.image.tag` values. 
 
-=== Integration with EIB
+The application container needs the appropriate libraries to be able to communicate with X11. As an example, here are the libraries required for Electron apps:
 
-With airgapped/disconnected devices, it might be best to use the Edge Image Builder to create an image that installs k3s along with your GUI workload
+- `libX11-xcb1`
+- `libgtk-3-0`
+- `mozilla-nss`
+- `xorg-x11-fonts`
+- `libpulse0`
+- `libavcodec58`
+- `libasound2`
+- `npm-default`
+- `nodejs-default`
 
-=== Integration with Akri
+## Flow of Display Control on System Boot
 
-If you have more than one node in your cluster, you may want to only run this workload on nodes that have a display attached.
+When the server is starting up, here's the order of which components control what's being shown on the display.
 
-TODO: once I have a flag to use Akri instead of DaemonSet
+- UEFI (Firmware)
+
+The first thing you see is determined by the system's firmware. Different system manufactures provide more or less control over this portion of the process.
+
+- Grub Bootloader
+
+Grub then takes over from the firmware and shows the boot menu. This step can be branded or skipped depending on needs.
+
+- Linux Framebuffer device
+
+Once the system starts booting and execution is handed from the bootloader to the linux kernel, the system will start displaying logs or other basic graphics. The logs can be removed by adding `quiet` to the kernel arguments and we can write an image directly to the framebuffer.
+
+- X11 
+
+When X11 starts up, it will take over the display and show a desktop. When we don't run a taskbar or any applications, you will only see the background. By replacing the background, you can change what's displayed while the application is starting.
+
+- Application
+
+Lastly, the application itself will be composited on top of the background. For most kiosk applications, you will likely want to have this be fullscreen so the background becomes hidden.
+
+
+== FAQs
+
+=== How can I adjust what's displayed during boot?
+
+There are several parts of the boot process that can be branded based on your individual needs.
+
+
+TODO: The Grub2 menu can be bypassed or branded [...]
+
+
+Adding `quiet` to your kernel bootargs will remove the text that is seen on boot of linux systems.
+
+Masking `console-getty.service` and `getty@tty1.service` will remove the login prompt. 
+
+Doing both of these will show a blank screen with a flashing cursor in the top-left corner. To show something on screen between the GRUB splash screen, you could use `plymouth` or just `cat` a raw framebuffer file to `/dev/fb0`. (Check out https://github.com/zqb-all/convertfb for a tool on converting images to the right format)
+
+=== How can I turning off key combinations?
+
+To disallow closing the application or otherwise tampering with the kiosk, it can be useful to remap or turn off certain keys. This can be done using (xmodmap)[https://linux.die.net/man/1/xmodmap]
+
+The helm chart allows for customizing this file with values that looks like this: 
+
+[,yaml]
+```
+X11:
+  keyboardModMap: |
+    clear control
+    clear mod1
+    clear mod2 
+    clear mod3
+    clear mod4
+    clear mod5
+    keycode  66 =
+    keycode 108 =
+    keycode 133 =
+    keycode 134 =
+    keycode 150 =
+    keycode 204 =
+    keycode 205 =
+    keycode 206 =
+    keycode 207 =
+```
