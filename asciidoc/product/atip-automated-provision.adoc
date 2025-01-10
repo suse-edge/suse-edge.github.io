@@ -635,6 +635,11 @@ where:
 - `$\{BMC_MAC\}` — The `MAC` address of the new bare-metal host to be used.
 - `$\{BMC_ADDRESS\}` — The `URL` for the bare-metal host `BMC` (for example, `redfish-virtualmedia://192.168.200.75/redfish/v1/Systems/1/`). To learn more about the different options available depending on your hardware provider, check the following https://github.com/metal3-io/baremetal-operator/blob/main/docs/api.md[link].
 
+[NOTE]
+====
+If no network configuration for the host has been specified, either at image build time or through the `BareMetalHost` definition, an autoconfiguration mechanism (DHCP, DHCPv6, SLAAC) will be used. For more details or complex configurations, check the xref:advanced-network-configuration[].
+====
+
 Once the file is created, the following command has to be executed in the management cluster to start enrolling the new bare-metal host in the management cluster:
 
 [,shell]
@@ -691,6 +696,40 @@ spec:
     kind: Metal3Cluster
     name: single-node-cluster
 ----
+
+For a deployment with dual-stack Pods and Services, the following definition can be used instead:
+
+[,yaml]
+----
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks:
+        - 192.168.0.0/18
+        - fd00:bad:cafe::/48
+    services:
+      cidrBlocks:
+        - 10.96.0.0/12
+        - fd00:bad:bad:cafe::/112
+  controlPlaneRef:
+    apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+    kind: RKE2ControlPlane
+    name: single-node-cluster
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: Metal3Cluster
+    name: single-node-cluster
+----
+
+[IMPORTANT]
+====
+IPv6 and dual-stack deployments are in tech preview status and are not officially supported.
+====
 
 The `Metal3Cluster` object specifies the control-plane endpoint (replacing the `$\{DOWNSTREAM_CONTROL_PLANE_IP\}`) to be configured and the `noCloudProvider` because a bare-metal node is used.
 
@@ -904,6 +943,12 @@ Where:
 - `$\{BMC_NODE1_PASSWORD\}` — The password for the BMC of the first bare-metal host.
 - `$\{BMC_NODE1_MAC\}` — The MAC address of the first bare-metal host to be used.
 - `$\{BMC_NODE1_ADDRESS\}` — The URL for the first bare-metal host BMC (for example, `redfish-virtualmedia://192.168.200.75/redfish/v1/Systems/1/`). To learn more about the different options available depending on your hardware provider, check the following https://github.com/metal3-io/baremetal-operator/blob/main/docs/api.md[link].
+
+[NOTE]
+====
+* If no network configuration for the host has been specified, either at image build time or through the `BareMetalHost` definition, an autoconfiguration mechanism (DHCP, DHCPv6, SLAAC) will be used. For more details or complex configurations, check the xref:advanced-network-configuration[].
+* Multi-node dual-stack or IPv6 only clusters are not yet supported.
+====
 
 Once the file is created, the following command must be executed in the management cluster to start enrolling the bare-metal hosts in the management cluster:
 
@@ -1203,7 +1248,7 @@ $ kubectl apply -f capi-provisioning-example.yaml
 [#advanced-network-configuration]
 === Advanced Network Configuration
 
-The directed network provisioning workflow allows downstream clusters network configurations such as static IPs, bonding, VLAN's, etc.
+The directed network provisioning workflow allows for specific network configurations in downstream clusters, such as static IPs, bonding, VLANs, IPv6, etc.
 
 The following sections describe the additional steps required to enable provisioning downstream clusters using advanced network configuration.
 
@@ -1259,8 +1304,7 @@ stringData:
         next-hop-interface: ${CONTROLPLANE_INTERFACE}
 ----
 
-As you can see, the example shows the configuration to enable the interface with static IPs, as well as the configuration to enable the VLAN using the base interface.
-Any other `nmstate` example could be defined to be used to configure the network for the downstream cluster to adapt to the specific requirements, where the following variables have to be replaced with real values:
+As you can see, the example shows the configuration to enable the interface with static IPs, as well as the configuration to enable the VLAN using the base interface, once the following variables are replaced with the actual values, according to your infrastructure:
 
 - `$\{CONTROLPLANE1_INTERFACE\}` — The control-plane interface to be used for the edge cluster (for example, `eth0`). Including `identifier: mac-address` the naming is inspected automatically by the MAC address so any interface name can be used.
 - `$\{CONTROLPLANE1_IP\}` — The IP address to be used as an endpoint for the edge cluster (must match with the kubeapi-server endpoint).
@@ -1270,7 +1314,72 @@ Any other `nmstate` example could be defined to be used to configure the network
 - `$\{DNS_SERVER\}` — The DNS to be used for the edge cluster (for example, `192.168.100.2`).
 - `$\{VLAN_ID\}` — The VLAN ID to be used for the edge cluster (for example, `100`).
 
-Lastly, regardless of the specifics of the network configuration, do not forget to reference the secret by appending `preprovisioningNetworkDataName` at the end of the `BaremetalHost` object to be used to enroll the host in the management cluster:
+Any other `nmstate`-compliant definition can be used to configure the network for the downstream cluster to adapt to the specific requirements. For example, it is possible to specify a static dual-stack configuration:
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: controlplane-0-networkdata
+type: Opaque
+stringData:
+  networkData: |
+    interfaces:
+    - name: ${CONTROLPLANE_INTERFACE}
+      type: ethernet
+      state: up
+      mac-address: ${CONTROLPLANE_MAC}
+      ipv4:
+        enabled: true
+        dhcp: false
+        address:
+        - ip: ${CONTROLPLANE_IP_V4}
+          prefix-length: ${CONTROLPLANE_PREFIX_V4}
+      ipv6:
+        enabled: true
+        dhcp: false
+        autoconf: false
+        address:
+        - ip: ${CONTROLPLANE_IP_V6}
+          prefix-length: ${CONTROLPLANE_PREFIX_V6}
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-address: ${CONTROLPLANE_GATEWAY_V4}
+        next-hop-interface: ${CONTROLPLANE_INTERFACE}
+      - destination: ::/0
+        next-hop-address: ${CONTROLPLANE_GATEWAY_V6}
+        next-hop-interface: ${CONTROLPLANE_INTERFACE}
+    dns-resolver:
+      config:
+        server:
+        - ${DNS_SERVER_V4}
+        - ${DNS_SERVER_V6}
+----
+
+As for the previous example, replace the following variables with actual values, according to your infrastructure:
+
+- `$\{CONTROLPLANE_IP_V4\}` - the IPv4 address to assign to the host
+- `$\{CONTROLPLANE_PREFIX_V4\}` - the IPv4 prefix of the network to which the host IP belongs
+- `$\{CONTROLPLANE_IP_V6\}` - the IPv6 address to assign to the host
+- `$\{CONTROLPLANE_PREFIX_V6\}` - the IPv6 prefix of the network to which the host IP belongs
+- `$\{CONTROLPLANE_GATEWAY_V4\}` - the IPv4 address of the gateway for the traffic matching the default route
+- `$\{CONTROLPLANE_GATEWAY_V6\}` - the IPv6 address of the gateway for the traffic matching the default route
+- `$\{CONTROLPLANE_INTERFACE\}` - the name of the interface to assign the addresses to and to use for egress traffic matching the default route, for both IPv4 and IPv6
+- `$\{DNS_SERVER_V4\}` and/or `$\{DNS_SERVER_V6\}` - the IP address(es) of the DNS server(s) to use, which can be specified as single or multiple entries. Both IPv4 and/or IPv6 addresses are supported
+
+[IMPORTANT]
+====
+IPv6 and dual-stack deployments are in tech preview status and are not officially supported.
+====
+
+[NOTE]
+====
+You can refer to https://github.com/suse-edge/atip/tree/main/telco-examples/edge-clusters[the ATIP repo] for more complex examples, including IPv6 only and dual-stack configurations.
+====
+
+Lastly, regardless of the network configuration details, ensure that the secret is referenced by appending `preprovisioningNetworkDataName` to the `BaremetalHost` object to successfully enroll the host in the management cluster.
 
 [,yaml]
 ----
