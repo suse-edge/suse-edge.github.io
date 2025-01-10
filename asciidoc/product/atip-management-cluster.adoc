@@ -86,6 +86,11 @@ Also, as a prerequisite to deploy a highly available management cluster, you nee
 - `ingressVIP` for the Ingress VIP Address (consumed, for example, by the Rancher UI).
 - `metal3VIP` for the Metal3 VIP Address.
 
+[NOTE]
+====
+Currently only a single IPv4 address can be used for VIP addresses. This limitation will be removed in a future release.
+====
+
 [#mgmt-cluster-directory-structure]
 ==== Directory structure
 
@@ -903,10 +908,10 @@ The name of the file must match the host name defined in the `mgmt-cluster.yaml`
 
 If you need to customize the networking configuration, for example, to use a specific static IP address (DHCP-less scenario), you can use the `mgmt-cluster-node1.yaml` file under the `network` folder. It contains the following information:
 
-* `$\{MGMT_GATEWAY\}`: The gateway IP address.
-* `$\{MGMT_DNS\}`: The DNS server IP address.
+* `$\{MGMT_GATEWAY_V4/6\}`: The gateway IPv4/6 address.
+* `$\{MGMT_DNS_IP_V4/6\}`: The DNS server IPv4/6 address.
 * `$\{MGMT_MAC\}`: The MAC address of the network interface.
-* `$\{MGMT_NODE_IP\}`: The IP address of the management cluster.
+* `$\{MGMT_NODE_IP_V4/6\}`: The IPv4/6 address of the management cluster.
 
 [,yaml]
 ----
@@ -914,14 +919,17 @@ routes:
   config:
   - destination: 0.0.0.0/0
     metric: 100
-    next-hop-address: ${MGMT_GATEWAY}
+    next-hop-address: ${MGMT_GATEWAY_V4}
+    next-hop-interface: eth0
+    table-id: 254
+  - next-hop-address: ${MGMT_GATEWAY_V6}
     next-hop-interface: eth0
     table-id: 254
 dns-resolver:
   config:
     server:
-    - ${MGMT_DNS}
-    - 8.8.8.8
+    - ${MGMT_DNS_IP_V4}
+    - ${MGMT_DNS_IP_V6}
 interfaces:
 - name: eth0
   type: ethernet
@@ -929,16 +937,20 @@ interfaces:
   mac-address: ${MGMT_MAC}
   ipv4:
     address:
-    - ip: ${MGMT_NODE_IP}
+    - ip: ${MGMT_NODE_IP_V4}
       prefix-length: 24
     dhcp: false
     enabled: true
   ipv6:
-    enabled: false
-
+    address:
+    - ip: ${MGMT_NODE_IP_V6}
+      prefix-length: 64
+    autoconf: false
+    dhcp: false
+    enabled: true
 ----
 
-If you want to use DHCP to get the IP address, you can use the following configuration (the `MAC` address must be set properly using the `$\{MGMT_MAC\}` variable):
+If you want to use autoconfiguration to get the IP address (DHCP, DHCPv6, SLAAC), you can use the following configuration (the `MAC` address must be set properly using the `$\{MGMT_MAC\}` variable):
 
 [,yaml]
 ----
@@ -953,13 +965,16 @@ interfaces:
     dhcp: true
     enabled: true
   ipv6:
-    enabled: false
+    dhcp: true
+    autoconf: true
+    enabled: true
 ----
 
 [NOTE]
 ====
 - Depending on the number of nodes in the management cluster, you can create more files like `mgmt-cluster-node2.yaml`, `mgmt-cluster-node3.yaml`, etc. to configure the rest of the nodes.
 - The `routes` section is used to define the routing table for the management cluster.
+- Currently the connectivity to the host `BMC` as well as the communication between the management cluster and the Ironic Python Agent will still run on IPv4 only. This limitation will be removed in a future release.
 ====
 
 
