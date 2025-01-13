@@ -27,3 +27,7 @@ With [Epinio](epinio.io):
 ```bash
 epinio push -n docs --builder-image registry.opensuse.org/home/atgracey/cnbp/containers/builder:latest -e BP_DC_FILE=DC-edge
 ```
+
+## Sources for graphics
+
+The souce svg files for graphics and diagrams used in the documentation live in `graphics-sources` directory.
