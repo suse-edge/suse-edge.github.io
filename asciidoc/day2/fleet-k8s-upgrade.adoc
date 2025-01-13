@@ -1,0 +1,552 @@
+[#{cluster-type}-day2-fleet-k8s-upgrade]
+== Kubernetes version upgrade
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+:toc: auto
+
+ifeval::["{cluster-type}" == "downstream"]
+[IMPORTANT]
+====
+This section covers Kubernetes upgrades for downstream clusters that have *NOT* been created through a <<components-rancher,Rancher>> instance. For information on how to upgrade the Kubernetes version of `Rancher` created clusters, see link:https://ranchermanager.docs.rancher.com/{rancher-docs-version}/getting-started/installation-and-upgrade/upgrade-and-roll-back-kubernetes#upgrading-the-kubernetes-version[Upgrading and Rolling Back Kubernetes].
+====
+endif::[]
+
+This section describes how to perform a Kubernetes upgrade using <<components-fleet,Fleet>> and the <<components-system-upgrade-controller,System Upgrade Controller (SUC)>>.
+
+The following topics are covered as part of this section:
+
+. <<{cluster-type}-day2-fleet-k8s-upgrade-components>> - additional components used by the upgrade process.
+. <<{cluster-type}-day2-fleet-k8s-upgrade-overview>> - overview of the upgrade process.
+. <<{cluster-type}-day2-fleet-k8s-upgrade-requirements>> - requirements of the upgrade process.
+. <<{cluster-type}-day2-fleet-k8s-upgrade-plan-deployment>> - information on how to deploy `SUC plans`, responsible for triggering the upgrade process.
+
+[#{cluster-type}-day2-fleet-k8s-upgrade-components]
+=== Components
+
+This section covers the custom components that the `K8s upgrade` process uses over the default "Day 2" <<{cluster-type}-day2-fleet-components, components>>.
+
+[#{cluster-type}-day2-fleet-k8s-upgrade-components-rke2-upgrade]
+==== rke2-upgrade
+
+Image responsible for upgrading the RKE2 version of a specific node.
+
+Shipped through a Pod created by *SUC* based on a *SUC Plan*. The Plan should be located on each *cluster* that is in need of a RKE2 upgrade.
+
+For more information regarding how the `rke2-upgrade` image performs the upgrade, see the link:https://github.com/rancher/rke2-upgrade/tree/master[upstream] documentation.
+
+[#{cluster-type}-day2-fleet-k8s-upgrade-components-k3s-upgrade]
+==== k3s-upgrade
+
+Image responsible for upgrading the K3s version of a specific node.
+
+Shipped through a Pod created by *SUC* based on a *SUC Plan*. The Plan should be located on each *cluster* that is in need of a K3s upgrade.
+
+For more information regarding how the `k3s-upgrade` image performs the upgrade, see the link:https://github.com/k3s-io/k3s-upgrade[upstream] documentation.
+
+[#{cluster-type}-day2-fleet-k8s-upgrade-overview]
+=== Overview
+
+The Kubernetes distribution upgrade for {cluster-type} cluster nodes is done by utilizing `Fleet` and the `System Upgrade Controller (SUC)`.
+
+*Fleet* is used to deploy and manage `SUC plans` onto the desired cluster. 
+
+[NOTE]
+====
+`SUC plans` are link:https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/[custom resources] that describe the steps that *SUC* needs to follow in order for a specific task to be executed on a set of nodes. For an example of how an `SUC plan` looks like, refer to the link:https://github.com/rancher/system-upgrade-controller?tab=readme-ov-file#example-plans[upstream repository].
+====
+
+The `K8s SUC plans` are shipped on each cluster by deploying a https://fleet.rancher.io/gitrepo-add[GitRepo] or https://fleet.rancher.io/bundle-add[Bundle] resource to a specific Fleet link:https://fleet.rancher.io/namespaces#gitrepos-bundles-clusters-clustergroups[workspace]. Fleet retrieves the deployed `GitRepo/Bundle` and deploys its contents (the `K8s SUC plans`) to the desired cluster(s).
+
+[NOTE]
+====
+`GitRepo/Bundle` resources are always deployed on the `management cluster`. Whether to use a `GitRepo` or `Bundle` resource depends on your use-case, check <<{cluster-type}-day2-fleet-determine-use-case>> for more information.
+====
+
+`K8s SUC plans` describe the following workflow:
+
+. Always link:https://kubernetes.io/docs/reference/kubectl/generated/kubectl_cordon/[cordon] the nodes before K8s upgrades.
+
+. Always upgrade `control-plane` nodes before `worker` nodes.
+
+. Always upgrade the `control-plane` nodes *one* node at a time and the `worker` nodes *two* nodes at a time.
+
+Once the `K8s SUC plans` are deployed, the workflow looks like this:
+
+. SUC reconciles the deployed `K8s SUC plans` and creates a `Kubernetes Job` on *each node*.
+
+. Depending on the Kubernetes distribution, the Job will create a Pod that runs either the <<{cluster-type}-day2-fleet-k8s-upgrade-components-rke2-upgrade, rke2-upgrade>> or the <<{cluster-type}-day2-fleet-k8s-upgrade-components-k3s-upgrade, k3s-upgrade>> image.
+
+. The created Pod will go through the following workflow:
+
+.. Replace the existing `rke2/k3s` binary on the node with the one from the `rke2-upgrade/k3s-upgrade` image.
+
+.. Kill the running `rke2/k3s` process.
+
+. Killing the `rke2/k3s` process triggers a restart, launching a new `rke2/k3s` process that runs the updated `rke2/k3s` binary. Resulting in an upgraded Kubernetes distribution version.
+
+Below you can find a diagram of the above description:
+
+image::fleet-day2-{cluster-type}-k8s-upgrade.png[]
+
+[#{cluster-type}-day2-fleet-k8s-upgrade-requirements]
+=== Requirements
+
+. *Backup your Kubernetes distribution:*
+
+.. For *RKE2 clusters*, see the link:https://docs.rke2.io/datastore/backup_restore[RKE2 Backup and Restore] documentation.
+
+.. For *K3s clusters*, see the link:https://docs.k3s.io/datastore/backup-restore[K3s Backup and Restore] documentation.
+
+. *Make sure that SUC Plan tolerations match node tolerations* - If your Kubernetes cluster nodes have custom *taints*, make sure to add link:https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/[tolerations] for those taints in the *SUC Plans*. By default *SUC Plans* have tolerations only for *control-plane* nodes. Default tolerations include: 
+
+* _CriticalAddonsOnly=true:NoExecute_
+
+* _node-role.kubernetes.io/control-plane:NoSchedule_
+
+* _node-role.kubernetes.io/etcd:NoExecute_
++
+[NOTE]
+====
+Any additional tolerations must be added under the `.spec.tolerations` section of each Plan. *SUC Plans* related to the Kubernetes version upgrade can be found in the link:https://github.com/suse-edge/fleet-examples[suse-edge/fleet-examples] repository under:
+
+* For *RKE2* - `fleets/day2/system-upgrade-controller-plans/rke2-upgrade`
+* For *K3s*  - `fleets/day2/system-upgrade-controller-plans/k3s-upgrade`
+
+*Make sure you use the Plans from a valid repository link:https://github.com/suse-edge/fleet-examples/releases[release] tag.*
+
+An example of defining custom tolerations for the RKE2 *control-plane* SUC Plan, would look like this:
+[,yaml]
+----
+apiVersion: upgrade.cattle.io/v1
+kind: Plan
+metadata:
+  name: rke2-upgrade-control-plane
+spec:
+  ...
+  tolerations:
+  # default tolerations
+  - key: "CriticalAddonsOnly"
+    operator: "Equal"
+    value: "true"
+    effect: "NoExecute"
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Equal"
+    effect: "NoSchedule"
+  - key: "node-role.kubernetes.io/etcd"
+    operator: "Equal"
+    effect: "NoExecute"
+  # custom toleration
+  - key: "foo"
+    operator: "Equal"
+    value: "bar"
+    effect: "NoSchedule"
+...
+----
+====
+
+[#{cluster-type}-day2-fleet-k8s-upgrade-plan-deployment]
+=== K8s upgrade - SUC plan deployment
+
+[IMPORTANT]
+====
+For environments previously upgraded using this procedure, users should ensure that *one* of the following steps is completed:
+
+* `Remove any previously deployed SUC Plans related to older Edge release versions from the {cluster-type} cluster` - can be done by removing the desired cluster from the existing `GitRepo/Bundle` link:https://fleet.rancher.io/gitrepo-targets#target-matching[target configuration], or removing the `GitRepo/Bundle` resource altogether.
+
+* `Reuse the existing GitRepo/Bundle resource` - can be done by pointing the resource's revision to a new tag that holds the correct fleets for the desired `suse-edge/fleet-examples` link:https://github.com/suse-edge/fleet-examples/releases[release].
+
+This is done in order to avoid clashes between `SUC Plans` for older Edge release versions.
+
+If users attempt to upgrade, while there are existing `SUC Plans` on the {cluster-type} cluster, they will see the following fleet error:
+
+[,bash]
+----
+Not installed: Unable to continue with install: Plan <plan_name> in namespace <plan_namespace> exists and cannot be imported into the current release: invalid ownership metadata; annotation validation error..
+----
+====
+
+As mentioned in the <<{cluster-type}-day2-fleet-k8s-upgrade-overview, Overview>> section, Kubernetes upgrades are done by shipping `SUC plans` to the desired cluster through one of the following ways:
+
+* Fleet `GitRepo` resource - <<{cluster-type}-day2-fleet-k8s-upgrade-plan-deployment-gitrepo>>.
+
+* Fleet `Bundle` resource - <<{cluster-type}-day2-fleet-k8s-upgrade-plan-deployment-bundle>>.
+
+To determine which resource you should use, refer to <<{cluster-type}-day2-fleet-determine-use-case>>.
+
+For use-cases where you wish to deploy the `K8s SUC plans` from a third-party GitOps tool, refer to <<{cluster-type}-day2-fleet-k8s-upgrade-plan-deployment-third-party>>
+
+[#{cluster-type}-day2-fleet-k8s-upgrade-plan-deployment-gitrepo]
+==== SUC plan deployment - GitRepo resource
+
+A *GitRepo* resource, that ships the needed `K8s SUC plans`, can be deployed in one of the following ways:
+
+. Through the `Rancher UI` - <<{cluster-type}-day2-fleet-k8s-upgrade-plan-deployment-gitrepo-rancher>> (when `Rancher` is available).
+
+. By <<{cluster-type}-day2-fleet-k8s-upgrade-plan-deployment-gitrepo-manual, manually deploying>> the resource to your `management cluster`.
+
+Once deployed, to monitor the Kubernetes upgrade process of the nodes of your targeted cluster, refer to the <<components-system-upgrade-controller-monitor-plans>> documentation.
+
+[#{cluster-type}-day2-fleet-k8s-upgrade-plan-deployment-gitrepo-rancher]
+===== GitRepo creation - Rancher UI
+
+To create a `GitRepo` resource through the Rancher UI, follow their official link:https://ranchermanager.docs.rancher.com/{rancher-docs-version}/integrations-in-rancher/fleet/overview#accessing-fleet-in-the-rancher-ui[documentation].
+
+The Edge team maintains ready to use fleets for both link:https://github.com/suse-edge/fleet-examples/tree/{release-tag-fleet-examples}/fleets/day2/system-upgrade-controller-plans/rke2-upgrade[rke2] and link:https://github.com/suse-edge/fleet-examples/tree/{release-tag-fleet-examples}/fleets/day2/system-upgrade-controller-plans/k3s-upgrade[k3s] Kubernetes distributions. Depending on your environment, this fleet could be used directly or as a template.
+
+[IMPORTANT]
+====
+Always use these fleets from a valid Edge link:https://github.com/suse-edge/fleet-examples/releases[release] tag.
+====
+
+For use-cases where no custom changes need to be included to the `SUC plans` that these fleets ship, users can directly refer the fleets from the `suse-edge/fleet-examples` repository.
+
+In cases where custom changes are needed (e.g. add custom tolerations), users should refer the fleets from a separate repository, allowing them to add the changes to the SUC plans as required.
+
+Configuration examples for a `GitRepo` resource using the fleets from `suse-edge/fleet-examples` repository:
+
+* link:https://github.com/suse-edge/fleet-examples/blob/{release-tag-fleet-examples}/gitrepos/day2/rke2-upgrade-gitrepo.yaml[RKE2]
+
+* link:https://github.com/suse-edge/fleet-examples/blob/{release-tag-fleet-examples}/gitrepos/day2/k3s-upgrade-gitrepo.yaml[K3s]
+
+[#{cluster-type}-day2-fleet-k8s-upgrade-plan-deployment-gitrepo-manual]
+===== GitRepo creation - manual
+
+. Pull the *GitRepo* resource:
+
+** For *RKE2* clusters:
++
+[,bash,subs="attributes"]
+----
+curl -o rke2-upgrade-gitrepo.yaml https://raw.githubusercontent.com/suse-edge/fleet-examples/refs/tags/{release-tag-fleet-examples}/gitrepos/day2/rke2-upgrade-gitrepo.yaml
+----
+
+** For *K3s* clusters:
++
+[,bash,subs="attributes"]
+----
+curl -o k3s-upgrade-gitrepo.yaml https://raw.githubusercontent.com/suse-edge/fleet-examples/refs/tags/{release-tag-fleet-examples}/gitrepos/day2/k3s-upgrade-gitrepo.yaml
+----
+
+ifeval::["{cluster-type}" == "downstream"]
+. Edit the *GitRepo* configuration, under `spec.targets` specify your desired target list. By default the `GitRepo` resources from the `suse-edge/fleet-examples` are *NOT* mapped to any downstream clusters.
+
+** To match all clusters change the default `GitRepo` *target* to:
++
+[,yaml]
+----
+spec:
+  targets:
+  - clusterSelector: {}
+----
+
+** Alternatively, if you want a more granular cluster selection see link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters]
+endif::[]
+
+ifeval::["{cluster-type}" == "management"]
+. Edit the *GitRepo* configuration:
+
+** Remove the `spec.targets` section - only needed for downstream clusters.
+
+*** For RKE2:
++
+[,bash]
+----
+# Example using sed
+sed -i.bak '/^  targets:/,$d' rke2-upgrade-gitrepo.yaml && rm -f rke2-upgrade-gitrepo.yaml.bak
+
+# Example using yq (v4+)
+yq eval 'del(.spec.targets)' -i rke2-upgrade-gitrepo.yaml
+----
+
+*** For K3s:
++
+[,bash]
+----
+# Example using sed
+sed -i.bak '/^  targets:/,$d' k3s-upgrade-gitrepo.yaml && rm -f k3s-upgrade-gitrepo.yaml.bak
+
+# Example using yq (v4+)
+yq eval 'del(.spec.targets)' -i k3s-upgrade-gitrepo.yaml
+----
+
+** Point the namespace of the `GitRepo` to the `{fleet-workspace}` namespace - done in order to deploy the resource on the management cluster.
+
+*** For RKE2:
++
+[,bash]
+----
+# Example using sed
+sed -i.bak 's/namespace: fleet-default/namespace: fleet-local/' rke2-upgrade-gitrepo.yaml && rm -f rke2-upgrade-gitrepo.yaml.bak
+
+# Example using yq (v4+)
+yq eval '.metadata.namespace = "fleet-local"' -i rke2-upgrade-gitrepo.yaml
+----
+
+*** For K3s:
++
+[,bash]
+----
+# Example using sed
+sed -i.bak 's/namespace: fleet-default/namespace: fleet-local/' k3s-upgrade-gitrepo.yaml && rm -f k3s-upgrade-gitrepo.yaml.bak
+
+# Example using yq (v4+)
+yq eval '.metadata.namespace = "fleet-local"' -i k3s-upgrade-gitrepo.yaml
+----
+endif::[]
+
+. Apply the *GitRepo* resources to your `management cluster`:
++
+[,bash]
+----
+# RKE2
+kubectl apply -f rke2-upgrade-gitrepo.yaml 
+
+# K3s
+kubectl apply -f k3s-upgrade-gitrepo.yaml
+----
+
+. View the created *GitRepo* resource under the `{fleet-workspace}` namespace:
++
+[,bash,subs="attributes"]
+----
+# RKE2
+kubectl get gitrepo rke2-upgrade -n {fleet-workspace}
+
+# K3s
+kubectl get gitrepo k3s-upgrade -n {fleet-workspace}
+
+# Example output
+NAME           REPO                                              COMMIT          BUNDLEDEPLOYMENTS-READY   STATUS
+k3s-upgrade    https://github.com/suse-edge/fleet-examples.git   {fleet-workspace}   0/0                       
+rke2-upgrade   https://github.com/suse-edge/fleet-examples.git   {fleet-workspace}   0/0                       
+----
+
+[#{cluster-type}-day2-fleet-k8s-upgrade-plan-deployment-bundle]
+==== SUC plan deployment - Bundle resource
+
+A *Bundle* resource, that ships the needed `Kubernetes upgrade SUC Plans`, can be deployed in one of the following ways:
+
+. Through the `Rancher UI` - <<{cluster-type}-day2-fleet-k8s-upgrade-plan-deployment-bundle-rancher>> (when `Rancher` is available).
+
+. By <<{cluster-type}-day2-fleet-k8s-upgrade-plan-deployment-bundle-manual, manually deploying>> the resource to your `management cluster`.
+
+Once deployed, to monitor the Kubernetes upgrade process of the nodes of your targeted cluster, refer to the <<components-system-upgrade-controller-monitor-plans>> documentation.
+
+[#{cluster-type}-day2-fleet-k8s-upgrade-plan-deployment-bundle-rancher]
+===== Bundle creation - Rancher UI
+
+The Edge team maintains ready to use bundles for both link:https://github.com/suse-edge/fleet-examples/blob/{release-tag-fleet-examples}/bundles/day2/system-upgrade-controller-plans/rke2-upgrade/plan-bundle.yaml[rke2] and link:https://github.com/suse-edge/fleet-examples/blob/{release-tag-fleet-examples}/bundles/day2/system-upgrade-controller-plans/k3s-upgrade/plan-bundle.yaml[k3s] Kubernetes distributions. Depending on your environment these bundles could be used directly or as a template.
+
+[IMPORTANT]
+====
+Always use this bundle from a valid Edge link:https://github.com/suse-edge/fleet-examples/releases[release] tag.
+====
+
+To create a bundle through Rancher's UI:
+
+. In the upper left corner, click *☰ -> Continuous Delivery*
+
+. Go to *Advanced* > *Bundles*
+
+. Select *Create from YAML*
+
+. From here you can create the Bundle in one of the following ways:
++
+[NOTE]
+====
+There might be use-cases where you would need to include custom changes to the `SUC plans` that the bundle ships (e.g. add custom tolerations). Make sure to include those changes in the bundle that will be generated by the below steps.
+====
+
+.. By manually copying the bundle content for link:https://raw.githubusercontent.com/suse-edge/fleet-examples/refs/tags/{release-tag-fleet-examples}/bundles/day2/system-upgrade-controller-plans/rke2-upgrade/plan-bundle.yaml[RKE2] or link:https://raw.githubusercontent.com/suse-edge/fleet-examples/refs/tags/{release-tag-fleet-examples}/bundles/day2/system-upgrade-controller-plans/k3s-upgrade/plan-bundle.yaml[K3s] from `suse-edge/fleet-examples` to the *Create from YAML* page.
+
+.. By cloning the link:https://github.com/suse-edge/fleet-examples.git[suse-edge/fleet-examples] repository from the desired link:https://github.com/suse-edge/fleet-examples/releases[release] tag and selecting the *Read from File* option in the *Create from YAML* page. From there, navigate to the bundle that you need (`bundles/day2/system-upgrade-controller-plans/rke2-upgrade/plan-bundle.yaml` for RKE2 and `bundles/day2/system-upgrade-controller-plans/k3s-upgrade/plan-bundle.yaml` for K3s). This will auto-populate the *Create from YAML* page with the bundle content.
+
+ifeval::["{cluster-type}" == "downstream"]
+. Change the *target* clusters for the `Bundle`:
+
+** To match all downstream clusters change the default Bundle `.spec.targets` to:
++
+[, yaml]
+----
+spec:
+  targets:
+  - clusterSelector: {}
+----
+
+** For a more granular downstream cluster mappings, see link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters].
+endif::[]
+
+ifeval::["{cluster-type}" == "management"]
+. Edit the Bundle in the Rancher UI:
+
+** Change the *namespace* of the `Bundle` to point to the `{fleet-workspace}` namespace.
++
+[,yaml,subs="attributes"]
+----
+# Example
+kind: Bundle
+apiVersion: fleet.cattle.io/v1alpha1
+metadata:
+  name: rke2-upgrade
+  namespace: {fleet-workspace}
+...
+----
+
+** Change the *target* clusters for the `Bundle` to point to your `local`(management) cluster:
++
+[, yaml]
+----
+spec:
+  targets:
+  - clusterName: local
+----
++
+[NOTE]
+====
+There are some use-cases where your `local` cluster could have a different name. 
+
+To retrieve your `local` cluster name, execute the command below:
+
+[,bash]
+----
+kubectl get clusters.fleet.cattle.io -n fleet-local
+----
+====
+endif::[]
+
+. *Create*
+
+[#{cluster-type}-day2-fleet-k8s-upgrade-plan-deployment-bundle-manual]
+===== Bundle creation - manual
+
+. Pull the *Bundle* resources:
+
+** For *RKE2* clusters:
++
+[,bash,subs="attributes"]
+----
+curl -o rke2-plan-bundle.yaml https://raw.githubusercontent.com/suse-edge/fleet-examples/refs/tags/{release-tag-fleet-examples}/bundles/day2/system-upgrade-controller-plans/rke2-upgrade/plan-bundle.yaml
+----
+
+** For *K3s* clusters:
++
+[,bash,subs="attributes"]
+----
+curl -o k3s-plan-bundle.yaml https://raw.githubusercontent.com/suse-edge/fleet-examples/refs/tags/{release-tag-fleet-examples}/bundles/day2/system-upgrade-controller-plans/k3s-upgrade/plan-bundle.yaml
+----
+
+ifeval::["{cluster-type}" == "downstream"]
+. Edit the `Bundle` *target* configurations, under `spec.targets` provide your desired target list. By default the `Bundle` resources from the `suse-edge/fleet-examples` are *NOT* mapped to any downstream clusters.
+
+** To match all clusters change the default `Bundle` *target* to:
++
+[, yaml]
+----
+spec:
+  targets:
+  - clusterSelector: {}
+----
+
+** Alternatively, if you want a more granular cluster selection see link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters]
+endif::[]
+
+ifeval::["{cluster-type}" == "management"]
+. Edit the `Bundle` configuration:
+
+** Change the *target* clusters for the `Bundle` to point to your `local`(management) cluster:
++
+[, yaml]
+----
+spec:
+  targets:
+  - clusterName: local
+----
++
+[NOTE]
+====
+There are some use-cases where your `local` cluster could have a different name. 
+
+To retrieve your `local` cluster name, execute the command below:
+
+[,bash]
+----
+kubectl get clusters.fleet.cattle.io -n fleet-local
+----
+====
+
+** Change the *namespace* of the `Bundle` to point to the `{fleet-workspace}` namespace.
++
+[,yaml,subs="attributes"]
+----
+# Example
+kind: Bundle
+apiVersion: fleet.cattle.io/v1alpha1
+metadata:
+  name: rke2-upgrade
+  namespace: {fleet-workspace}
+...
+----
+endif::[]
+
+. Apply the *Bundle* resources to your `management cluster`:
++
+[,bash]
+----
+# For RKE2
+kubectl apply -f rke2-plan-bundle.yaml
+
+# For K3s
+kubectl apply -f k3s-plan-bundle.yaml
+----
+
+. View the created *Bundle* resource under the `{fleet-workspace}` namespace:
++
+[,bash,subs="attributes"]
+----
+# For RKE2
+kubectl get bundles rke2-upgrade -n {fleet-workspace}
+
+# For K3s
+kubectl get bundles k3s-upgrade -n {fleet-workspace}
+
+# Example output
+NAME           BUNDLEDEPLOYMENTS-READY   STATUS
+k3s-upgrade    0/0                       
+rke2-upgrade   0/0                       
+----
+
+[#{cluster-type}-day2-fleet-k8s-upgrade-plan-deployment-third-party]
+==== SUC Plan deployment - third-party GitOps workflow
+
+There might be use-cases where users would like to incorporate the `Kubernetes upgrade SUC plans` to their own third-party GitOps workflow (e.g. `Flux`).
+
+To get the K8s upgrade resources that you need, first determine the Edge link:https://github.com/suse-edge/fleet-examples/releases[release] tag of the link:https://github.com/suse-edge/fleet-examples.git[suse-edge/fleet-examples] repository that you would like to use.
+
+After that, the resources can be found at:
+
+* For a RKE2 cluster upgrade:
+
+** For `control-plane` nodes - `fleets/day2/system-upgrade-controller-plans/rke2-upgrade/plan-control-plane.yaml`
+
+** For `worker` nodes - `fleets/day2/system-upgrade-controller-plans/rke2-upgrade/plan-worker.yaml`
+
+* For a K3s cluster upgrade:
+
+** For `control-plane` nodes - `fleets/day2/system-upgrade-controller-plans/k3s-upgrade/plan-control-plane.yaml`
+
+** For `worker` nodes - `fleets/day2/system-upgrade-controller-plans/k3s-upgrade/plan-worker.yaml`
+
+[IMPORTANT]
+====
+These `Plan` resources are interpreted by the `System Upgrade Controller` and should be deployed on each downstream cluster that you wish to upgrade. For SUC deployment information, see <<components-system-upgrade-controller-install>>.
+====
+
+To better understand how your GitOps workflow can be used to deploy the *SUC Plans* for Kubernetes version upgrade, it can be beneficial to take a look at the <<{cluster-type}-day2-fleet-k8s-upgrade-overview,overview>> of the update procedure using `Fleet`.
