@@ -28,6 +28,7 @@ The following topics are covered in this section:
 * <<numa-aware-scheduling,NUMA-aware scheduling configuration>>: NUMA-aware scheduling configuration to be used by the Kubernetes workloads.
 * <<metal-lb-configuration,Metal LB configuration>>: Metal LB configuration to be used by the Kubernetes workloads.
 * <<private-registry,Private registry configuration>>: Private registry configuration to be used by the Kubernetes workloads.
+* <<ptp-configuration,Precision Time Protocol configuration>>: Configuration files for running PTP telco profiles.
 
 [#kernel-image-for-real-time]
 === Kernel image for real time
@@ -1250,3 +1251,378 @@ For the registry changes to take effect, you need to either configure this file 
 ====
 For more information about this, please check https://docs.rke2.io/install/containerd_registry_configuration#registries-configuration-file[containerd registry configuration rke2].
 ====
+
+[#ptp-configuration]
+=== Precision Time Protocol
+
+Precision Time Protocol (PTP) is a network protocol developed by the Institute of Electrical and Electronics Engineers (IEEE) to enable sub-microsecond time synchronization in a computer network. Since its inception and for a couple of decades now, PTP has been in use in many industries. It has recently seen a growing adoption in the telecommunication networks as a vital element to 5G networks. While being a relatively simple protocol, its configuration can change significantly depending on the application. For this reason, multiple profiles have been defined and standardized.
+
+In this section, only telco-specific profiles will be covered. Consequently time-stamping capability and a PTP hardware clock (PHC) in the NIC will be assumed. Nowadays, all telco-grade network adapters come with PTP support in hardware, but you can verify such capabilities with the following command:
+
+[,console]
+----
+# ethtool -T p1p1
+Time stamping parameters for p1p1:
+Capabilities:
+        hardware-transmit
+        software-transmit
+        hardware-receive
+        software-receive
+        software-system-clock
+        hardware-raw-clock
+PTP Hardware Clock: 0
+Hardware Transmit Timestamp Modes:
+        off
+        on
+Hardware Receive Filter Modes:
+        none
+        all
+----
+
+Replace `p1p1` with name of the interface to be used for PTP.
+
+The following sections will provide guidance on how to install and configure PTP on SUSE Edge specifically, but familiarity with basic PTP concepts is expected. For a brief overview of PTP and the implementation included in SUSE Edge for Telco, refer to https://documentation.suse.com/sles/html/SLES-all/cha-tuning-ptp.html[].
+
+==== Install PTP software components
+
+In SUSE Edge for Telco, the PTP implementation is provided by the `linuxptp` package, which includes two components:
+
+- `ptp4l`: a daemon that controls the PHC on the NIC and runs the PTP protocol
+- `phc2sys`: a daemon that keeps the system clock in sync with the PTP-synchronized PHC on the NIC
+
+Both daemons are required for the system synchronization to fully work and must be correctly configured according to your setup. This is covered in <<ptp-telco-config>>.
+
+The easiest and best way to integrate PTP in your downstream cluster is to add the `linuxptp` package under `packageList` in the Edge Image Builder (EIB) definition file. This way the PTP control plane software will be installed automatically during the cluster provisioning. See the xref:../quickstart/eib.adoc#eib-configuring-rpm-packages[EIB documentation] for more information on installing packages.
+
+Below find a sample EIB manifest with `linuxptp`:
+
+[,yaml]
+----
+apiVersion: 1.0
+image:
+  imageType: RAW
+  arch: x86_64
+  baseImage: SL-Micro.x86_64-6.0-Base-RT-GM2.raw
+  outputImageName: eibimage-slmicro60rt-telco.raw
+operatingSystem:
+  time:
+    timezone: America/New_York
+  kernelArgs:
+    - ignition.platform.id=openstack
+    - net.ifnames=1
+  systemd:
+    disable:
+      - rebootmgr
+      - transactional-update.timer
+      - transactional-update-cleanup.timer
+      - fstrim
+      - time-sync.target
+    enable:
+      - ptp4l
+      - phc2sys
+  users:
+    - username: root
+      encryptedPassword: ${ROOT_PASSWORD}
+  packages:
+    packageList:
+      - jq
+      - dpdk
+      - dpdk-tools
+      - libdpdk-23
+      - pf-bb-config
+      - open-iscsi
+      - tuned
+      - cpupower
+      - linuxptp
+    additionalRepos:
+      - url: https://download.opensuse.org/repositories/isv:/SUSE:/Edge:/Telco/SL-Micro_6.0_images/
+    sccRegistrationCode: ${SCC_REGISTRATION_CODE}
+----
+
+[NOTE]
+====
+The `linuxptp` package included in SUSE Edge for Telco does not enable `ptp4l` and `phc2sys` by default. If their system-specific configuration files are deployed at provisioning time (see <<ptp-capi>>), they should be enabled. Do so by adding them to the `systemd` section of the manifest, as in the example above.
+====
+
+Follow the usual process to build the image as described in the xref:../quickstart/eib.adoc#eib-how-to-build-image[EIB Documentation] and use it to deploy your cluster. If you are new to EIB, start from xref:../components/edge-image-builder.adoc#components-eib[] instead.
+
+[#ptp-telco-config]
+==== Configure PTP for telco deployments
+
+Many telco applications require strict phase and time synchronization with little deviance, which resulted in a definition of two telco-oriented profiles: the ITU-T G.8275.1 and ITU-T G.8275.2. They both have a high rate of sync messages and other distinctive traits, such as the use of an alternative Best Master Clock Algorithm (BMCA). Such behavior mandates specific settings in the configuration file consumed by `ptp4l`, provided in the following sections as a reference.
+
+[NOTE]
+====
+* Both sections only cover the case of an ordinary clock in Time Receiver configuration.
+* Any such profile must be used in a well-planned PTP infrastructure.
+* Your specific PTP network may require additional configuration tuning, make sure to review and adapt the provided examples if needed.
+====
+
+===== PTP profile ITU-T G.8275.1
+
+The G.8275.1 profile has the following specifics:
+
+* Runs directly on Ethernet and requires full network support (adjacent nodes/switches must support PTP).
+* The default domain setting is 24.
+* Dataset comparison is based on the G.8275.x algorithm and its `localPriority` values after `priority2`.
+
+Copy the following content to a file named `/etc/ptp4l-G.8275.1.conf`:
+
+[source,]
+----
+# Telecom G.8275.1 example configuration
+[global]
+domainNumber                    24
+priority2			255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout		3
+serverOnly                      0
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+----
+
+Once the file has been created, it must be referenced in `/etc/sysconfig/ptp4l` for the daemon to start correctly. This can be done by changing the `OPTIONS=` line to:
+
+[source,]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf -i $IFNAME --message_tag ptp-8275.1"
+----
+
+More precisely:
+
+- `-f` requires the file name of the configuration file to use; `/etc/ptp4l-G.8275.1.conf` in this case
+- `-i` requires the name of the interface to use, replace `$IFNAME` with a real interface name.
+- `--message_tag` allows to better identify the ptp4l output in the system logs and is optional.
+
+Once the steps above are complete, the `ptp4l` daemon must be (re)started:
+
+[,console]
+----
+# systemctl restart ptp4l
+----
+
+Check the synchronization status by observing the logs with:
+
+[,console]
+----
+# journalctl -e -u ptp4l
+----
+
+===== PTP profile ITU-T G.8275.2
+
+The G.8275.2 profile has the following specifics:
+
+* Runs on IP and does not require full network support (adjacent nodes/switches may not support PTP).
+* The default domain setting is 44.
+* Dataset comparison is based on the G.8275.x algorithm and its `localPriority` values after `priority2`.
+
+Copy the following content to a file named `/etc/ptp4l-G.8275.2.conf`:
+
+[source,]
+----
+# Telecom G.8275.2 example configuration
+[global]
+domainNumber                    44
+priority2			255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             0
+serverOnly                      0
+hybrid_e2e                      1
+inhibit_multicast_service       1
+unicast_listen                  1
+unicast_req_duration            60
+logSyncInterval                 -5
+logMinDelayReqInterval          -4
+announceReceiptTimeout		2
+#
+# Customize the following for slave operation:
+#
+[unicast_master_table]
+table_id                        1
+logQueryInterval                2
+UDPv4                           $PEER_IP_ADDRESS
+[$IFNAME]
+unicast_master_table            1
+----
+
+Make sure to replace the following placeholders:
+
+- `$PEER_IP_ADDRESS` - the IP address of the next PTP node to communicate with, such as the master or boundary clock that will provide synchronization.
+- `$IFNAME` - tells `ptp4l` what interface to use for PTP.
+
+Once the file has been created, it must be referenced, along with the name of the interface to use for PTP, in `/etc/sysconfig/ptp4l` for the daemon to start correctly. This can be done by changing the `OPTIONS=` line to:
+
+[,shell]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.2.conf --message_tag ptp-8275.2"
+----
+
+More precisely:
+
+- `-f` requires the file name of the configuration file to use. In this case, it is `/etc/ptp4l-G.8275.2.conf`.
+- `--message_tag` allows to better identify the ptp4l output in the system logs and is optional.
+
+Once the steps above are complete, the `ptp4l` daemon must be (re)started:
+
+[,console]
+----
+# systemctl restart ptp4l
+----
+
+Check the synchronization status by observing the logs with:
+
+[,console]
+----
+# journalctl -e -u ptp4l
+----
+
+===== Configuration of phc2sys
+
+Although not required, it is recommended that you fully complete the configuration of `ptp4l` before moving to `phc2sys`.
+`phc2sys` does not require a configuration file and its execution parameters can be solely controlled through the `OPTIONS=` variable present in `/etc/sysconfig/ptp4l`, in a similar fashion to `ptp4l`:
+
+[source,]
+----
+OPTIONS="-s $IFNAME -w"
+----
+
+Where `$IFNAME` is the name of the interface already set up in ptp4l that will be used as the source for the system clock. This is used to identify the source PHC.
+
+[#ptp-capi]
+==== Cluster API integration
+
+Whenever a cluster is deployed through a management cluster and directed provisioning, both the configuration file and the two configuration variables in `/etc/sysconfig` can be deployed on the host at provisioning time. Below is an excerpt from a cluster definition, focusing on a modified `RKE2ControlPlane` object that deploys the same G.8275.1 configuration file on all hosts:
+
+[,yaml]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  replicas: 1
+  version: ${RKE2_VERSION}
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  registrationMethod: "control-plane-endpoint"
+  serverConfig:
+    cni: canal
+  agentConfig:
+    format: ignition
+    cisProfile: cis
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+            - name: rke2-preinstall.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=rke2-preinstall
+                Wants=network-online.target
+                Before=rke2-install.service
+                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStartPost=/bin/sh -c "umount /mnt"
+                [Install]
+                WantedBy=multi-user.target
+        storage:
+          files:
+            - path: /etc/ptp4l-G.8275.1.conf
+              overwrite: true
+              contents:
+                inline: |
+                  # Telecom G.8275.1 example configuration
+                  [global]
+                  domainNumber                    24
+                  priority2                       255
+                  dataset_comparison              G.8275.x
+                  G.8275.portDS.localPriority     128
+                  G.8275.defaultDS.localPriority  128
+                  maxStepsRemoved                 255
+                  logAnnounceInterval             -3
+                  logSyncInterval                 -4
+                  logMinDelayReqInterval          -4
+                  announceReceiptTimeout          3
+                  serverOnly                      0
+                  ptp_dst_mac                     01:80:C2:00:00:0E
+                  network_transport               L2
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /etc/sysconfig/ptp4l
+              overwrite: true
+              contents:
+                inline: |
+                  ## Path:           Network/LinuxPTP
+                  ## Description:    Precision Time Protocol (PTP): ptp4l settings
+                  ## Type:           string
+                  ## Default:        "-i eth0 -f /etc/ptp4l.conf"
+                  ## ServiceRestart: ptp4l
+                  #
+                  # Arguments when starting ptp4l(8).
+                  #
+                  OPTIONS="-f /etc/ptp4l-G.8275.1.conf -i $IFNAME --message_tag ptp-8275.1"
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /etc/sysconfig/phc2sys
+              overwrite: true
+              contents:
+                inline: |
+                  ## Path:           Network/LinuxPTP
+                  ## Description:    Precision Time Protocol (PTP): phc2sys settings
+                  ## Type:           string
+                  ## Default:        "-s eth0 -w"
+                  ## ServiceRestart: phc2sys
+                  #
+                  # Arguments when starting phc2sys(8).
+                  #
+                  OPTIONS="-s $IFNAME -w"
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+    kubelet:
+      extraArgs:
+        - provider-id=metal3://BAREMETALHOST_UUID
+    nodeName: "localhost.localdomain"
+----
+
+Besides other variables, the above definition must be completed with the interface name and with the other Cluster API objects, as described in <<atip-automated-provisioning>>.
+
+[NOTE]
+====
+* This approach is convenient only if the hardware in the cluster is uniform and the same configuration is needed on all hosts, interface name included.
+* Alternative approaches are possible and will be covered in future releases.
+====
+
+At this point, your hosts should have a working and running PTP stack and will start negotiating their PTP role.
