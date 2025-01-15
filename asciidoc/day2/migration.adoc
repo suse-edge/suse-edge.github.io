@@ -1,5 +1,5 @@
 [#day2-migration]
-= Edge 3.1 migration
+= Edge 3.2 migration
 :experimental:
 
 ifdef::env-github[]
@@ -11,3 +11,159 @@ ifdef::env-github[]
 :warning-caption: :warning:
 endif::[]
 :toc: preamble
+:previous-edge-version: 3.1
+:static-edge-version: 3.2.0
+:dash-separated-static-edge-version: 3-2-0
+:static-fleet-examples-tag: release-3.2.0
+
+This section explains how to migrate your `management` and `downstream` clusters from `Edge {previous-edge-version}` to `Edge {static-edge-version}`.
+
+[IMPORTANT]
+====
+Always perform cluster migrations from the `latest Z-stream` release of `Edge {previous-edge-version}`.
+
+Always migrate to the `Edge {static-edge-version}` release. For subsequent post-migration upgrades, refer to the <<day2-mgmt-cluster, management>> and <<day2-downstream-clusters, downstream>> cluster sections.
+====
+
+[#day2-migration-mgmt]
+== Management Cluster
+:cluster-type: management
+
+This section covers the following topics:
+
+<<day2-migration-mgmt-prereq>> - prerequisite steps to complete before starting the migration.
+
+<<day2-migration-mgmt-upgrade-controller>> - how to do a `{cluster-type}` cluster migration using the <<components-upgrade-controller>>.
+
+<<day2-migration-mgmt-fleet>> - how to do a `{cluster-type}` cluster migration using <<components-fleet>>.
+
+[#day2-migration-mgmt-prereq]
+=== Prerequisites
+
+==== Upgrade the Bare Metal Operator CRDs
+
+[NOTE]
+====
+Applies only to clusters that require a <<components-metal3>> chart upgrade.
+====
+
+The `Metal^3^` Helm chart includes the link:https://book.metal3.io/bmo/introduction.html[Bare Metal Operator (BMO)] CRDs by leveraging Helm's link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#method-1-let-helm-do-it-for-you[CRD] directory.
+
+However, this approach has certain limitations, particularly the inability to upgrade CRDs in this directory using Helm. For more information, refer to the link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#some-caveats-and-explanations[Helm documentation].
+
+As a result, before upgrading Metal^3^ to an `Edge {static-edge-version}` compatible version, users must manually upgrade the underlying BMO CRDs.
+
+On a machine with `Helm` installed and `kubectl` configured to point to your `{cluster-type}` cluster:
+
+. Pull the `Metal^3^` Helm chart for the `Edge {static-edge-version}` release:
++
+[,bash,subs="attributes"]
+----
+helm pull oci://registry.suse.com/edge/{version-edge-registry}/metal3-chart --version 302.0.0+up0.9.0
+----
+
+. Manually apply the BMO CRDs:
++
+[,bash]
+----
+tar -xvf metal3-chart-302.0.0+up0.9.0.tgz && kubectl apply -f metal3/charts/baremetal-operator/crds/
+----
+
+[#day2-migration-mgmt-upgrade-controller]
+=== Upgrade Controller
+
+[IMPORTANT]
+====
+The `Upgrade Controller` currently supports Edge release migrations only for *non air-gapped management* clusters.
+====
+
+The following topics are covered as part of this section:
+
+<<day2-migration-mgmt-upgrade-controller-prereq>> - prerequisites specific to the `Upgrade Controller`.
+
+<<day2-migration-mgmt-upgrade-controller-migration>> - steps for migrating a `{cluster-type}` cluster to a new Edge version using the `Upgrade Controller`.
+
+[#day2-migration-mgmt-upgrade-controller-prereq]
+==== Prerequisites
+
+===== Edge 3.2 Upgrade Controller
+
+Before using the `Upgrade Controller`, you must first ensure that it is running a version that is capable of migrating to the desired Edge release.
+
+To do this:
+
+. If you already have `Upgrade Controller` deployed from a previous Edge release, upgrade its chart:
++
+[,bash,subs="attributes"]
+----
+helm upgrade upgrade-controller -n upgrade-controller-system oci://registry.suse.com/edge/{version-edge-registry}/upgrade-controller-chart --version {version-upgrade-controller-chart}
+----
+
+. If you do *not* have `Upgrade Controller` deployed, follow <<components-upgrade-controller-installation>>.
+
+[#day2-migration-mgmt-upgrade-controller-migration]
+==== Migration steps
+
+Performing a `{cluster-type}` cluster migration with the `Upgrade Controller` is fundamentally similar to executing an upgrade.
+
+The only difference is that your `UpgradePlan` *must* specify the `{static-edge-version}` release version:
+
+[,bash,subs="attributes"]
+----
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
+metadata:
+  name: upgrade-plan-mgmt-{dash-separated-static-edge-version}
+spec:
+  releaseVersion: {static-edge-version}
+----
+
+[IMPORTANT]
+====
+To ensure a successful `Edge {static-edge-version}` migration, it is important that users pass the `releaseVersion: {static-edge-version}` property in their `UpgradePlan`.
+====
+
+For information on how to use the above `UpgradePlan` to do a migration, refer to <<{cluster-type}-day2-upgrade-controller, Upgrade Controller upgrade process>>.
+
+[#day2-migration-mgmt-fleet]
+=== Fleet
+
+
+Performing a `{cluster-type}` cluster migration with `Fleet` is fundamentally similar to executing an upgrade.
+
+The *key* differences being that:
+
+. The fleets *must be used* from the link:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}] release of the `suse-edge/fleet-examples` repository.
+
+. Charts scheduled for an upgrade *must* be upgraded to versions compatible with the `Edge {static-edge-version}` release. For a list of the `Edge {static-edge-version}` components, refer to <<release-notes-3-2-0>>.
+
+[IMPORTANT]
+====
+To ensure a successful `Edge {static-edge-version}` migration, it is important that users comply with the points outlined above.
+====
+
+Considering the points above, users can follow the `{cluster-type}` cluster <<{cluster-type}-day2-fleet, Fleet>> documentation for a comprehensive guide on the steps required to perform a migration.
+
+[#day2-migration-downstream]
+== Downstream Clusters
+:cluster-type: downstream
+
+<<day2-migration-downstream-fleet>> - how to do a `{cluster-type}` cluster migration using <<components-fleet>>.
+
+[#day2-migration-downstream-fleet]
+=== Fleet
+
+Performing a `{cluster-type}` cluster migration with `Fleet` is fundamentally similar to executing an upgrade.
+
+The *key* differences being that:
+
+. The fleets *must be used* from the link:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}] release of the `suse-edge/fleet-examples` repository.
+
+. Charts scheduled for an upgrade *must* be upgraded to versions compatible with the `Edge {static-edge-version}` release. For a list of the `Edge {static-edge-version}` components, refer to <<release-notes-3-2-0>>.
+
+[IMPORTANT]
+====
+To ensure a successful `Edge {static-edge-version}` migration, it is important that users comply with the points outlined above.
+====
+
+Considering the points above, users can follow the `{cluster-type}` cluster <<{cluster-type}-day2-fleet, Fleet>> documentation for a comprehensive guide on the steps required to perform a migration.
