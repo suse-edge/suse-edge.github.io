@@ -1,0 +1,106 @@
+= *SUSE Edge Elemental Workflow Tips and Tricks*
+
+:imagesdir: ../images/
+
+.Common and expected behavior
+* Expose rancher service:
+
+In case it is not clear, when using RKE2/K3S you need to expose services (rancher in this context) from the management cluster as it is not exposed by default. 
+In RKE2 there is an nginx ingress controller, in k3s there is traefik.
+The current workflow suggests using metallb for L2advertising and the relevant ingress controller to create an ingress via HelmChartConfig (as if doing a new ingress object would override existing setup).
+
+_Example:_
+
+-> Install Rancher Prime (via helm) and set some values to it:
+```
+---
+hostname: rancher-192.168.64.101.sslip.io
+replicas: 1
+bootstrapPassword: Admin
+global.cattle.psp.enabled: "false"
+```
+
+-> Create a LoadBalancer service to expose rancher:
+```
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-ingress-nginx
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    controller:
+      config:
+        use-forwarded-headers: "true"
+        enable-real-ip: "true"
+      publishService:
+        enabled: true
+      service:
+        enabled: true
+        type: LoadBalancer
+        externalTrafficPolicy: Local
+```
+
+-> Create an IP Address Pool for the service (remember to assign the IP you set up in the Rancher chart values):
+```
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: ingress-ippool
+  namespace: metallb-system
+spec:
+  addresses:
+  - 192.168.64.101/32
+  serviceAllocation:
+    priority: 100
+    serviceSelectors:
+    - matchExpressions:
+      - {key: app.kubernetes.io/name, operator: In, values: [rke2-ingress-nginx]}
+```
+
+-> Create an L2 Advertisement for the IP Pool:
+```
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: ingress-l2-adv
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - ingress-ippool
+```
+
+* Make sure to install all elemental bits:
+
+you need to install elemental operator, elemental crds, elemental ui on the management nodes and add the elemental configuration on the downstream node together with a registration code, as that will prompt Edge Image Builder to download the proper elemental client packages for registering the machine.
+
+.Hardware Specific
+
+* TPM: 
+
+you might see some error that looks like this:
+
+```
+Nov 25 18:17:06 eled elemental-register[4038]: Error: registering machine: cannot generate authentication token: opening tpm for getting attestation data: TPM device not available
+```
+
+In this case you will need to do one of the following:
+- enable TPM on your VM, for example: https://elemental.docs.rancher.com/tpm/ ( for UTM on Mac see the image below) 
+
+image::tpm.png[TPM]
+
+- disable TPM altogether, by setting in the MachineRegistration file:
+```
+      registration:
+        emulate-tpm: false
+```
+- leave TPM enabled, but use a negative value for emulating the TPM seed, so the seed used for the TPM emulation is randomized per machine.
+```
+      registration:
+        emulate-tpm: true
+        emulated-tpm-seed: -1
+```
+
