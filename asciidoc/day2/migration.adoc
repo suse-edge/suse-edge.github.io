@@ -1,5 +1,5 @@
 [#day2-migration]
-= Edge 3.1 migration
+= Edge 3.2 migration
 :experimental:
 
 ifdef::env-github[]
@@ -11,1005 +11,154 @@ ifdef::env-github[]
 :warning-caption: :warning:
 endif::[]
 :toc: preamble
+:previous-edge-version: 3.1
+:static-edge-version: 3.2.0
+:static-fleet-examples-tag: release-3.2.0
 
-This section offers migration guidelines for existing `Edge 3.0` (including minor releases such as 3.0.1 and 3.0.2) *management* and *downstream* clusters to `Edge 3.1.0`.
+This section explains how to migrate your `management` and `downstream` clusters from `Edge {previous-edge-version}` to `Edge {static-edge-version}`.
 
-For a list of `Edge 3.1.0` component versions, refer to the <<release-notes, release notes>>.
+[IMPORTANT]
+====
+Always perform cluster migrations from the `latest Z-stream` release of `Edge {previous-edge-version}`.
+
+Always migrate to the `Edge {static-edge-version}` release. For subsequent post-migration upgrades, refer to the <<day2-mgmt-cluster, management>> and <<day2-downstream-clusters, downstream>> cluster sections.
+====
 
 [#day2-migration-mgmt]
-== Management cluster
+== Management Cluster
+:cluster-type: management
 
-This section covers how to migrate a `management` cluster from `Edge 3.0` to `Edge 3.1.0`.
+This section covers the following topics:
 
-`Management` cluster components should be migrated in the following order:
+<<day2-migration-mgmt-prereq>> - prerequisite steps to complete before starting the migration.
 
-. <<day2-migration-mgmt-os, Operating System (OS)>>
+<<day2-migration-mgmt-upgrade-controller>> - how to do a `{cluster-type}` cluster migration using the <<components-upgrade-controller>>.
 
-. <<day2-migration-mgmt-rke2, RKE2>>
+<<day2-migration-mgmt-fleet>> - how to do a `{cluster-type}` cluster migration using <<components-fleet>>.
 
-. <<day2-migration-mgmt-helm, Edge Helm charts>>
-
-
-[#day2-migration-mgmt-os]
-=== Operating System (OS)
-
-This section covers the steps needed to migrate your `management` cluster nodes' OS to an `Edge 3.1.0` supported version.
-
-[IMPORTANT]
-====
-
-The below steps should be done for each node of the `management` cluster.
-
-To avoid any unforeseen problems, migrate the cluster's `control-plane` nodes first and the `worker` nodes second.
-====
-
-==== Prerequisites
-
-* `SCC registered nodes` -  ensure your cluster nodes' OS are registered with a subscription key that supports the operating system version specified in the `Edge 3.1` <<release-notes,release>>.
-
-_Air-gapped:_
-
-* `Mirror SUSE RPM repositories` - RPM repositories related to the operating system that is specified in the `Edge 3.1.0` <<release-notes,release>> should be locally mirrored, so that `transactional-update` has access to them. This can be achieved by using either link:https://documentation.suse.com/sles/15-SP6/html/SLES-all/book-rmt.html[RMT] or link:https://documentation.suse.com/suma/5.0/en/suse-manager/index.html[SUMA].
-
-==== Migration steps
-
-[NOTE]
-====
-The below steps assume you are running as `root` and that `kubectl` has been configured to connect to the `management` cluster.
-====
-
-. Mark the node as unschedulable:
-+
-[,bash]
-----
-kubectl cordon <node_name>
-----
-+
-For a full list of the options for the `cordon` command, see link:https://kubernetes.io/docs/reference/kubectl/generated/kubectl_cordon/[kubectl cordon].
-
-. *Optionally*, there might be use-cases where you would like to `drain` the nodes' workloads:
-+
-[,bash]
-----
-kubectl drain <node>
-----
-+
-For a full list of the options for the `drain` command, see link:https://kubernetes.io/docs/reference/kubectl/generated/kubectl_drain/[kubectl drain].
-
-. Before a migration, you need to ensure that packages on your current OS are updated. To do this, execute:
-+
-[,bash]
-----
-transactional-update
-----
-+
-The above command executes link:https://en.opensuse.org/SDB:Zypper_usage#Updating_packages[zypper up] to update the OS packages. For more information on `transactional-update`, see the link:https://documentation.suse.com/smart/systems-management/html/Micro-transactional-updates/index.html[transactional-update guide].
-
-. Proceed to do the OS migration:
-+
-[,bash]
-----
-transactional-update --continue migration
-----
-+
-[NOTE]
-====
-The `--continue` option is used here to reuse the previous snapshot without having to reboot the system.
-====
-
-** If your subscription key supports the `SUSE Linux Micro 6.0` version, you will be prompted with something similar to:
-+
-image::day2-migration-os-migration-prompt.png[]
-+
-Select the `number` that corresponds to `SUSE Linux Micro 6.0 <arch>`.
-+
-[NOTE]
-====
-The `Edge 3.1.0` release supports *only* the `SUSE Linux Micro 6.0` operating system.
-====
-
-. After a successful `transactional-update` run, for the changes to take effect on the system you would need to reboot:
-+
-[,bash]
-----
-reboot
-----
-
-. After the host has been rebooted, validate that the operating system is migrated to `SUSE Linux Micro 6.0`:
-+
-[,bash]
-----
-cat /etc/os-release
-----
-+
-Output should be similar to:
-+
-[,bash]
-----
-NAME="SL-Micro"
-VERSION="6.0"
-VERSION_ID="6.0"
-PRETTY_NAME="SUSE Linux Micro 6.0"
-ID="sl-micro"
-ID_LIKE="suse"
-ANSI_COLOR="0;32"
-CPE_NAME="cpe:/o:suse:sl-micro:6.0"
-HOME_URL="https://www.suse.com/products/micro/"
-DOCUMENTATION_URL="https://documentation.suse.com/sl-micro/6.0/"
-----
-+
-[NOTE]
-====
-In case something failed with the migration, you can rollback to the last working snapshot using:
-
-[,bash]
-----
-transactional-update rollback last
-----
-
-You would need to reboot your system for the `rollback` to take effect. See link:https://documentation.suse.com/smart/systems-management/html/Micro-transactional-updates/index.html#tr-up-rollback[the official `transactional-update` documentation] for more information about the rollback procedure.
-====
-
-. Mark the node as schedulable:
-+
-[,bash]
-----
-kubectl uncordon <node_name>
-----
-
-[#day2-migration-mgmt-rke2]
-=== RKE2
-
-[IMPORTANT]
-====
-The below steps should be done for each node of the `management` cluster.
-
-As the link:https://docs.rke2.io/upgrade/manual_upgrade[RKE2 documentation] explains, the upgrade procedure requires to upgrade the clusters' `control-plane` nodes one at a time and once all have been upgraded, the `agent` nodes.
-====
-
-[NOTE]
-====
-To ensure *disaster recovery*, we advise to do a backup of the RKE2 cluster data. For information on how to do this, check link:https://docs.rke2.io/backup_restore[the RKE2 backup and restore guide]. The default location for the `rke2` binary is `/opt/rke2/bin`.
-====
-
-You can upgrade the RKE2 version to a `Edge 3.1.0` compatible version using the RKE2 installation script as follows:
-
-. Mark the node as unschedulable:
-+
-[,bash]
-----
-kubectl cordon <node_name>
-----
-+
-For a full list of the options for the `cordon` command, see link:https://kubernetes.io/docs/reference/kubectl/generated/kubectl_cordon/[kubectl cordon].
-
-. *Optionally*, there might be use-cases where you would like to `drain` the nodes' workloads:
-+
-[,bash]
-----
-kubectl drain <node>
-----
-+
-For a full list of the options for the `drain` command, see link:https://kubernetes.io/docs/reference/kubectl/generated/kubectl_drain/[kubectl drain].
-
-. Use the RKE2 installation script to install the correct `Edge 3.1.0` compatible RKE2 version:
-+
-[,bash]
-----
-curl -sfL https://get.rke2.io | INSTALL_RKE2_VERSION=v1.30.3+rke2r1 sh -
-----
-
-. Restart the `rke2` process:
-+
-[,bash]
-----
-# For control-plane nodes:
-systemctl restart rke2-server
-
-# For worker nodes:
-systemctl restart rke2-agent
----- 
-
-. Validate that the nodes' RKE2 version is upgraded:
-+
-[,bash]
-----
-kubectl get nodes
-----
-
-. Mark the node as schedulable:
-+
-[,bash]
-----
-kubectl uncordon <node_name>
-----
-
-[#day2-migration-mgmt-helm]
-=== Edge Helm charts
-
-[NOTE]
-====
-This section assumes you have installed `helm` on your system and you have a valid `kubeconfig` pointing to the desired cluster. For `helm` installation instructions, check the link:https://helm.sh/docs/intro/install[Installing Helm] guide.
-====
-
-This section provides guidelines for upgrading the Helm chart components that make up a specific Edge release. It covers the following topics:
-
-* <<day2-migration-mgmt-helm-limitations, Known limitations>> that the upgrade process has.
-
-* How to <<day2-migration-mgmt-helm-capi, migrate>> Cluster API controllers through the `Rancher Turtles` Helm chart.
-
-* How to <<day2-migration-mgmt-helm-eib, upgrade Edge Helm charts>> deployed through <<components-eib,EIB>>.
-
-* How to <<day2-migration-mgmt-helm-non-eib, upgrade Edge Helm charts>> deployed through non-EIB means.
-
-[#day2-migration-mgmt-helm-limitations]
-==== Known Limitations
-
-This section covers known limitations to the current migration process. Users should first go through the steps described here before moving to upgrade their helm charts.
-
-===== Rancher upgrade
-
-With the current RKE2 version that `Edge 3.1.0` utilizes, there is an issue where all ingresses that do not contain an `IngressClass` are ignored by the ingress controller. To mitigate this, users would need to manually add the name of the default `IngressClass` to the default `Rancher` Ingress. 
-
-For more information on the problem that the below steps fix, see the link:https://github.com/rancher/rke2/issues/6510[upstream] RKE2 issue and more specifically link:https://github.com/rancher/rke2/issues/6510#issuecomment-2311231917[this] comment.
-
-[NOTE]
-====
-In some cases the default `IngressClass` might have a different name than `nginx`.
-
-Make sure to validate the name by running:
-
-[,bash]
-----
-kubectl get ingressclass
-----
-====
-
-Before upgrading `Rancher`, make sure to execute the following command:
-
-* If `Rancher` was deployed through <<components-eib, EIB>>:
-+
-[,bash]
-----
-kubectl patch helmchart rancher -n <namespace> --type='merge' -p '{"spec":{"set":{"ingress.ingressClassName":"nginx"}}}'
-----
-
-* If `Rancher` was deployed through Helm, add the `--set ingress.ingressClassName=nginx` flag to your link:https://helm.sh/docs/helm/helm_upgrade/[upgrade] command. For a full example of how to utilize this option, see the following <<day2-migration-mgmt-helm-non-eib-example, example>>.
-
-[#day2-migration-mgmt-helm-capi]
-==== Cluster API controllers migration
-
-From `Edge 3.1.0`, Cluster API (CAPI) controllers on a Metal^3^ management cluster are managed via link:https://turtles.docs.rancher.com[Rancher Turtles].
-
-To migrate the CAPI controllers versions to `Edge 3.1.0` compatible versions, install the `Rancher Turtles` chart:
-
-[,bash]
-----
-helm install rancher-turtles oci://registry.suse.com/edge/3.1/rancher-turtles-chart --version 0.3.2 --namespace rancher-turtles-system --create-namespace
-----
-
-After some time, the controller pods running in the `capi-system`, `capm3-system`, `rke2-bootstrap-system` and `rke2-control-plane-system` namespaces are upgraded with the `Edge 3.1.0` compatible controller versions.
-
-For information on how to install `Rancher Turtles` in an air-gapped environment, refer to <<day2-migration-mgmt-helm-capi-air-gapped, Rancher Turtles air-gapped installation>>.
-
-[#day2-migration-mgmt-helm-capi-air-gapped]
-===== Rancher Turtles air-gapped installation
-
-[NOTE]
-====
-The below steps assume that `kubectl` has been configured to connect to the `management` cluster that you wish to upgrade.
-====
-
-. Before installing the below mentioned `rancher-turtles-airgap-resources` Helm chart, ensure that it will have the correct ownership over the `clusterctl` created namespaces:
-
-.. `capi-system` ownership change:
-+
-[,bash]
-----
-kubectl label namespace capi-system app.kubernetes.io/managed-by=Helm --overwrite
-
-kubectl annotate namespace capi-system meta.helm.sh/release-name=rancher-turtles-airgap-resources --overwrite
-kubectl annotate namespace capi-system meta.helm.sh/release-namespace=rancher-turtles-system --overwrite
-----
-
-.. `capm3-system` ownership change:
-+
-[,bash]
-----
-kubectl label namespace capm3-system app.kubernetes.io/managed-by=Helm --overwrite
-
-kubectl annotate namespace capm3-system meta.helm.sh/release-name=rancher-turtles-airgap-resources --overwrite
-kubectl annotate namespace capm3-system meta.helm.sh/release-namespace=rancher-turtles-system --overwrite
-----
-
-.. `rke2-bootstrap-system` ownership change:
-+
-[,bash]
-----
-kubectl label namespace rke2-bootstrap-system app.kubernetes.io/managed-by=Helm --overwrite
-
-kubectl annotate namespace rke2-bootstrap-system meta.helm.sh/release-name=rancher-turtles-airgap-resources --overwrite
-kubectl annotate namespace rke2-bootstrap-system meta.helm.sh/release-namespace=rancher-turtles-system --overwrite
-----
-
-.. `rke2-control-plane-system` ownership change:
-+
-[,bash]
-----
-kubectl label namespace rke2-control-plane-system app.kubernetes.io/managed-by=Helm --overwrite
-
-kubectl annotate namespace rke2-control-plane-system meta.helm.sh/release-name=rancher-turtles-airgap-resources --overwrite
-kubectl annotate namespace rke2-control-plane-system meta.helm.sh/release-namespace=rancher-turtles-system --overwrite
-----
-
-. Pull the `rancher-turtles-airgap-resources` and `rancher-turtles` chart archives:
-+
-[,bash]
-----
-helm pull oci://registry.suse.com/edge/3.1/rancher-turtles-airgap-resources-chart --version 0.3.2
-helm pull oci://registry.suse.com/edge/3.1/rancher-turtles-chart --version 0.3.2
-----
-
-. To provide the needed resources for an air-gapped installation of the `Rancher Turtles` Helm chart, install the `rancher-turtles-airgap-resources` Helm chart:
-+
-[,bash]
-----
-helm install rancher-turtles-airgap-resources ./rancher-turtles-airgap-resources-chart-0.3.2.tgz --namespace rancher-turtles-system --create-namespace
-----
-
-. Configure the `cluster-api-operator` in the `Rancher Turtles` Helm chart to fetch controller data from correct locations:
-+
-[,bash]
-----
-cat > values.yaml <<EOF
-cluster-api-operator:
-  cluster-api:
-    core:
-      fetchConfig:
-        selector: "{\"matchLabels\": {\"provider-components\": \"core\"}}"
-    rke2:
-      bootstrap:
-        fetchConfig:
-          selector: "{\"matchLabels\": {\"provider-components\": \"rke2-bootstrap\"}}"
-      controlPlane:
-        fetchConfig:
-          selector: "{\"matchLabels\": {\"provider-components\": \"rke2-control-plane\"}}"
-    metal3:
-      infrastructure:
-        fetchConfig:
-          selector: "{\"matchLabels\": {\"provider-components\": \"metal3\"}}"
-EOF
-----
-
-. Install `Rancher Turtles`:
-+
-[,bash]
-----
-helm install rancher-turtles ./rancher-turtles-chart-0.3.2.tgz --namespace rancher-turtles-system --create-namespace --values values.yaml
-----
-
-After some time, the controller pods running in the `capi-system`, `capm3-system`, `rke2-bootstrap-system` and `rke2-control-plane-system` namespaces will be upgraded with the `Edge 3.1.0` compatible controller versions.
-
-[#day2-migration-mgmt-helm-eib]
-==== Edge Helm chart upgrade - EIB
-
-This section explains how to upgrade a Helm chart from the Edge component stack, deployed via <<components-eib, EIB>>, to an `Edge 3.1.0` compatible version.
-
-===== Prerequisites
-
-In `Edge 3.1`, EIB changes the way it deploys charts and *no longer uses* the link:https://docs.rke2.io/helm#automatically-deploying-manifests-and-helm-charts[RKE2]/link:https://docs.k3s.io/installation/packaged-components#auto-deploying-manifests-addons[K3s] manifest auto-deploy mechanism.
-
-This means that, before upgrading to an `Edge 3.1.0` compatible version, any Helm charts deployed on an `Edge 3.0` environment using EIB should have their chart manifests removed from the manifests directory of the relevant Kubernetes distribution.
-
-[WARNING]
-====
-If this is not done, any chart upgrade will be reverted by the RKE2/K3s process upon restart of the process or the operating system.
-====
-
-[NOTE]
-====
-Deleting manifests from the RKE2/K3s directory will *not* result in the resources being removed from the cluster. 
-
-As per the link:https://docs.rke2.io/helm#automatically-deploying-manifests-and-helm-charts[RKE2]/link:https://docs.k3s.io/installation/packaged-components#auto-deploying-manifests-addons[K3s] documentation:
-
-> "Deleting files out of this directory will not delete the corresponding resources from the cluster."
-====
-
-Removing any EIB deployed chart manifests involves the following steps:
-
-. To ensure disaster recovery, make a backup of each EIB deployed manifest:
-+
-[NOTE]
-====
-EIB deployed manifests will have the `"edge.suse.com/source: edge-image-builder"` label.
-====
-+
-[NOTE]
-====
-Make sure that the `<backup_location>` that you provide to the below command exists.
-====
-+
-[,bash]
-----
-grep -lrIZ 'edge.suse.com/source: edge-image-builder' /var/lib/rancher/rke2/server/manifests | xargs -0 -I{} cp {} <backup_location>
-----
-
-. Remove all EIB deployed manifests:
-+
-[,bash]
-----
-grep -lrIZ 'edge.suse.com/source: edge-image-builder' /var/lib/rancher/rke2/server/manifests | xargs -0 rm -f --
-----
-
-[#day2-migration-mgmt-helm-upgrade-steps]
-===== Upgrade steps
-
-[NOTE]
-====
-The below steps assume that `kubectl` has been configured to connect to the `management` cluster that you wish to upgrade.
-====
-
-. Locate the `Edge 3.1` compatible chart version that you wish to migrate to by looking at the <<release-notes, release notes>>.
-
-. link:https://helm.sh/docs/helm/helm_pull/[Pull] the desired Helm chart version:
-
-** For charts hosted in HTTP repositories:
-+
-[,bash]
-----
-helm repo add <chart_repo_name> <chart_repo_urls>
-
-helm pull <chart_repo_name>/<chart_name> --version=X.Y.Z
-----
-
-** For charts hosted in OCI registries:
-+
-[,bash]
-----
-helm pull oci://<chart_oci_url> --version=X.Y.Z
-----
-
-. Encode the pulled chart archive:
-+
-[source,bash]
-----
-base64 -w 0 <chart_name>-X.Y.Z.tgz  > <chart_name>-X.Y.Z.txt
-----
-
-. Check the <<day2-migration-mgmt-helm-limitations, Known Limitations>> section if there are any additional steps that need to be done for the charts.
-
-. Patch the existing `HelmChart` resource:
-+
-[IMPORTANT]
-====
-Make sure to pass the `HelmChart` *name*, *namespace*, *encoded file* and *version* to the command below.
-====
-+
-[,bash]
-----
-kubectl patch helmchart <helmchart_name> --type=merge -p "{\"spec\":{\"chartContent\":\"$(cat <helmchart_name>-X.Y.Z.txt)\", \"version\":\"<helmchart_version>\"}}" -n <helmchart_namespace>
-----
-
-. This will signal the link:https://github.com/k3s-io/helm-controller[helm-controller] to schedule a Job that will create a Pod that will upgrade the desired Helm chart. To view the logs of the created Pod, follow these steps:
-
-.. Locate the created Pod:
-+
-[,bash]
-----
-kubectl get pods -l helmcharts.helm.cattle.io/chart=<helmchart_name> -n <namespace>
-----
-
-.. View the Pod logs:
-+
-[,bash]
-----
-kubectl logs <pod_name> -n <namespace>
-----
-
-A `Completed` Pod with non-error logs would result in a successful upgrade of the desired Helm chart.
-
-For a full example of how to upgrade a Helm chart deployed through EIB, refer to the <<day2-migration-mgmt-helm-example, Example>> section.
-
-[#day2-migration-mgmt-helm-example]
-===== Example
-
-This section provides an example of upgrading the `Rancher` and `Metal^3^` Helm charts to a version compatible with the `Edge 3.1.0` release. It follows the steps outlined in the <<day2-migration-mgmt-helm-upgrade-steps, "Upgrade Steps">> section.
-
-_Use-case:_
-
-* Current `Rancher` and `Metal^3^` charts need to be upgraded to an `Edge 3.1.0` compatible version.
-
-** `Rancher` is deployed through EIB and its `HelmChart` is deployed in the `default` namespace.
-
-** `Metal^3^` is deployed through EIB and its `HelmChart` is deployed in the `kube-system` namespace.
-
-_Steps:_
-
-. Locate the desired versions for `Rancher` and `Metal^3^` from the <<release-notes, release notes>>. For `Edge 3.1.0`, these versions would be `2.9.1` for _Rancher_ and `0.8.1` for _Metal^3^_.
-
-. Pull the desired chart versions:
-
-** For `Rancher`:
-+
-[,bash]
-----
-helm repo add rancher-prime https://charts.rancher.com/server-charts/prime
-helm pull rancher-prime/rancher --version=2.9.1 
-----
-
-** For `Metal^3^`:
-+
-[,bash]
-----
-helm pull oci://registry.suse.com/edge/3.1/metal3-chart --version=0.8.1
-----
-
-. Encode the `Rancher` and `Metal^3^` Helm charts:
-+
-[,bash]
-----
-base64 -w 0 rancher-2.9.1.tgz > rancher-2.9.1.txt
-base64 -w 0 metal3-chart-0.8.1.tgz > metal3-chart-0.8.1.txt
-----
-
-. The directory structure should look similar to this:
-+
-[,bash]
-----
-.
-├── metal3-chart-0.8.1.tgz
-├── metal3-chart-0.8.1.txt
-├── rancher-2.9.1.tgz
-└── rancher-2.9.1.txt
-----
-
-. Check the <<day2-migration-mgmt-helm-limitations, Known Limitations>> section if there are any additional steps that need to be done for the charts.
-
-** For `Rancher`:
-
-*** Execute the command described in the `Known Limitations` section:
-+
-[,bash]
-----
-# In this example the rancher helmchart is in the 'default' namespace
-kubectl patch helmchart rancher -n default --type='merge' -p '{"spec":{"set":{"ingress.ingressClassName":"nginx"}}}'
-----
-
-*** Validate that the `ingressClassName` property was successfully added:
-+
-[,bash]
-----
-kubectl get ingress rancher -n cattle-system -o yaml | grep -w ingressClassName
-
-# Example output
-  ingressClassName: nginx
-----
-
-. Patch the `Rancher` and `Metal^3^` HelmChart resources:
-+
-[,bash]
-----
-# Rancher deployed in the default namespace
-kubectl patch helmchart rancher --type=merge -p "{\"spec\":{\"chartContent\":\"$(cat rancher-2.9.1.txt)\", \"version\":\"2.9.1\"}}" -n default
-
-# Metal3 deployed in the kube-system namespace
-kubectl patch helmchart metal3 --type=merge -p "{\"spec\":{\"chartContent\":\"$(cat metal3-chart-0.8.1.txt)\", \"version\":\"0.8.1\"}}" -n kube-system
-----
-
-. Locate the `helm-controller` created _Rancher_ and _Metal^3^_ Pods:
-
-** _Rancher:_
-+
-[,bash]
-----
-kubectl get pods -l helmcharts.helm.cattle.io/chart=rancher -n default
-
-# Example output
-NAME                         READY   STATUS      RESTARTS   AGE
-helm-install-rancher-wg7nf   0/1     Completed   0          5m2s
-----
-
-** _Metal^3^:_
-+
-[,bash]
-----
-kubectl get pods -l helmcharts.helm.cattle.io/chart=metal3 -n kube-system
-
-# Example output
-NAME                        READY   STATUS      RESTARTS   AGE
-helm-install-metal3-57lz5   0/1     Completed   0          4m35s
-----
-
-. View the logs of each pod using link:https://kubernetes.io/docs/reference/kubectl/generated/kubectl_logs/[kubectl logs]:
-
-** _Rancher:_
-+
-[,bash]
-----
-kubectl logs helm-install-rancher-wg7nf -n default
-
-# Example successful output
-...
-Upgrading rancher
-+ helm_v3 upgrade --namespace cattle-system --create-namespace --version 2.9.1 --set-string global.clusterCIDR=10.42.0.0/16 --set-string global.clusterCIDRv4=10.42.0.0/16 --set-string global.clusterDNS=10.43.0.10 --set-string global.clusterDomain=cluster.local --set-string global.rke2DataDir=/var/lib/rancher/rke2 --set-string global.serviceCIDR=10.43.0.0/16 --set-string ingress.ingressClassName=nginx rancher /tmp/rancher.tgz --values /config/values-01_HelmChart.yaml
-Release "rancher" has been upgraded. Happy Helming!
-...
-----
-
-** _Metal^3^:_
-+
-[,bash]
-----
-kubectl logs helm-install-metal3-57lz5  -n kube-system
-
-# Example successful output
-...
-Upgrading metal3
-+ echo 'Upgrading metal3'
-+ shift 1
-+ helm_v3 upgrade --namespace metal3-system --create-namespace --version 0.8.1 --set-string global.clusterCIDR=10.42.0.0/16 --set-string global.clusterCIDRv4=10.42.0.0/16 --set-string global.clusterDNS=10.43.0.10 --set-string global.clusterDomain=cluster.local --set-string global.rke2DataDir=/var/lib/rancher/rke2 --set-string global.serviceCIDR=10.43.0.0/16 metal3 /tmp/metal3.tgz --values /config/values-01_HelmChart.yaml
-Release "metal3" has been upgraded. Happy Helming!
-...
-----
-
-. Validate that the pods for the specific chart are running:
-+
-[,bash]
-----
-# For Rancher
-kubectl get pods -n cattle-system
-
-# For Metal3
-kubectl get pods -n metal3-system
-----
-
-[#day2-migration-mgmt-helm-non-eib]
-==== Edge Helm chart upgrade - non-EIB
-
-This section explains how to upgrade a Helm chart from the Edge component stack, deployed via Helm, to an `Edge 3.1.0` compatible version.
-
-[NOTE]
-====
-The below steps assume that `kubectl` has been configured to connect to the `management` cluster that you wish to upgrade.
-====
-
-. Locate the `Edge 3.1.0` compatible chart version that you wish to migrate to by looking at the <<release-notes, release notes>>.
-
-. Get the custom values of the currently running helm chart:
-+
-[,bash]
-----
-helm get values <chart_name> -n <chart_namespace> -o yaml > <chart_name>-values.yaml
-----
-
-. Check the <<day2-migration-mgmt-helm-limitations, Known Limitations>> section if there are any additional steps, or changes that need to be done for the charts.
-
-. link:https://helm.sh/docs/helm/helm_upgrade/[Upgrade] the helm chart to the desired version:
-
-** For non air-gapped setups:
-+
-[,bash]
-----
-# For charts hosted in HTTP repositories
-helm upgrade <chart_name> <chart_repo>/<chart_name> --version <version> --values <chart_name>-values.yaml -n <chart_namespace>
-
-# For charts hosted in OCI registries
-helm upgrade <chart_name> oci://<oci_registry_url>/<chart_name> --namespace <chart_namespace> --values <chart_name>-values.yaml --version=X.Y.Z
-----
-
-** For air-gapped setups:
-
-*** On a machine with access to the internet, pull the desired chart version:
-+
-[,bash]
-----
-# For charts hosted in HTTP repositories
-helm pull <chart_repo_name>/<chart_name> --version=X.Y.Z
-
-# For charts hosted in OCI registries
-helm pull oci://<chart_oci_url> --version=X.Y.Z
-----
-
-*** Transfer the chart archive to your `management` cluster:
-+
-[,bash]
-----
-scp <chart>.tgz <machine-address>:<filesystem-path>
-----
-
-*** Upgrade the chart:
-+
-[,bash]
-----
-helm upgrade <chart_name> <chart>.tgz --values <chart_name>-values.yaml -n <chart_namespace>
-----
-
-. Verify that the chart pods are running:
-+
-[,bash]
-----
-kubectl get pods -n <chart_namespace>
-----
-
-You may want to do additional verification of the upgrade by checking resources specific to your chart. After this has been done, the upgrade can be considered successful.
-
-For a full example, refer to the <<day2-migration-mgmt-helm-non-eib-example, Example>> section.
-
-[#day2-migration-mgmt-helm-non-eib-example]
-===== Example
-
-This section provides an example of upgrading the `Rancher` and `Metal^3^` Helm charts to a version compatible with the `Edge 3.1.0` release. It follows the steps outlined in the <<day2-migration-mgmt-helm-non-eib, "Edge Helm chart upgrade - non-EIB">> section.
-
-_Use-case:_
-
-* Current `Rancher` and `Metal^3^` charts need to be upgraded to an `Edge 3.1.0` compatible version.
-
-** The `Rancher` helm chart is deployed from the link:https://charts.rancher.com/server-charts/prime[Rancher Prime] repository in the `cattle-system` namespace. The `Rancher Prime` repository was added in the following way:
-+
-[,bash]
-----
-helm repo add rancher-prime https://charts.rancher.com/server-charts/prime
-----
-
-** The `Metal^3^` is deployed from the `registry.suse.com` OCI registry in the `metal3-system` namespace.
-
-_Steps:_
-
-. Locate the desired versions for `Rancher` and `Metal^3^` from the <<release-notes, release notes>>. For `Edge 3.1.0`, these versions would be `2.9.1` for Rancher and `0.8.1` for Metal^3^.
-
-. Get the custom values of the currently running `Rancher` and `Metal^3^` helm charts:
-+
-[,bash]
-----
-# For Rancher
-helm get values rancher -n cattle-system -o yaml > rancher-values.yaml
-
-# For Metal3
-helm get values metal3 -n metal3-system -o yaml > metal3-values.yaml
-----
-
-. Check the <<day2-migration-mgmt-helm-limitations, Known Limitations>> section if there are any additional steps that need to be done for the charts.
-
-** For `Rancher` the `--set ingress.ingressClassName=nginx` option needs to be added to the upgrade command.
-
-. Upgrade the `Rancher` and `Metal^3^` helm charts:
-+
-[,bash]
-----
-# For Rancher
-helm upgrade rancher rancher-prime/rancher --version 2.9.1 --set ingress.ingressClassName=nginx --values rancher-values.yaml -n cattle-system
-
-# For Metal3
-helm upgrade metal3 oci://registry.suse.com/edge/3.1/metal3-chart --version 0.8.1 --values metal3-values.yaml -n metal3-system
-----
-
-. Validate that the `Rancher` and Metal^3^ pods are running:
-+
-[,bash]
-----
-# For Rancher
-kubectl get pods -n cattle-system
-
-# For Metal3
-kubectl get pods -n metal3-system
-----
-
-[#day2-migration-downstream]
-== Downstream clusters
-
-This section covers how to migrate your `Edge 3.0.X` downstream clusters to `Edge 3.1.0`.
-
-[#day2-migration-downstream-prerequisites]
+[#day2-migration-mgmt-prereq]
 === Prerequisites
 
-This section covers any prerequisite steps that users should go through before beginning the migration process.
+==== Upgrade the Bare Metal Operator CRDs
 
-==== Charts deployed through EIB
-
-In `Edge 3.1`, <<components-eib,EIB>> changes the way it deploys charts and *no longer uses* the link:https://docs.rke2.io/helm#automatically-deploying-manifests-and-helm-charts[RKE2]/link:https://docs.k3s.io/installation/packaged-components#auto-deploying-manifests-addons[K3s] manifest auto-deploy mechanism.
-
-This means that, before migrating to an `Edge 3.1.0` compatible version, any Helm charts deployed on an `Edge 3.0` environment using EIB should have their chart manifests removed from the manifests directory of the relevant Kubernetes distribution.
-
-[WARNING]
+[NOTE]
 ====
-If this is not done, any chart upgrade will be reverted by the RKE2/K3s process upon restart of the process or the operating system.
+Applies only to clusters that require a <<components-metal3>> chart upgrade.
 ====
 
-On downstream clusters, the removal of the EIB created chart manifest files is handled by a Fleet called link:https://github.com/suse-edge/fleet-examples/tree/main/fleets/day2/system-upgrade-controller-plans/eib-charts-migration-prep[eib-charts-migration-prep] located in the link:https://github.com/suse-edge/fleet-examples.git[suse-edge/fleet-examples] repository.
+The `Metal^3^` Helm chart includes the link:https://book.metal3.io/bmo/introduction.html[Bare Metal Operator (BMO)] CRDs by leveraging Helm's link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#method-1-let-helm-do-it-for-you[CRD] directory.
 
-[WARNING]
-====
-Using the `eib-charts-migration-prep` Fleet file from the `main` branch is *not* advised. The Fleet file should *always* be used from a valid Edge link:https://github.com/suse-edge/fleet-examples/releases[release] tag.
-====
+However, this approach has certain limitations, particularly the inability to upgrade CRDs in this directory using Helm. For more information, refer to the link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#some-caveats-and-explanations[Helm documentation].
+
+As a result, before upgrading Metal^3^ to an `Edge {static-edge-version}` compatible version, users must manually upgrade the underlying BMO CRDs.
+
+On a machine with `Helm` installed and `kubectl` configured to point to your `{cluster-type}` cluster:
+
+. Manually apply the BMO CRDs:
++
+[,bash,subs="attributes"]
+----
+helm show crds oci://registry.suse.com/edge/{version-edge-registry}/metal3-chart --version 302.0.0+up0.9.0 | kubectl apply -f -
+----
+
+[#day2-migration-mgmt-upgrade-controller]
+=== Upgrade Controller
 
 [IMPORTANT]
 ====
-This process requires that System Upgrade Controller (SUC) is already deployed. For installation details, refer to <<components-system-upgrade-controller-install, "Installing the System Upgrade Controller">>.
+The `Upgrade Controller` currently supports Edge release migrations only for *non air-gapped management* clusters.
 ====
 
-Once created, the `eib-charts-migration-prep` Fleet ships an <<components-system-upgrade-controller,SUC>> Plan that contains a script that will do the following:
+The following topics are covered as part of this section:
 
-. Determine if the current node on which it is running is an `initializer` node. If it is not, it won't do anything.
+<<day2-migration-mgmt-upgrade-controller-prereq>> - prerequisites specific to the `Upgrade Controller`.
 
-. If the node is an `initializer`, it will:
+<<day2-migration-mgmt-upgrade-controller-migration>> - steps for migrating a `{cluster-type}` cluster to a new Edge version using the `Upgrade Controller`.
 
-** Detect all `HelmChart` resources deployed by EIB.
+[#day2-migration-mgmt-upgrade-controller-prereq]
+==== Prerequisites
 
-** Locate the manifest file of each of the above `HelmChart` resources.
+===== Edge 3.2 Upgrade Controller
+
+Before using the `Upgrade Controller`, you must first ensure that it is running a version that is capable of migrating to the desired Edge release.
+
+To do this:
+
+. If you already have `Upgrade Controller` deployed from a previous Edge release, upgrade its chart:
 +
-[NOTE]
-====
-`HelmChart` manifest files are located only on the `initializer` node under `/var/lib/rancher/rke2/server/manifests` for RKE2 and `/var/lib/rancher/k3s/server/manifests` for K3s.
-====
-
-** To ensure disaster recovery, make a backup of each located manifest under `/tmp`.
-+
-[NOTE]
-====
-The backup location can be changed by defining the link:https://github.com/suse-edge/fleet-examples/blob/release-3.1.0/fleets/day2/system-upgrade-controller-plans/eib-charts-migration-prep/plan.yaml#L36[`MANIFEST_BACKUP_DIR`] environment variable in the SUC Plan file of the Fleet.
-====
-
-** Remove each manifest file related to a `HelmChart` resource deployed by EIB.
-+
-[NOTE]
-====
-Deleting manifests from the RKE2/K3s directory will *not* result in the resources being removed from the cluster. 
-
-As per the link:https://docs.rke2.io/helm#automatically-deploying-manifests-and-helm-charts[RKE2]/link:https://docs.k3s.io/installation/packaged-components#auto-deploying-manifests-addons[K3s] documentation:
-
-> "Deleting files out of this directory will not delete the corresponding resources from the cluster."
-====
-
-Depending on your use-case, the `eib-charts-migration-prep` Fleet can be deployed in the following two ways:
-
-* Through a link:https://fleet.rancher.io/ref-gitrepo[GitRepo] resource - for use-cases where an external/local Git server is available. For more information, refer to <<day2-migration-downstream-prerequisites-fleet-gitrepo, EIB chart migration preparation Fleet deployment - GitRepo>>.
-
-* Through a link:https://fleet.rancher.io/bundle-add[Bundle] resource - for air-gapped use-cases that do not support a local Git server option. For more information, refer to <<day2-migration-downstream-prerequisites-fleet-bundle, EIB chart manifest removal Fleet deployment - Bundle>>.
-
-[#day2-migration-downstream-prerequisites-fleet-gitrepo]
-===== EIB chart manifest removal Fleet deployment - GitRepo
-
-. On the `management` cluster, deploy the following `GitRepo` resource:
-+
-[NOTE]
-====
-Before deploying the resource below, you *must* provide a valid `targets` configuration, so that Fleet knows on which downstream clusters to deploy your resource. For information on how to map to downstream clusters, see link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters].
-====
-+
-[,bash]
+[,bash,subs="attributes"]
 ----
-kubectl apply -n fleet-default -f - <<EOF
-apiVersion: fleet.cattle.io/v1alpha1
-kind: GitRepo
+helm upgrade upgrade-controller -n upgrade-controller-system oci://registry.suse.com/edge/{version-edge-registry}/upgrade-controller-chart --version {version-upgrade-controller-chart}
+----
+
+. If you do *not* have `Upgrade Controller` deployed, follow <<components-upgrade-controller-installation>>.
+
+[#day2-migration-mgmt-upgrade-controller-migration]
+==== Migration steps
+
+Performing a `{cluster-type}` cluster migration with the `Upgrade Controller` is fundamentally similar to executing an upgrade.
+
+The only difference is that your `UpgradePlan` *must* specify the `{static-edge-version}` release version:
+
+[,yaml,subs="attributes"]
+----
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
 metadata:
-  name: eib-chart-migration-prep
+  name: upgrade-plan-mgmt
+  # Change to the namespace of your Upgrade Controller
+  namespace: CHANGE_ME
 spec:
-  revision: release-3.1.0
-  paths:
-  - fleets/day2/system-upgrade-controller-plans/eib-charts-migration-prep
-  repo: https://github.com/suse-edge/fleet-examples.git
-  targets:
-  - clusterSelector: CHANGEME
-  # Example matching all clusters:
-  # targets:
-  # - clusterSelector: {}
-EOF
+  releaseVersion: {static-edge-version}
 ----
-+
-Alternatively, you can also create the resource through Ranchers' UI, if such is available. For more information, see link:https://ranchermanager.docs.rancher.com/{rancher-docs-version}/integrations-in-rancher/fleet/overview#accessing-fleet-in-the-rancher-ui[Accessing Fleet in the Rancher UI].
 
-. By creating the above `GitRepo` on your `management` cluster, Fleet will deploy a `SUC Plan` (called `eib-chart-migration-prep`) on each downstream cluster that matches the `targets` specified in the `GitRepo`. To monitor the lifecycle of this plan, refer to <<components-system-upgrade-controller-monitor-plans, "Monitoring System Upgrade Controller Plans">>.
+For information on how to use the above `UpgradePlan` to do a migration, refer to <<{cluster-type}-day2-upgrade-controller, Upgrade Controller upgrade process>>.
 
-[#day2-migration-downstream-prerequisites-fleet-bundle]
-===== EIB chart manifest removal Fleet deployment - Bundle
+[#day2-migration-mgmt-fleet]
+=== Fleet
 
-This section describes how to convert the `eib-chart-migration-prep` Fleet to a link:https://fleet.rancher.io/bundle-add[Bundle] resource that can then be used in air-gapped environments that cannot utilize a local git server.
-
-_Steps:_
-
-. On a machine with network access download the *fleet-cli*:
-+
 [NOTE]
 ====
-Make sure that the version of the *fleet-cli* you download matches the version of Fleet that has been deployed on your cluster.
+Whenever possible, use the <<day2-migration-mgmt-upgrade-controller>> for migration.
+
+Refer to this section only for use cases not covered by the `Upgrade Controller`.
 ====
 
-** For Mac users, there is a link:https://formulae.brew.sh/formula/fleet-cli[fleet-cli] Homebrew Formulae.
+Performing a `{cluster-type}` cluster migration with `Fleet` is fundamentally similar to executing an upgrade.
 
-** For Linux users, the binaries are present as *assets* to each Fleet link:https://github.com/rancher/fleet/releases[release].
+The *key* differences being that:
 
-*** Retrieve the desired binary:
+. The fleets *must be used* from the link:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}] release of the `suse-edge/fleet-examples` repository.
 
-**** Linux AMD:
-+
-[,bash]
-----
-curl -L -o fleet-cli https://github.com/rancher/fleet/releases/download/<FLEET_VERSION>/fleet-linux-amd64
-----
+. Charts scheduled for an upgrade *must* be upgraded to versions compatible with the `Edge {static-edge-version}` release. For a list of the `Edge {static-edge-version}` components, refer to <<release-notes-3-2-0>>.
 
-**** Linux ARM:
-+
-[,bash]
-----
-curl -L -o fleet-cli https://github.com/rancher/fleet/releases/download/<FLEET_VERSION>/fleet-linux-arm64
-----
-
-*** Move the binary to `/usr/local/bin`:
-+
-[,bash]
-----
-sudo mkdir -p /usr/local/bin
-sudo mv ./fleet-cli /usr/local/bin/fleet-cli
-sudo chmod 755 /usr/local/bin/fleet-cli
-----
-
-. Clone the *suse-edge/fleet-examples* link:https://github.com/suse-edge/fleet-examples/releases[release] that you wish to use the `eib-chart-migration-prep` fleet from:
-+
-[,bash]
-----
-git clone -b release-3.1.0 https://github.com/suse-edge/fleet-examples.git
-----
-
-. Navigate to the `eib-chart-migration-prep` fleet, located in the *fleet-examples* repo:
-+
-[,bash]
-----
-cd fleet-examples/fleets/day2/system-upgrade-controller-plans/eib-charts-migration-prep
-----
-
-. Create a `targets.yaml` file that will point to all downstream clusters on which you wish to deploy the fleet:
-+
-[,bash]
-----
-cat > targets.yaml <<EOF
-targets:
-- clusterSelector: CHANGEME
-EOF
-----
-+
-For information on how to map to downstream clusters, see link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters].
-
-. Proceed to build the Bundle:
-+
-[NOTE]
+[IMPORTANT]
 ====
-Make sure you did *not* download the *fleet-cli* in the `fleet-examples/fleets/day2/system-upgrade-controller-plans/eib-charts-migration-prep` directory, otherwise it will be packaged with the Bundle, which is not advised.
+To ensure a successful `Edge {static-edge-version}` migration, it is important that users comply with the points outlined above.
 ====
-+
-[,bash]
-----
-fleet-cli apply --compress --targets-file=targets.yaml -n fleet-default -o - eib-chart-migration-prep . > eib-chart-migration-prep-bundle.yaml
-----
-+
-For more information about this process, see link:https://fleet.rancher.io/bundle-add#convert-a-helm-chart-into-a-bundle[Convert a Helm Chart into a Bundle].
-+
-For more information about the `fleet-cli apply` command, see link:https://fleet.rancher.io/cli/fleet-cli/fleet_apply[fleet apply].
 
-. Transfer the *eib-chart-migration-prep-bundle.yaml* bundle to your *management* cluster machine:
-+
-[,bash]
-----
-scp eib-chart-migration-prep-bundle.yaml <machine-address>:<filesystem-path>
-----
+Considering the points above, users can follow the `{cluster-type}` cluster <<{cluster-type}-day2-fleet, Fleet>> documentation for a comprehensive guide on the steps required to perform a migration.
 
-. On your *management* cluster, deploy the *eib-chart-migration-prep-bundle.yaml* Bundle:
-+
-[,bash]
-----
-kubectl apply -f eib-chart-migration-prep-bundle.yaml
-----
+[#day2-migration-downstream]
+== Downstream Clusters
+:cluster-type: downstream
 
-. On your *management* cluster, validate that the *Bundle* is deployed:
-+
-[,bash]
-----
-kubectl get bundle eib-chart-migration-prep -n fleet-default
-NAME                       BUNDLEDEPLOYMENTS-READY   STATUS
-eib-chart-migration-prep   1/1                 
-----
+<<day2-migration-downstream-fleet>> - how to do a `{cluster-type}` cluster migration using <<components-fleet>>.
 
-. By creating the above `Bundle` on your `management` cluster, Fleet will deploy an `SUC Plan` (called `eib-chart-migration-prep`) on each downstream cluster that matches the `targets` specified in the `targets.yaml` file. To monitor the lifecycle of this plan, refer to <<components-system-upgrade-controller-monitor-plans, "Monitoring System Upgrade Controller Plans">>.
+[#day2-migration-downstream-fleet]
+=== Fleet
 
-=== Migration steps
+Performing a `{cluster-type}` cluster migration with `Fleet` is fundamentally similar to executing an upgrade.
 
-After executing the <<day2-migration-downstream-prerequisites, prerequisite>> steps, you can proceed to follow the <<day2-downstream-clusters, downstream cluster>> upgrade documentation for the `Edge 3.1.0` release.
+The *key* differences being that:
+
+. The fleets *must be used* from the link:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}] release of the `suse-edge/fleet-examples` repository.
+
+. Charts scheduled for an upgrade *must* be upgraded to versions compatible with the `Edge {static-edge-version}` release. For a list of the `Edge {static-edge-version}` components, refer to <<release-notes-3-2-0>>.
+
+[IMPORTANT]
+====
+To ensure a successful `Edge {static-edge-version}` migration, it is important that users comply with the points outlined above.
+====
+
+Considering the points above, users can follow the `{cluster-type}` cluster <<{cluster-type}-day2-fleet, Fleet>> documentation for a comprehensive guide on the steps required to perform a migration.
