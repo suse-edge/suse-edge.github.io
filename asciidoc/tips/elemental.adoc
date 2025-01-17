@@ -2,27 +2,29 @@
 
 :imagesdir: ../images/
 
-.Common and expected behavior
-* Expose Rancher service:
+.Common
+* Expose Rancher service
 
-In case it is not clear, when using RKE2/K3S you need to expose services (Rancher in this context) from the management cluster as it is not exposed by default. 
-In RKE2 there is an NGINX ingress controller, in k3s there is Traefik.
-The current workflow suggests using metallb for announcing a service (via L2 or BGP Advertisement) and the relevant ingress controller to create an ingress via HelmChartConfig (as if doing a new ingress object would override existing setup).
+When using RKE2 or K3s we need to expose services (Rancher in this context) from the management cluster as they are not exposed by default.
+In RKE2 there is an NGINX Ingress controller, whilst k3s is using Traefik.
+The current workflow suggests using MetalLB for announcing a service (via L2 or BGP Advertisement) and the respective Ingress Controller
+to create an Ingress via `HelmChartConfig` since creating a new Ingress object would override the existing setup.
 
-_Example:_
-
--> Install Rancher Prime (via helm) and set some values to it:
-```
----
+. Install Rancher Prime (via Helm) and configure the necessary values
+[,yaml]
+----
 hostname: rancher-192.168.64.101.sslip.io
 replicas: 1
 bootstrapPassword: Admin
 global.cattle.psp.enabled: "false"
-```
+----
 
--> Create a LoadBalancer service to expose rancher:
-```
----
+TIP: Follow the https://ranchermanager.docs.rancher.com/{rancher-docs-version}/getting-started/installation-and-upgrade/install-upgrade-on-a-kubernetes-cluster[Rancher installation] documentation for more details.
+
+. Create a LoadBalancer service to expose Rancher
+[,bash]
+----
+kubectl apply -f - <<EOF
 apiVersion: helm.cattle.io/v1
 kind: HelmChartConfig
 metadata:
@@ -40,11 +42,13 @@ spec:
         enabled: true
         type: LoadBalancer
         externalTrafficPolicy: Local
-```
+EOF
+----
 
--> Create an IP Address Pool for the service (remember to assign the IP you set up in the Rancher chart values):
-```
----
+. Create an IP Address Pool for the service using the IP address we set up earlier in the Helm values
+[,bash]
+----
+kubectl apply -f - <<EOF
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:
@@ -58,11 +62,13 @@ spec:
     serviceSelectors:
     - matchExpressions:
       - {key: app.kubernetes.io/name, operator: In, values: [rke2-ingress-nginx]}
-```
+EOF
+----
 
--> Create an L2 Advertisement for the IP Pool:
-```
----
+. Create an L2 Advertisement for the IP address pool
+[,bash]
+----
+kubectl apply -f - <<EOF
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
@@ -71,36 +77,66 @@ metadata:
 spec:
   ipAddressPools:
   - ingress-ippool
-```
+EOF
+----
 
-* Make sure to install all elemental bits:
+. Ensure Elemental is properly installed
 
-you need to install Elemental operator, Elemental CRDs, Elemental UI on the management nodes and add the Elemental configuration on the downstream node together with a registration code, as that will prompt Edge Image Builder to download the proper Elemental client packages for registering the machine.
+.. Install the Elemental Operator and Elemental UI on the management nodes
+
+.. Add the Elemental configuration on the downstream node together with a registration code, as that will prompt Edge Image Builder to include the remote registration option for the machine.
+
+TIP: Check <<install-elemental>> and <<configure-elemental>> for additional information and examples.
 
 .Hardware Specific
 
-* TPM: 
+It is necessary to properly handle the [https://elemental.docs.rancher.com/tpm/]Trusted Platform Module (TPM) configuration.
+Failing to do so will result in errors similar to the following:
 
-you might see some error that looks like this:
-
-```
+[,console]
+----
 Nov 25 18:17:06 eled elemental-register[4038]: Error: registering machine: cannot generate authentication token: opening tpm for getting attestation data: TPM device not available
-```
+----
 
-In this case you will need to do one of the following:
-- enable TPM on your VM, for example: https://elemental.docs.rancher.com/tpm/ ( for UTM on Mac OS see the image below) 
+This can be mitigated by one of the following approaches:
+
+* Enable TPM in the Virtual Machine settings
+
+_Example with UTM on MacOS_
 
 image::tpm.png[TPM]
 
-- disable TPM altogether, by setting in the MachineRegistration file:
-```
-      registration:
-        emulate-tpm: false
-```
-- leave TPM enabled, but use a negative value for emulating the TPM seed, so the seed used for the TPM emulation is randomized per machine.
-```
+* Emulate TPM by using negative value for the TPM seed in the `MachineRegistration` resource
+
+[,yaml]
+----
+apiVersion: elemental.cattle.io/v1beta1
+kind: MachineRegistration
+metadata:
+  name: ...
+  namespace: ...
+spec:
+    ...
+    elemental:
+      ...
       registration:
         emulate-tpm: true
         emulated-tpm-seed: -1
-```
+----
 
+* Disable TPM in the `MachineRegistration` resource
+
+[,yaml]
+----
+apiVersion: elemental.cattle.io/v1beta1
+kind: MachineRegistration
+metadata:
+  name: ...
+  namespace: ...
+spec:
+    ...
+    elemental:
+      ...
+      registration:
+        emulate-tpm: false
+----
