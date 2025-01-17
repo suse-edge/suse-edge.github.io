@@ -140,26 +140,28 @@ podman pull registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{v
 ----
 
 Create the directory `/opt/eib` and a sub-directory `base-images`:
-
+[,shell]
+----
 mkdir -p /opt/eib/base-images
+----
 
 FIXME: Create an example on github and link it.
 
-In this quickstart we're using the "self-install" flavor of the SLE Micro image. That image can later be written to a physical USB thumb drive that you can use to install on physical servers. If your server has the option of remote-attaching installation ISOs via a BMC (Baseboard Management Controller), you can also use that approach. Finally that image can also be used with most virtualization tools.
+In this quickstart we're using the "self-install" flavor of the SUSE Linux Micro image. That image can later be written to a physical USB thumb drive that you can use to install on physical servers. If your server has the option of remote-attaching installation ISOs via a BMC (Baseboard Management Controller), you can also use that approach. Finally that image can also be used with most virtualization tools.
 
 If you either want to preload the image directly to a physical node or directly start it from a VM, you can also use the "raw" image flavor.
 
 Download or copy the image
-SL-Micro.x86_64-6.0-Default-SelfInstall-GM.install.iso to the "base-images" directoy and name it "slemicro.iso".
-
-FIXME: Final image name!
+`SL-Micro.x86_64-6.0-Default-SelfInstall-GM2.install.iso` to the `base-images` directoy and name it "slemicro.iso".
 
 Building aarch64 images on an Arm-based build host is a technology preview in SUSE Edge 3.1. It will most likely work, but isn't supported yet. If you want to try it out, you need to be running podman on a 64-bit Arm machine, and you need to replace "x86_64" in all the examples and code snippets by "aarch64".
 
-In "/opt/eib", create a file called "iso-definition.yaml". This is your build definition for Edge Image Builder.
+In `/opt/eib`, create a file called `iso-definition.yaml`. This is your build definition for Edge Image Builder.
 
 Here is a simple example that installs SL Micro 6.0, sets a root password and the keymap, starts the Cockpit graphical UI and registers your node to SUSE Manager:
 
+[,yaml]
+----
 apiVersion: 1.0
 image:
   imageType: iso
@@ -180,55 +182,66 @@ operatingSystem:
   suma:
     host: ${fully qualified hostname of your SUSE Manager Server}
     activationKey: 1-edge-x86_64
+----
 
 Edge Image Builder can also configure the network, automatically install Kubernetes on the node, and even deploy applications via helm charts. See [here] for more comprehensive examples.
 
-For "baseImage", specify the actual name of the ISO in the "base-images" directory that you want to use.
+For `baseImage`, specify the actual name of the ISO in the `base-images` directory that you want to use.
 
-In this example, the root password would be "root". See [here] for creating password hashes for the secure password you want to use.
+In this example, the root password would be "root". See https://documentation.suse.com/suse-edge/3.2/html/edge/quickstart-eib.html#id-configuring-os-users[here] for creating password hashes for the secure password you want to use.
 
 Set the keymap to the actual keyboard layout you want the system to have after installation.
 
-We use the option "noGPGCheck: true" because we aren't going to provide a GPG key to check RPM packages. See [here] for a more secure setup that we recommend for production use.
+We use the option `noGPGCheck: true` because we aren't going to provide a GPG key to check RPM packages. See [here] for a more secure setup that we recommend for production use.
 
-As mentioned several times, your SUSE Manager host requires a fully qualified hostname that can be resolved in the network your edge nodes will boot into.
+As mentioned several times, your SUSE Multi-Linux Manager host requires a fully qualified hostname that can be resolved in the network your edge nodes will boot into.
 
-The value for "activationKey" needs to match the key you've created in SUSE Manager. 
+The value for `activationKey` needs to match the key you've created in SUSE Multi-Linux Manager. 
 
-To build an installation image that automatically registers your edge nodes to SUSE Manager after installation, you also need to prepare two artifacts:
+To build an installation image that automatically registers your edge nodes to SUSE Multi-Linux Manager after installation, you also need to prepare two artifacts:
 
-* the Salt minion package that installs the management agent for SUSE Manager
-* the CA certificat of your SUSE Manager server
+* the Salt minion package that installs the management agent for SUSE Multi-Linux Manager
+* the CA certificate of your SUSE Multi-Linux Manager server
 
 ==== Download the venv-salt-minion package
 
-In "/opt/eib", create a subdirectory "rpms".
+In `/opt/eib`, create a subdirectory `rpms`.
 
-Download the package "venv-salt-minion" from your SUSE Manager server into that directory. You can either find it via the web UI by finding the package under "Software > Channel List" and download it from the SUSE-Manager-Tools ... channel or download it from the SUSE Manager "bootstrap repo" with a tool like curl:
+Download the package `venv-salt-minion` from your SUSE Multi-Linux Manager server into that directory. You can either find it via the web UI by finding the package under `Software > Channel List` and download it from the SUSE-Manager-Tools ... channel or download it from the SUSE Multi-Linux Manager "bootstrap repo" with a tool like curl:
 
+[,shell]
+----
 curl http://${HOSTNAME_OF_SUSE_MANAGER}/pub/repositories/slmicro/6/0/bootstrap/x86_64/venv-salt-minion-3006.0-1.1.x64_64.rpm
+----
 
 FIXME: Exact curl command
 
 === Download the SUSE Manager CA certificate
 
-In "/opt/eib", create a subdirectory "certificates"
+In `/opt/eib`, create a subdirectory `certificates`
 
-Download the CA certificate from SUSE Manager into that directory:
+Download the CA certificate from SUSE Multi-Linux Manager into that directory:
 
+[,shell]
+----
 curl http://${HOSTNAME_OF_SUSE_MANAGER}/pub/RHN-ORG-TRUSTED-SSL-CERT
+----
 
-You need to rename it to "RHN-ORG-TRUSTED-SSL-CERT.crt". Edge Image Builder will make sure that the certificate is installed and activated on the edge node during installation.
+You need to rename it to `RHN-ORG-TRUSTED-SSL-CERT.crt`. Edge Image Builder will make sure that the certificate is installed and activated on the edge node during installation.
 
 Now you can run Edge Image Builder:
 
+[,bash,subs="attributes"]
+----
 cd /opt/eib
-
-podman run --rm -it --privileged -v ./:/eib registry.opensuse.org/isv/suse/edge/edgeimagebuilder/containerfile-sp6/suse/edge-image-builder:1.1.0.rc2 build --definition-file iso-definition.yaml
+podman run --rm -it --privileged -v $CONFIG_DIR:/eib \
+registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+build --definition-file iso-definition.yaml
+----
 
 If you have used a different name for your YAML definition file or want to use a different version of Edge Image Builder, you need to adapt the command accordingly.
 
-After the build is finished, you'll find the installation iso in the "/opt/eib" directory as "eib-image.iso".
+After the build is finished, you'll find the installation iso in the `/opt/eib` directory as `eib-image.iso`.
 
 
 
