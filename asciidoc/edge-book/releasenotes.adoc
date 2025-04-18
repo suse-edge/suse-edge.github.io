@@ -31,7 +31,7 @@ NOTE: SUSE Edge z-stream releases are tightly integrated and thoroughly tested a
 [#release-notes-3-2-1]
 = Release 3.2.1
 
-Availability Date: 17th April 2025
+Availability Date: 29th April 2025
 
 Summary: SUSE Edge 3.2.1 is the first z-stream release in the SUSE Edge 3.2 release stream.
 
@@ -51,54 +51,17 @@ Summary: SUSE Edge 3.2.1 is the first z-stream release in the SUSE Edge 3.2 rele
 ** Fix issue causing an unexpected pod restart https://github.com/suse-edge/charts/issues/172[Upstream Chart Issue]
 ** Fix issue which can cause inspection to fail for UEFI systems in some environments https://github.com/suse-edge/charts/pull/189[Upstream Chart Issue]
 * The MetalLB chart contains a fix to ensure downstream images are used when frr-k8s is enabled
-* The Edge Image Builder image has been rebuilt to include the updated MetalLB release mentioned above
+* The Kiwi Builder has been updated to 10.2.12 to match recent security changes in Kiwi, shifting from https://github.com/OSInside/kiwi/commit/d4d39e481aaff8be28337a9c76c3913a8a482628[md5 to sha256 checksum methods] for image verification.
+* The Edge Image Builder image has been rebuilt to include the updated MetalLB release and address the Kiwi changes, both mentioned above.
 * The `kubevirt-dashboard-extension-chart` and `akri-dashboard-extension-chart` have been re-published to correct a version issue causing Rancher to indicate an incorrect upgrade available message
 
-== Known issues
+== Known Issues
 
 * When deploying via the directed network provisioning flow, a bug affects clusters with static IPs in networks with DHCP servers and/or RAs: static network configurations only apply to the provisioned host and will not be in effect during the host discovery and enrollment. Please refer to the https://github.com/suse-edge/atip/tree/main/telco-examples/edge-clusters/dhcp-less/dual-stack/single-node#readme[SUSE Edge for Telco examples repository] for more details and updates.
 * When using `toolbox` in SUSE Linux Micro 6.0, the default container image does not contain some tools which were included in the previous 5.5 version.  The workaround is to configure toolbox to use the previous `suse/sle-micro/5.5/toolbox` container image, see `toolbox --help` for options to configure the image.
-* An SELinux issue, identified as a missing backport in the SUSE Linux Micro kernel, prevents the standard RKE2 1.31.7 `ingress-nginx` image from being used successfully. A workaround must be applied to use a modified version of the image, that applies the required fixes for https://nvd.nist.gov/vuln/detail/CVE-2025-1974[CVE-2025-1974]. The following configuration must be applied to any RKE2 clusters:
+* When updating to RKE2 1.31.7, which resolves https://nvd.nist.gov/vuln/detail/CVE-2025-1974[CVE-2025-1974], SUSE Linux Micro 6.0 *must* be updated to include kernel `>=6.4.0-26-default` or `>=6.4.0-30-rt` (real-time kernel) due to required SELinux kernel patches. If not applied, the ingress-nginx pod will remain in a `CrashLoopBackOff` state. To apply the kernel update run `transactional-update` on the host itself (to update all packages), or `transactional-update pkg update kernel-default` (or kernel-rt) to update just the kernel, then reboot the host. If deploying new clusters, please follow <<guides-kiwi-builder-images>> to build fresh images containing the latest kernel.
 
-[,console]
-----
-apiVersion: helm.cattle.io/v1
-kind: HelmChartConfig
-metadata:
-  name: rke2-ingress-nginx
-  namespace: kube-system
-spec:
-  valuesContent: |-
-    controller:
-      image:
-        tag: v1.12.0-hardened11
-----
-
-If you wish to directly apply this workaround to a running system, this can be applied via a simple `kubectl apply`, following an update to SUSE Edge 3.2.1, and the system should reconcile to a successful state. However, for management at scale, it would be advised to apply this change via Rancher's Fleet implementation by https://fleet.rancher.io/bundle-add[creating a bundle], or add it to your existing https://fleet.rancher.io/gitrepo-add[GitOps repo].
-
-However, if you're creating new images via Edge Image Builder, you can apply the workaround by creating the necessary override before creating your image, as follows:
-
-[,console]
-----
-mkdir -p $CONFIG_DIR/kubernetes/manifests
-
-cat << EOF > $CONFIG_DIR/kubernetes/manifests/rke2-ingress-nginx-config.yaml
-apiVersion: helm.cattle.io/v1
-kind: HelmChartConfig
-metadata:
-  name: rke2-ingress-nginx
-  namespace: kube-system
-spec:
-  valuesContent: |-
-    controller:
-      image:
-        tag: v1.12.0-hardened11
-EOF
-----
-
-NOTE: The requirement for the above workaround will be removed in the coming weeks with updates to SUSE Linux Micro, and as part of a further release of SUSE Edge 3.2.z. This issue does *not* impact K3s.
-
-== Components Versions
+== Component Versions
 
 The following table describes the individual components that make up the 3.2 release, including the version, the Helm chart version (if applicable), and from where the released artifact can be pulled in the binary format. Please follow the associated documentation for usage and deployment examples.
 
@@ -163,7 +126,7 @@ registry.suse.com/edge/3.2/kube-rbac-proxy:0.18.1
 registry.suse.com/rancher/elemental-operator-crds-chart:1.6.5 +
 registry.suse.com/rancher/elemental-operator:1.6.5
 | Elemental Dashboard Extension | 3.0.0 | 3.0.0 | link:https://github.com/rancher/ui-plugin-charts/tree/3.2.0/charts/elemental/3.0.0[Elemental Extension Helm Chart]
-s| Edge Image Builder | 1.1.0 | N/A s| registry.suse.com/edge/3.2/edge-image-builder:1.1.0.1
+s| Edge Image Builder | 1.1.1 | N/A s| registry.suse.com/edge/3.2/edge-image-builder:1.1.1
 | NM Configurator | 0.3.1 | N/A | https://github.com/suse-edge/nm-configurator/releases/tag/v0.3.1[NMConfigurator Upstream Release]
 | KubeVirt | 1.3.1 | 302.0.0+up0.4.0 | registry.suse.com/edge/3.2/kubevirt-chart:302.0.0_up0.4.0 +
 registry.suse.com/suse/sles/15.6/virt-operator:1.3.1 +
@@ -201,7 +164,7 @@ registry.suse.com/rancher/system-upgrade-controller:v0.14.2
 registry.suse.com/edge/3.2/upgrade-controller:0.1.1 +
 registry.suse.com/edge/3.2/kubectl:1.30.3 +
 *registry.suse.com/edge/3.2/release-manifest:3.2.1*
-| Kiwi Builder | 10.1.16.0 | N/A | registry.suse.com/edge/3.2/kiwi-builder:10.1.16.0
+s| Kiwi Builder | 10.2.12.0 | N/A s| registry.suse.com/edge/3.2/kiwi-builder:10.2.12.0
 |======
 
 [#release-notes-3-2-0]
@@ -223,12 +186,12 @@ Summary: SUSE Edge 3.2.0 is the first release in the SUSE Edge 3.2 release strea
 
 * With the included RKE2 CAPI provider version, it is now possible to define dual-stack CAPI clusters. Previously, only single-stack deployments were possible due to a https://github.com/rancher/cluster-api-provider-rke2/pull/452[bug that filtered additional CIDRs] for both Pods and Services. For examples on configuring IPv4, IPv6 and dual-stack downstream clusters (currently limited to single-host deployments), refer to https://github.com/suse-edge/atip[https://github.com/suse-edge/atip].
 
-== Known issues
+== Known Issues
 
 * When deploying via the directed network provisioning flow, a bug affects clusters with static IPs in networks with DHCP servers and/or RAs: static network configurations only apply to the provisioned host and will not be in effect during the host discovery and enrollment. Please refer to the https://github.com/suse-edge/atip/tree/main/telco-examples/edge-clusters/dhcp-less/dual-stack/single-node#readme[SUSE Edge for Telco examples repository] for more details and updates.
 * When using `toolbox` in SUSE Linux Micro 6.0, the default container image does not contain some tools which were included in the previous 5.5 version.  The workaround is to configure toolbox to use the previous `suse/sle-micro/5.5/toolbox` container image, see `toolbox --help` for options to configure the image.
 
-== Components Versions
+== Component Versions
 
 The following table describes the individual components that make up the 3.2 release, including the version, the Helm chart version (if applicable), and from where the released artifact can be pulled in the binary format. Please follow the associated documentation for usage and deployment examples.
 
@@ -332,7 +295,7 @@ registry.suse.com/edge/3.2/release-manifest:3.2.0
 |======
 
 [#tech-previews]
-= Technology previews
+= Technology Previews
 
 Unless otherwise stated, these apply to the 3.2.0 release and all subsequent z-stream versions.
 
@@ -341,7 +304,7 @@ Unless otherwise stated, these apply to the 3.2.0 release and all subsequent z-s
 * IPv6 and dual-stack downstream deployments are a Technology Preview offering and are not subject to the standard scope of support.
 * Precision Time Protocol (PTP) on downstream deployments is a Technology Preview offering and is not subject to standard scope of support.
 
-= Components Verification
+= Component Verification
 
 The components mentioned above may be verified using the Software Bill Of Materials (SBOM) data - for example, using `cosign` as outlined below:
 
