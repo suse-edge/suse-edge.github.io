@@ -1,6 +1,6 @@
 # SUSE Edge website
 
-The latest version of our docs can be found at https://suse-edge.github.io/id-suse-edge-documentation.html
+The latest version of our docs can be found at https://suse-edge.github.io/
 
 
 

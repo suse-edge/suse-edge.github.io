@@ -30,7 +30,7 @@ cluster bare-metal servers, including automated inspection, cleaning and provisi
 
 == High-level architecture
 
-image::quickstart-metal3-architecture.png[]
+image::quickstart-metal3-architecture.svg[]
 
 == Prerequisites
 
@@ -50,7 +50,7 @@ Some tools are required, these can be installed either on the management cluster
 * https://kubernetes.io/docs/reference/kubectl/kubectl/[Kubectl], https://helm.sh[Helm] and https://cluster-api.sigs.k8s.io/user/quick-start.html#install-clusterctl[Clusterctl]
 * A container runtime such as https://podman.io[Podman] or https://rancherdesktop.io[Rancher Desktop]
 
-The `SLE-Micro.x86_64-5.5.0-Default-GM.raw.xz` OS image file must be downloaded from the https://scc.suse.com/[SUSE Customer Center] or the https://www.suse.com/download/sle-micro/[SUSE Download page].
+The `{micro-base-image-raw}` OS image file must be downloaded from the https://scc.suse.com/[SUSE Customer Center] or the https://www.suse.com/download/sle-micro/[SUSE Download page].
 
 === Setup Management Cluster
 
@@ -58,22 +58,22 @@ The basic steps to install a management cluster and use Metal^3^ are:
 
 . Install an RKE2 management cluster
 . Install Rancher
-. Install a storage provider
+. Install a storage provider (optional)
 . Install the Metal^3^ dependencies
-. Install CAPI dependencies
+. Install CAPI dependencies via Rancher Turtles
 . Build a SLEMicro OS image for downstream cluster hosts
 . Register BareMetalHost CRs to define the bare-metal inventory
 . Create a downstream cluster by defining CAPI resources
 
 This guide assumes an existing RKE2 cluster and Rancher (including cert-manager) has been installed, for example by using <<components-eib, Edge Image Builder>>.
 
-TIP: The steps here can also be fully automated as described in the <<atip-management-cluster, ATIP management cluster documentation>>.
+TIP: The steps here can also be fully automated as described in the <<atip-management-cluster, Management Cluster Documentation>>.
 
 === Installing Metal^3^ dependencies
 
 If not already installed as part of the Rancher installation, cert-manager must be installed and running.
 
-A persistent storage provider must be installed. Longhorn is recommended but local-path can also be used for
+A persistent storage provider must be installed. SUSE Storage is recommended but `local-path-provisioner` can also be used for
 dev/PoC environments. The instructions below assume a StorageClass has been
 https://kubernetes.io/docs/tasks/administer-cluster/change-default-storage-class/[marked as default],
 otherwise additional configuration for the Metal^3^ chart is required.
@@ -82,21 +82,21 @@ An additional IP is required, which is managed by https://metallb.universe.tf/[M
 consistent endpoint for the Metal^3^ management services.
 This IP must be part of the control plane subnet and reserved for static configuration (not part of any DHCP pool).
 
-TIP: If the management cluster is a single node, the requirement for an additional floating IP managed via MetalLB can be avoided, see <<Single-node configuration, Single-node configuration>>
+TIP: If the management cluster is a single node, the requirement for an additional floating IP managed via MetalLB can be avoided, see <<Single-node configuration>>
 
 . First, we install MetalLB:
 +
-[,bash]
+[,bash,subs="attributes"]
 ----
 helm install \
-  metallb oci://registry.suse.com/edge/metallb-chart \
+  metallb oci://registry.suse.com/edge/charts/metallb \
   --namespace metallb-system \
   --create-namespace
 ----
 +
-. Then we define an `IPAddressPool` and `L2Advertisment` using the reserved IP, defined as `STATIC_IRONIC_IP` below:
+. Then we define an `IPAddressPool` and `L2Advertisement` using the reserved IP, defined as `STATIC_IRONIC_IP` below:
 +
-[,yaml]
+[,bash]
 ----
 export STATIC_IRONIC_IP=<STATIC_IRONIC_IP>
 
@@ -117,7 +117,7 @@ spec:
 EOF
 ----
 +
-[,yaml]
+[,bash]
 ----
 cat <<-EOF | kubectl apply -f -
 apiVersion: metallb.io/v1beta1
@@ -133,16 +133,16 @@ EOF
 +
 . Now Metal^3^ can be installed:
 +
-[,bash]
+[,bash,subs="attributes"]
 ----
 helm install \
-  metal3 oci://registry.suse.com/edge/metal3-chart \
+  metal3 oci://registry.suse.com/edge/charts/metal3 \
   --namespace metal3-system \
   --create-namespace \
-  --set global.ironicIP="${STATIC_IRONIC_IP}"
+  --set global.ironicIP="$STATIC_IRONIC_IP"
 ----
 +
-. It can take around two minutes for the initContainer to run on this deployment, so ensure the pods are all running before proceeding:
+. It can take around two minutes for the init container to run on this deployment, so ensure the pods are all running before proceeding:
 +
 [,shell]
 ----
@@ -153,45 +153,28 @@ metal3-metal3-ironic-677bc5c8cc-55shd                   4/4     Running   0     
 metal3-metal3-mariadb-7c7d6fdbd8-64c7l                  1/1     Running   0          15m
 ----
 
-WARNING: Do not proceed to the following steps until all pods in the `metal3-system` namespace are running
+WARNING: Do not proceed to the following steps until all pods in the `metal3-system` namespace are running.
 
 === Installing cluster API dependencies
 
-First, we need to disable the Rancher-embedded CAPI controller:
+Cluster API dependencies are managed via the Rancher Turtles Helm chart:
 
-[,bash]
+[,bash,subs="attributes,specialchars"]
 ----
-cat <<-EOF | kubectl apply -f -
-apiVersion: management.cattle.io/v3
-kind: Feature
-metadata:
-  name: embedded-cluster-api
-spec:
-  value: false
+cat > values.yaml <<EOF
+rancherTurtles:
+  features:
+    embedded-capi:
+      disabled: true
+    rancher-webhook:
+      cleanup: true
 EOF
 
-kubectl delete mutatingwebhookconfiguration.admissionregistration.k8s.io mutating-webhook-configuration
-kubectl delete validatingwebhookconfigurations.admissionregistration.k8s.io validating-webhook-configuration
-kubectl wait --for=delete namespace/cattle-provisioning-capi-system --timeout=300s
-----
-
-Then, to use the SUSE images, a configuration file is needed:
-
-[,bash]
-----
-mkdir ~/.cluster-api
-cat >  ~/.cluster-api/clusterctl.yaml <<EOF
-images:
-  all:
-    repository: registry.suse.com/edge
-EOF
-----
-
-Install https://cluster-api.sigs.k8s.io/user/quick-start.html#install-clusterctl[clusterctl] 1.6.x, after which we will install the core, infrastructure, bootstrap and control plane providers as follows:
-
-[,bash]
-----
-clusterctl init --core "cluster-api:v1.6.2" --infrastructure "metal3:v1.6.0" --bootstrap "rke2:v0.2.6" --control-plane "rke2:v0.2.6"
+helm install \
+  rancher-turtles oci://registry.suse.com/edge/charts/rancher-turtles \
+  --namespace rancher-turtles-system \
+  --create-namespace \
+  -f values.yaml
 ----
 
 After some time, the controller pods should be running in the `capi-system`, `capm3-system`, `rke2-bootstrap-system` and `rke2-control-plane-system` namespaces.
@@ -200,40 +183,40 @@ After some time, the controller pods should be running in the `capi-system`, `ca
 
 <<components-eib, Edge Image Builder>> is used to prepare a modified SLEMicro base image which is provisioned on downstream cluster hosts.
 
-Much of the configuration via Edge Image Builder is possible, but in this guide, we cover the minimal configurations necessary to set up the downstream cluster.
+In this guide, we cover the minimal configuration necessary to deploy the downstream cluster.
 
 ==== Image configuration
 
-When running Edge Image Builder, a directory is mounted from the host, so it is necessary to create a directory structure to to store the configuration files used to define the target image.
+When running Edge Image Builder, a directory is mounted from the host, so it is necessary to create a directory structure to store the configuration files used to define the target image.
 
 * `downstream-cluster-config.yaml` is the image definition file, see <<quickstart-eib>> for more details.
 * The base image when downloaded is `xz` compressed, which must be uncompressed with `unxz` and copied/moved under the `base-images` folder.
 * The `network` folder is optional, see <<metal3-add-network-eib>> for more details.
-* The custom/scripts directory contains scripts to be run on first-boot; currently a `growfs.sh` script is required to resize the OS root partition on deployment
+* The custom/scripts directory contains scripts to be run on first-boot; currently a `01-fix-growfs.sh` script is required to resize the OS root partition on deployment
 
-[,console]
+[,console,subs="attributes"]
 ----
 ├── downstream-cluster-config.yaml
 ├── base-images/
-│   └ SLE-Micro.x86_64-5.5.0-Default-GM.raw
+│   └ {micro-base-image-raw}
 ├── network/
 |   └ configure-network.sh
 └── custom/
     └ scripts/
-        └ growfs.sh
+        └ 01-fix-growfs.sh
 ----
 
 ===== Downstream cluster image definition file
 
 The `downstream-cluster-config.yaml` file is the main configuration file for the downstream cluster image. The following is a minimal example for deployment via Metal^3^:
 
-[,yaml]
+[,yaml,subs="attributes"]
 ----
-apiVersion: 1.0
+apiVersion: {version-eib-api-latest}
 image:
-  imageType: RAW
+  imageType: raw
   arch: x86_64
-  baseImage: SLE-Micro.x86_64-5.5.0-Default-GM.raw
+  baseImage: {micro-base-image-raw}
   outputImageName: SLE-Micro-eib-output.raw
 operatingSystem:
   kernelArgs:
@@ -242,29 +225,38 @@ operatingSystem:
   systemd:
     disable:
       - rebootmgr
+      - transactional-update.timer
+      - transactional-update-cleanup.timer
   users:
     - username: root
-      encryptedPassword: ${ROOT_PASSWORD}
+      encryptedPassword: $ROOT_PASSWORD
       sshKeys:
-      - ${USERKEY1}
+      - $USERKEY1
+  packages:
+    packageList:
+      - jq
+  sccRegistrationCode: $SCC_REGISTRATION_CODE
 ----
 
-`$\{ROOT_PASSWORD\}` is the encrypted password for the root user, which can be useful for test/debugging.  It can be generated with the `openssl passwd -6 PASSWORD` command
+Where `$SCC_REGISTRATION_CODE` is the registration code copied from https://scc.suse.com/[SUSE Customer Center], and the package list contains `jq` w
+hich is required.
 
-For the production environments, it is recommended to use the SSH keys that can be added to the users block replacing the `$\{USERKEY1\}` with the real SSH keys.
+`$ROOT_PASSWORD` is the encrypted password for the root user, which can be useful for test/debugging.  It can be generated with the `openssl passwd -6 PASSWORD` command
+
+For the production environments, it is recommended to use the SSH keys that can be added to the users block replacing the `$USERKEY1` with the real SSH keys.
 
 [NOTE]
 ====
 `net.ifnames=1` enables https://documentation.suse.com/smart/network/html/network-interface-predictable-naming/index.html[Predictable Network Interface Naming]
 
-This matches the default configuration for the metal3 chart, but the setting must match the configured chart `predictableNicNames` value.
+This matches the default configuration for the Metal^3^ chart, but the setting must match the configured chart `predictableNicNames` value.
 
-Also note `ignition.platform.id=openstack` is mandatory, without this argument SLEMicro configuration via ignition will fail in the Metal^3^ automated flow.
+Also note that `ignition.platform.id=openstack` is mandatory - without this argument SUSE Linux Micro configuration via ignition will fail in the Metal^3^ automated flow.
 ====
 
 ===== Growfs script
 
-Currently is a custom script (`custom/scripts/growfs.sh`) which is required to grow the file system to the match the disk size on first-boot after provisioning. The `growfs.sh` script contains the following information:
+Currently, a custom script (`custom/scripts/01-fix-growfs.sh`) is required to grow the file system to match the disk size on first-boot after provisioning. The `01-fix-growfs.sh` script contains the following information:
 
 [,shell]
 ----
@@ -289,17 +281,16 @@ growfs /
 Add your own custom scripts to be executed during the provisioning process using the same approach.
 For more information, see <<quickstart-eib>>.
 
-The bug related to this workaround is https://bugzilla.suse.com/show_bug.cgi?id=1217430
 ====
 
 ==== Image creation
 
 Once the directory structure is prepared following the previous sections, run the following command to build the image:
 
-[,shell]
+[,shell,subs="attributes"]
 ----
 podman run --rm --privileged -it -v $PWD:/eib \
- registry.suse.com/edge/edge-image-builder:1.0.2 \
+ registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
  build --definition-file downstream-cluster-config.yaml
 ----
 
@@ -388,9 +379,10 @@ if [ ! -f "${NETWORK_DATA_FILE}" ]; then
 fi
 
 DESIRED_HOSTNAME=$(cat /mnt/openstack/latest/meta_data.json | tr ',{}' '\n' | grep '\"metal3-name\"' | sed 's/.*\"metal3-name\": \"\(.*\)\"/\1/')
+echo "${DESIRED_HOSTNAME}" > /etc/hostname
 
 mkdir -p /tmp/nmc/{desired,generated}
-cp ${NETWORK_DATA_FILE} /tmp/nmc/desired/${DESIRED_HOSTNAME}.yaml
+cp ${NETWORK_DATA_FILE} /tmp/nmc/desired/_all.yaml
 umount /mnt
 
 ./nmc generate --config-dir /tmp/nmc/desired --output-dir /tmp/nmc/generated
@@ -444,7 +436,7 @@ spec:
 # Remaining content as in previous example
 ----
 
-NOTE: although optional in the nmstate API, the mac-address is mandatory for configuration via NM Configurator and must be provided.
+NOTE: In some circumstances the MAC address may be omitted. See <<networking-unified>> for additional details.
 
 ==== BareMetalHost preparation
 
@@ -479,10 +471,9 @@ To deploy the controlplane we define a yaml manifest similar to the one below, w
 * Metal3MachineTemplate defines the OS Image to be applied to the BareMetalHost resources, and the hostSelector defines which BareMetalHosts to consume
 * Metal3DataTemplate defines additional metaData to be passed to the BareMetalHost (note networkData is not currently supported in the Edge solution)
 
-Note for simplicity this example assumes a single-node controlplane, where the BareMetalHost is configured with an IP of `192.168.125.200` - for more
-advanced multi-node examples please see the <<atip-automated-provisioning, ATIP documentation>>
+NOTE: For simplicity this example assumes a single-node control plane where the BareMetalHost is configured with an IP of `192.168.125.200`. For more advanced multi-node examples, please see <<atip-automated-provisioning>>.
 
-[,yaml]
+[,yaml,subs="attributes"]
 ----
 apiVersion: cluster.x-k8s.io/v1beta1
 kind: Cluster
@@ -498,7 +489,7 @@ spec:
       cidrBlocks:
         - 10.96.0.0/12
   controlPlaneRef:
-    apiVersion: controlplane.cluster.x-k8s.io/v1alpha1
+    apiVersion: controlplane.cluster.x-k8s.io/v1beta1
     kind: RKE2ControlPlane
     name: sample-cluster
   infrastructureRef:
@@ -517,7 +508,7 @@ spec:
     port: 6443
   noCloudProvider: true
 ---
-apiVersion: controlplane.cluster.x-k8s.io/v1alpha1
+apiVersion: controlplane.cluster.x-k8s.io/v1beta1
 kind: RKE2ControlPlane
 metadata:
   name: sample-cluster
@@ -528,6 +519,11 @@ spec:
     kind: Metal3MachineTemplate
     name: sample-cluster-controlplane
   replicas: 1
+  version: {version-kubernetes-rke2}
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
   agentConfig:
     format: ignition
     kubelet:
@@ -556,7 +552,6 @@ spec:
                 ExecStartPost=/bin/sh -c "umount /mnt"
                 [Install]
                 WantedBy=multi-user.target
-    version: v1.28.9+rke2r1
 ---
 apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
 kind: Metal3MachineTemplate
@@ -594,13 +589,13 @@ spec:
         object: machine
 ----
 
-When the example above has been copied and adapted to suit your environment, it can be applied via `kubectl` then the cluster status can be monitored with `clusterctl`
+Once adapted to your environment, you can apply the example via `kubectl` and then monitor the cluster status via `clusterctl`.
 
 [,bash]
 ----
 % kubectl apply -f rke2-control-plane.yaml
 
-# Wait for the cluster to be provisioned - status can be checked via clusterctl
+# Wait for the cluster to be provisioned
 % clusterctl describe cluster sample-cluster
 NAME                                                    READY  SEVERITY  REASON  SINCE  MESSAGE
 Cluster/sample-cluster                                  True                     22m
@@ -611,14 +606,14 @@ Cluster/sample-cluster                                  True                    
 
 === Worker/Compute deployment
 
-Similar to the controlplane we define a yaml manifest, which contains the following resources:
+Similar to the control plane deployment, we define a YAML manifest which contains the following resources:
 
 * MachineDeployment defines the number of replicas (hosts) and the bootstrap/infrastructure provider (in this case RKE2/Metal3)
 * RKE2ConfigTemplate describes the RKE2 version and first-boot configuration for agent host bootstrapping
-* Metal3MachineTemplate defines the OS Image to be applied to the BareMetalHost resources, and the hostSelector defines which BareMetalHosts to consume
-* Metal3DataTemplate defines additional metaData to be passed to the BareMetalHost (note networkData is not currently supported in the Edge solution)
+* Metal3MachineTemplate defines the OS Image to be applied to the BareMetalHost resources, and the host selector defines which BareMetalHosts to consume
+* Metal3DataTemplate defines additional metadata to be passed to the BareMetalHost (note that `networkData` is not currently supported)
 
-[,yaml]
+[,yaml,subs="attributes"]
 ----
 apiVersion: cluster.x-k8s.io/v1beta1
 kind: MachineDeployment
@@ -649,7 +644,7 @@ spec:
         kind: Metal3MachineTemplate
         name: sample-cluster-workers
       nodeDrainTimeout: 0s
-      version: v1.28.9+rke2r1
+      version: {version-kubernetes-rke2}
 ---
 apiVersion: bootstrap.cluster.x-k8s.io/v1alpha1
 kind: RKE2ConfigTemplate
@@ -661,7 +656,7 @@ spec:
     spec:
       agentConfig:
         format: ignition
-        version: v1.28.9+rke2r1
+        version: {version-kubernetes-rke2}
         kubelet:
           extraArgs:
             - provider-id=metal3://BAREMETALHOST_UUID
@@ -732,7 +727,7 @@ When the example above has been copied and adapted to suit your environment, it 
 ----
 % kubectl apply -f rke2-agent.yaml
 
-# Wait some time for the compute/agent hosts to be provisioned
+# Wait for the worker nodes to be provisioned
 % clusterctl describe cluster sample-cluster
 NAME                                                    READY  SEVERITY  REASON  SINCE  MESSAGE
 Cluster/sample-cluster                                  True                     25m
@@ -777,18 +772,14 @@ worker-0         available              false            15m
 * The upstream https://github.com/metal3-io/ip-address-manager[IP Address Management controller] is currently not supported, because it's not yet compatible with our choice of network configuration tooling and first-boot toolchain in SLEMicro.
 * Relatedly, the IPAM resources and Metal3DataTemplate networkData fields are not currently supported.
 * Only deployment via redfish-virtualmedia is currently supported.
-* Deployed clusters are not currently imported into Rancher
-* Due to disabling the Rancher embedded CAPI controller, a management cluster configured for Metal^3^ as described above cannot also be used for other cluster provisioning methods such as <<components-elemental, Elemental>>
 
 == Planned changes
 
-* Deployed clusters imported into Rancher, this is planned via https://turtles.docs.rancher.com/[Rancher Turtles] in future
-* Aligning with Rancher Turtles is also expected to remove the requirement to disable the Rancher embedded CAPI, so other cluster methods should be possible via the management cluster.
 * Enable support of the IPAM resources and configuration via networkData fields
 
 == Additional resources
 
-The <<atip, ATIP Documentation>> has examples of more advanced usage of Metal^3^ for telco use-cases.
+The <<atip, SUSE Edge for Telco Documentation>> has examples of more advanced usage of Metal^3^ for telco use-cases.
 
 === Single-node configuration
 
@@ -797,7 +788,7 @@ For test/PoC environments where the management cluster is a single node, it is p
 In this mode, the endpoint for the management cluster APIs is the IP of the management cluster, therefore it should be reserved when using DHCP
 or statically configured to ensure the management cluster IP does not change - referred to as `<MANAGEMENT_CLUSTER_IP>` below.
 
-To enable this scenario the metal3 chart values required are as follows:
+To enable this scenario, the Metal^3^ chart values required are as follows:
 
 [,yaml]
 ----
@@ -811,8 +802,8 @@ metal3-ironic:
 === Disabling TLS for virtualmedia ISO attachment
 
 Some server vendors verify the SSL connection when attaching virtual-media ISO images to the BMC, which can cause a problem because the generated
-certificates for the Metal3 deployment are self-signed, to work around this issue it's possible to disable TLS only for the virtualmedia disk attachment
-with metal3 chart values as follows:
+certificates for the Metal^3^ deployment are self-signed, to work around this issue it's possible to disable TLS only for the virtualmedia disk attachment
+with Metal^3^ chart values as follows:
 
 [,yaml]
 ----
@@ -829,3 +820,22 @@ kubectl get secret -n metal3-system ironic-vmedia-cert -o yaml
 
 The certificate can then be configured on the server BMC console, although the process for that is vendor specific (and not possible for all
 vendors, in which case the `enable_vmedia_tls` flag may be required).
+
+=== Storage configuration
+
+For test/PoC environments where the management cluster is a single node, no persistent storage is required, but for production use-cases it
+is recommended to install SUSE Storage (Longhorn) on the management cluster so that images related to Metal^3^ can be persisted during a pod
+restart/reschedule.
+
+To enable this persistent storage, the Metal^3^ chart values required are as follows:
+
+[,yaml]
+----
+metal3-ironic:
+  persistence:
+    ironic:
+      size: "5Gi"
+----
+
+The <<atip-management-cluster, SUSE Edge for Telco Management Cluster Documentation>> has more details on how to configure a management cluster
+with persistent storage.

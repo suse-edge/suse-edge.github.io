@@ -1,5 +1,5 @@
-[#components-longhorn]
-= Longhorn
+[#components-suse-storage]
+= https://www.suse.com/products/rancher/storage/[SUSE Storage]
 :experimental:
 
 ifdef::env-github[]
@@ -11,22 +11,22 @@ ifdef::env-github[]
 :warning-caption: :warning:
 endif::[]
 
-Longhorn is a lightweight, reliable and user-friendly distributed block storage system designed for Kubernetes.
-As an open source project, Longhorn was initially developed by Rancher Labs and is currently incubated under the CNCF.
+SUSE Storage is a lightweight, reliable, and user-friendly distributed block storage system designed for Kubernetes. It is a product based on Longhorn, an open-source project initially developed by Rancher Labs and currently incubated under the CNCF.
+
 
 == Prerequisites
 
 If you are following this guide, it assumes that you have the following already available:
 
-* At least one host with SLE Micro 5.5 installed; this can be physical or virtual
+* At least one host with SUSE Linux Micro {version-sl-micro} installed; this can be physical or virtual
 * A Kubernetes cluster installed; either K3s or RKE2
 * Helm
 
-== Manual installation of Longhorn
+== Manual installation of SUSE Storage
 
 === Installing Open-iSCSI
 
-A core requirement of deploying and using Longhorn is the installation of the `open-iscsi` package and the `iscsid` daemon running on all Kubernetes nodes.
+A core requirement of deploying and using SUSE Storage is the installation of the `open-iscsi` package and the `iscsid` daemon running on all Kubernetes nodes.
 This is necessary, since Longhorn relies on `iscsiadm` on the host to provide persistent volumes to Kubernetes.
 
 Let's install it:
@@ -36,7 +36,7 @@ Let's install it:
 transactional-update pkg install open-iscsi
 ----
 
-It is important to note that once the operation is completed, the package is only installed into a new snapshot as SLE Micro is an immutable operating system.
+It is important to note that once the operation is completed, the package is only installed into a new snapshot as SUSE Linux Micro is an immutable operating system.
 In order to load it and for the `iscsid` daemon to start running, we must reboot into that new snapshot that we just created.
 Issue the reboot command when you are ready:
 
@@ -47,19 +47,19 @@ reboot
 
 [TIP]
 ====
-For additional help installing open-iscsi, refer to the https://longhorn.io/docs/1.6.1/deploy/install/#installing-open-iscsi[official Longhorn documentation].
+For additional help installing open-iscsi, refer to the {link-longhorn-iscsi}[official Longhorn documentation].
 ====
 
-=== Installing Longhorn
+=== Installing SUSE Storage
 
-There are several ways to install Longhorn on your Kubernetes clusters.
-This guide will follow through the Helm installation, however feel free to follow the https://longhorn.io/docs/1.6.1/deploy/install/[official documentation] if another approach is desired.
+There are several ways to install SUSE Storage on your Kubernetes clusters.
+This guide will follow through the Helm installation, however feel free to follow the {link-longhorn-installation}[official documentation] if another approach is desired.
 
-. Add the Longhorn Helm repository:
+. Add the Rancher Charts Helm repository:
 +
 [,shell]
 ----
-helm repo add longhorn https://charts.longhorn.io
+helm repo add rancher-charts https://charts.rancher.io/
 ----
 +
 . Fetch the latest charts from the repository:
@@ -69,11 +69,12 @@ helm repo add longhorn https://charts.longhorn.io
 helm repo update
 ----
 +
-. Install Longhorn in the longhorn-system namespace:
+. Install SUSE Storage in the `longhorn-system` namespace:
 +
-[,shell]
+[,shell,subs="attributes"]
 ----
-helm install longhorn longhorn/longhorn --namespace longhorn-system --create-namespace --version 1.6.1
+helm install longhorn-crd rancher-charts/longhorn-crd --namespace longhorn-system --create-namespace --version {version-longhorn-crd-chart}
+helm install longhorn rancher-charts/longhorn --namespace longhorn-system --version {version-longhorn-chart}
 ----
 +
 . Confirm that the deployment succeeded:
@@ -108,9 +109,9 @@ longhorn-system   csi-snapshotter-959b69d4b-x7b7t                     1/1     Ru
 longhorn-system   longhorn-csi-plugin-bsc8c                           3/3     Running     0               50s
 ----
 
-== Creating Longhorn volumes
+== Creating SUSE Storage volumes
 
-Longhorn utilizes Kubernetes resources called `StorageClass` in order to automatically provision `PersistentVolume` objects for pods.
+SUSE Storage utilizes Kubernetes resources called `StorageClass` in order to automatically provision `PersistentVolume` objects for pods.
 Think of `StorageClass` as a way for administrators to describe the _classes_ or _profiles_ of storage they offer.
 
 Let's create a `StorageClass` with some default options:
@@ -187,7 +188,7 @@ EOF
 [TIP]
 ====
 The concept of storage in Kubernetes is a complex, but important topic. We briefly mentioned some of the most common Kubernetes resources,
-however, we suggest to familiarize yourself with the https://longhorn.io/docs/1.6.1/terminology/[terminology documentation] that Longhorn offers.
+however, we suggest to familiarize yourself with the {link-longhorn-terminology}[terminology documentation] that Longhorn offers.
 ====
 
 In this example, the result should look something like this:
@@ -245,36 +246,42 @@ kubectl -n longhorn-system get svc
 
 == Installing with Edge Image Builder
 
-SUSE Edge is using <<components-eib>> in order to customize base SLE Micro OS images.
+SUSE Edge is using <<components-eib>> in order to customize base SUSE Linux Micro OS images.
 We are going to demonstrate how to do so for provisioning an RKE2 cluster with Longhorn on top of it.
 
 Let's create the definition file:
 
-[,shell]
+[,shell,subs="attributes,specialchars"]
 ----
 export CONFIG_DIR=$HOME/eib
 mkdir -p $CONFIG_DIR
 
 cat << EOF > $CONFIG_DIR/iso-definition.yaml
-apiVersion: 1.0
+apiVersion: {version-eib-api-latest}
 image:
   imageType: iso
-  baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso
+  baseImage: {micro-base-image-iso}
   arch: x86_64
   outputImageName: eib-image.iso
 kubernetes:
-  version: v1.28.9+rke2r1
+  version: {version-kubernetes-rke2}
   helm:
     charts:
       - name: longhorn
-        version: 1.6.1
+        version: {version-longhorn-chart}
+        repositoryName: longhorn
+        targetNamespace: longhorn-system
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: longhorn-crd
+        version: {version-longhorn-crd-chart}
         repositoryName: longhorn
         targetNamespace: longhorn-system
         createNamespace: true
         installationNamespace: kube-system
     repositories:
       - name: longhorn
-        url: https://charts.longhorn.io
+        url: https://charts.rancher.io
 operatingSystem:
   packages:
     sccRegistrationCode: <reg-code>
@@ -289,14 +296,14 @@ EOF
 [NOTE]
 ====
 Customizing any of the Helm chart values is possible via a separate file provided under `helm.charts[].valuesFile`.
-Refer to the https://github.com/suse-edge/edge-image-builder/blob/release-1.0/docs/building-images.md#kubernetes[upstream documentation] for details.
+Refer to the {link-eib-building-images-k8s}[upstream documentation] for details.
 ====
 
 Let's build the image:
 
-[,shell]
+[,shell,subs="attributes"]
 ----
-podman run --rm --privileged -it -v $CONFIG_DIR:/eib registry.suse.com/edge/edge-image-builder:1.0.2 build --definition-file $CONFIG_DIR/iso-definition.yaml
+podman run --rm --privileged -it -v $CONFIG_DIR:/eib registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} build --definition-file $CONFIG_DIR/iso-definition.yaml
 ----
 
 After the image is built, you can use it to install your OS on a physical or virtual host.
@@ -332,5 +339,5 @@ longhorn-ui-5f4b7bbf69-lh97n                        1/1     Running   3 (2m10s a
 [NOTE]
 ====
 This installation will not work for completely air-gapped environments.
-In those cases, please refer to <<longhorn-install>>.
+In those cases, please refer to <<suse-storage-install>>.
 ====

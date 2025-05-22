@@ -10,13 +10,14 @@ ifdef::env-github[]
 :warning-caption: :warning:
 endif::[]
 
-This section documents and explains the configuration of Telco-specific features on ATIP-deployed clusters.
+This section documents and explains the configuration of Telco-specific features on clusters deployed via SUSE Edge for Telco.
 
-The directed network provisioning deployment method is used, as described in the <<atip-automated-provisioning,ATIP Automated Provision>> section.
+The directed network provisioning deployment method is used, as described in the <<atip-automated-provisioning,Automated Provisioning>> section.
 
 The following topics are covered in this section:
 
 * <<kernel-image-for-real-time,Kernel image for real time>>: Kernel image to be used by the real-time kernel.
+* <<kernel-args,Kernel arguments for low latency and high performance>>: Kernel arguments to be used by the real-time kernel for maximum performance and low latency running telco workloads.
 * <<cpu-tuned-configuration,CPU tuned configuration>>: Tuned configuration to be used by the real-time kernel.
 * <<cni-configuration,CNI configuration>>: CNI configuration to be used by the Kubernetes cluster.
 * <<sriov,SR-IOV configuration>>: SR-IOV configuration to be used by the Kubernetes workloads.
@@ -27,6 +28,7 @@ The following topics are covered in this section:
 * <<numa-aware-scheduling,NUMA-aware scheduling configuration>>: NUMA-aware scheduling configuration to be used by the Kubernetes workloads.
 * <<metal-lb-configuration,Metal LB configuration>>: Metal LB configuration to be used by the Kubernetes workloads.
 * <<private-registry,Private registry configuration>>: Private registry configuration to be used by the Kubernetes workloads.
+* <<ptp-configuration,Precision Time Protocol configuration>>: Configuration files for running PTP telco profiles.
 
 [#kernel-image-for-real-time]
 === Kernel image for real time
@@ -52,13 +54,45 @@ Priority inheritance refers to the ability of a lower priority process to assume
 +
 Processes running in interrupt mode in a general-purpose operating system are not preemptible. With SUSE Linux Enterprise Real Time, these interrupts have been encapsulated by kernel threads, which are interruptible, and allow the hard and soft interrupts to be preempted by user-defined higher priority processes.
 +
-In our case, if you have installed a real-time image like `SLE Micro RT`, kernel real time is already installed. From the https://scc.suse.com/[SUSE Customer Center], you can download the real-time kernel image.
+In our case, if you have installed a real-time image like `SUSE Linux Micro RT`, kernel real time is already installed. From the https://scc.suse.com/[SUSE Customer Center], you can download the real-time kernel image.
 +
 
 [NOTE]
 ====
 For more information about the real-time kernel, visit https://www.suse.com/products/realtime/[SUSE Real Time].
 ====
+
+[#kernel-args]
+=== Kernel arguments for low latency and high performance
+
+The kernel arguments are important to be configured to enable the real-time kernel to work properly giving the best performance and low latency to run telco workloads.  There are some important concepts to keep in mind when configuring the kernel arguments for this use case:
+
+* Remove `kthread_cpus` when using SUSE real-time kernel. This parameter controls on which CPUs kernel threads are created. It also controls which CPUs are allowed for PID 1 and for loading kernel modules (the kmod user-space helper). This parameter is not
+recognized and does not have any effect.
+
+* Add `domain,nohz,managed_irq` flags to `isolcpus` kernel argument. Without any flags, `isolcpus` is equivalent to specifying only the `domain` flag. This isolates the specified CPUs from scheduling, including kernel tasks. The `nohz` flag stops the scheduler tick on the specified CPUs (if only one task is runnable on a CPU), and the `managed_irq` flag avoids routing
+managed external (device) interrupts at the specified CPUs.
+
+* Remove `intel_pstate=passive`. This option configures `intel_pstate` to work with generic cpufreq governors, but to make this work, it disables hardware-managed P-states (`HWP`) as a side effect. To reduce the hardware latency, this option is not recommended for real-time workloads.
+
+* Replace `intel_idle.max_cstate=0 processor.max_cstate=1` with `idle=poll`. To avoid C-State transitions, the `idle=poll` option is used to disable the C-State transitions and keep the CPU in the highest C-State. The `intel_idle.max_cstate=0` option disables `intel_idle`, so `acpi_idle` is used, and `acpi_idle.max_cstate=1` then sets max C-state for acpi_idle.
+On {x86-64} architectures, the first ACPI C-State is always `POLL`, but it uses a `poll_idle()` function, which may introduce some tiny latency by reading the clock periodically, and restarting the main loop in `do_idle()` after a timeout (this also involves clearing and setting the `TIF_POLL` task flag).
+In contrast, `idle=poll` runs in a tight loop, busy-waiting for a task to be rescheduled. This minimizes the latency of exiting the idle state, but at the cost of keeping the CPU running at full speed in the idle thread.
+
+* Disable C1E in BIOS. This option is important to disable the C1E state in the BIOS to avoid the CPU from entering the C1E state when idle. The C1E state is a low-power state that can introduce latency when the CPU is idle.
+
+* Add `nowatchdog` to disable the soft-lockup watchdog which is implemented as a timer running in the timer hard-interrupt context. When it expires (i.e. a soft lockup is detected), it will print a warning (in the hard interrupt context), running any latency targets. Even if it never expires, it goes onto the timer list, slightly increasing the overhead of every timer interrupt.
+This option also disables the NMI watchdog, so NMIs cannot interfere.
+
+* Add `nmi_watchdog=0`. This option disables only the NMI watchdog.
+
+This is an example of the kernel argument list including the aforementioned adjustments:
+
+[,shell]
+----
+GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
+----
+
 
 [#cpu-tuned-configuration]
 === CPU tuned configuration
@@ -71,7 +105,7 @@ To enable and configure this feature, the first thing is to create a profile for
 ----
 $ echo "export tuned_params" >> /etc/grub.d/00_tuned
 
-$ echo "isolated_cores=1-30,33-62" >> /etc/tuned/cpu-partitioning-variables.conf
+$ echo "isolated_cores=1-18,21-38" >> /etc/tuned/cpu-partitioning-variables.conf
 
 $ tuned-adm profile cpu-partitioning
 Tuned (re)started, changes applied.
@@ -86,8 +120,8 @@ The following options are important to be customized with your current hardware 
 | parameter | value | description
 
 | isolcpus
-| 1-30,33-62
-| Isolate the cores 1-30 and 33-62
+| domain,nohz,managed_irq,1-18,21-38
+| Isolate the cores 1-18 and 21-38
 
 | skew_tick
 | 1
@@ -98,28 +132,28 @@ The following options are important to be customized with your current hardware 
 | This option allows the kernel to run the timer tick on a single CPU when the system is idle.
 
 | nohz_full
-| 1-30,33-62
+| 1-18,21-38
 | kernel boot parameter is the current main interface to configure full dynticks along with CPU Isolation.
 
 | rcu_nocbs
-| 1-30,33-62
+| 1-18,21-38
 | This option allows the kernel to run the RCU callbacks on a single CPU when the system is idle.
 
-| kthread_cpus
-| 0,31,32,63
-| This option allows the kernel to run the kthreads on a single CPU when the system is idle.
-
 | irqaffinity
-| 0,31,32,63
+| 0,19,20,39
 | This option allows the kernel to run the interrupts on a single CPU when the system is idle.
 
-| processor.max_cstate
-| 1
-| This option prevents the CPU from dropping into a sleep state when idle
+| idle
+| poll
+| This minimizes the latency of exiting the idle state, but at the cost of keeping the CPU running at full speed in the idle thread.
 
-| intel_idle.max_cstate
+| nmi_watchdog
 | 0
-| This option disables the intel_idle driver and allows acpi_idle to be used
+| This option disables only the NMI watchdog.
+
+| nowatchdog
+|
+| This option disables the soft-lockup watchdog which is implemented as a timer running in the timer hard-interrupt context.
 |===
 
 With the values shown above, we are isolating 60 cores, and we are using four cores for the OS.
@@ -130,7 +164,7 @@ Edit the `/etc/default/grub` file and add the parameters mentioned above:
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="intel_iommu=on intel_pstate=passive processor.max_cstate=1 intel_idle.max_cstate=0 iommu=pt usbcore.autosuspend=-1 selinux=0 enforcing=0 nmi_watchdog=0 crashkernel=auto softlockup_panic=0 audit=0 mce=off hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 default_hugepagesz=1G kthread_cpus=0,31,32,63 irqaffinity=0,31,32,63 isolcpus=1-30,33-62 skew_tick=1 nohz_full=1-30,33-62 rcu_nocbs=1-30,33-62 rcu_nocb_poll"
+GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
 ----
 
 Update the GRUB configuration:
@@ -147,11 +181,21 @@ To validate that the parameters are applied after the reboot, the following comm
 $ cat /proc/cmdline
 ----
 
+There is another script that can be used to tune the CPU configuration, which basically is doing the following steps:
+
+* Set the CPU governor to `performance`.
+* Unset the timer migration to the isolated CPUs.
+* Migrate the kdaemon threads to the housekeeping CPUs.
+* Set the isolated CPUs latency to the lowest possible value.
+* Delay the vmstat updates to 300 seconds.
+
+The script is available at https://raw.githubusercontent.com/suse-edge/atip/refs/heads/{release-tag-atip}/telco-examples/edge-clusters/dhcp-less/eib/custom/files/performance-settings.sh[SUSE Edge for Telco Examples repository].
+
 [#cni-configuration]
 === CNI Configuration
 
 ==== Cilium
-`Cilium` is the default CNI plug-in for ATIP.
+`Cilium` is the default CNI plug-in for SUSE Edge for Telco.
 To enable Cilium on RKE2 cluster as the default plug-in, the following configurations are required in the `/etc/rancher/rke2/config.yaml` file:
 
 [,yaml]
@@ -324,7 +368,7 @@ spec:
       serviceAccountName: sriov-device-plugin
       containers:
       - name: kube-sriovdp
-        image: rancher/hardened-sriov-network-device-plugin:v3.5.1-build20231009-amd64
+        image: rancher/hardened-sriov-network-device-plugin:v3.7.0-build20240816
         imagePullPolicy: IfNotPresent
         args:
         - --log-dir=sriovdp
@@ -405,33 +449,18 @@ If there are no interfaces here, it makes little sense to continue because the i
 
 * Get Helm if not present:
 
-[,shell]
+[,shell,subs="attributes"]
 ----
 $ curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 ----
 
 * Install SR-IOV.
 
-This part could be done in two ways, using the `CLI` or using the `Rancher UI`.
-
-Install Operator from CLI::
-+
+[,shell,subs="attributes"]
 ----
-helm repo add suse-edge https://suse-edge.github.io/charts
-helm install sriov-crd suse-edge/sriov-crd -n sriov-network-operator
-helm install install sriov-network-operator suse-edge/sriov-network-operator -n sriov-network-operator
+helm install sriov-crd oci://registry.suse.com/edge/charts/sriov-crd -n sriov-network-operator
+helm install sriov-network-operator oci://registry.suse.com/edge/charts/sriov-network-operator -n sriov-network-operator
 ----
-+
-Install Operator from Rancher UI::
-+
-Once your cluster is installed, and you have access to the `Rancher UI`, you can install the `SR-IOV Operator` from the `Rancher UI` from the apps tab:
-
-[NOTE]
-====
-Make sure you select the right namespace to install the operator, for example, `sriov-network-operator`.
-====
-+
-image::features_sriov.png[sriov.png]
 
 * Check the  deployed resources crd and pods:
 
@@ -634,7 +663,7 @@ items:
     resourceVersion: "13124"
     uid: df7c89f5-177c-4f30-ae72-7aef3294fb15
   spec:
-    config: '{ "cniVersion":"0.3.1", "name":"network-dpdk","type":"sriov","vlan":500,"vlanQoS":0,"ipam":{"type":"host-local","subnet":"192.168.0.0/24","rangeStart":"192.168.0.10","rangeEnd":"192.168.0.60","routes":[{"dst":"0.0.0.0/0"}],"gateway":"192.168.0.1"}
+    config: '{ "cniVersion":"0.4.0", "name":"network-dpdk","type":"sriov","vlan":500,"vlanQoS":0,"ipam":{"type":"host-local","subnet":"192.168.0.0/24","rangeStart":"192.168.0.10","rangeEnd":"192.168.0.60","routes":[{"dst":"0.0.0.0/0"}],"gateway":"192.168.0.1"}
       }'
 kind: List
 metadata:
@@ -659,7 +688,7 @@ The following steps will show how to enable `DPDK` and how to create `VFs` from 
 
 [,shell]
 ----
-$ transactional-update pkg install dpdk22 dpdk22-tools libdpdk-23
+$ transactional-update pkg install dpdk dpdk-tools libdpdk-23
 $ reboot
 ----
 
@@ -684,7 +713,7 @@ To enable the parameters, add them to the `/etc/default/grub` file:
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="intel_iommu=on intel_pstate=passive processor.max_cstate=1 intel_idle.max_cstate=0 iommu=pt usbcore.autosuspend=-1 selinux=0 enforcing=0 nmi_watchdog=0 crashkernel=auto softlockup_panic=0 audit=0 mce=off hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 default_hugepagesz=1G kthread_cpus=0,31,32,63 irqaffinity=0,31,32,63 isolcpus=1-30,33-62 skew_tick=1 nohz_full=1-30,33-62 rcu_nocbs=1-30,33-62 rcu_nocb_poll"
+GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
 ----
 
 Update the GRUB configuration and reboot the system to apply the changes:
@@ -775,7 +804,7 @@ Modify the GRUB file `/etc/default/grub` to add them to the kernel command line:
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="intel_iommu=on intel_pstate=passive processor.max_cstate=1 intel_idle.max_cstate=0 iommu=pt usbcore.autosuspend=-1 selinux=0 enforcing=0 nmi_watchdog=0 crashkernel=auto softlockup_panic=0 audit=0 mce=off hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 default_hugepagesz=1G kthread_cpus=0,31,32,63 irqaffinity=0,31,32,63 isolcpus=1-30,33-62 skew_tick=1 nohz_full=1-30,33-62 rcu_nocbs=1-30,33-62 rcu_nocb_poll"
+GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
 ----
 
 Update the GRUB configuration and reboot the system to apply the changes:
@@ -886,7 +915,7 @@ Modify the GRUB file `/etc/default/grub` to add them to the kernel command line:
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="intel_iommu=on intel_pstate=passive processor.max_cstate=1 intel_idle.max_cstate=0 iommu=pt usbcore.autosuspend=-1 selinux=0 enforcing=0 nmi_watchdog=0 crashkernel=auto softlockup_panic=0 audit=0 mce=off hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 default_hugepagesz=1G kthread_cpus=0,31,32,63 irqaffinity=0,31,32,63 isolcpus=1-30,33-62 skew_tick=1 nohz_full=1-30,33-62 rcu_nocbs=1-30,33-62 rcu_nocb_poll"
+GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
 ----
 
 Update the GRUB configuration and reboot the system to apply the changes:
@@ -1063,13 +1092,13 @@ For this example, we have only one `NUMA` node showing 64 `CPUs`.
 [#metal-lb-configuration]
 === Metal LB
 
-`MetalLB` is a load-balancer implementation for bare-metal Kubernetes clusters, using standard routing protocols like `L2` and `BGP` as advertisement protocols. It is a network load balancer that can be used to expose services in a Kubernetes cluster to the outside world due to the need to use Kubernetes Services type `LoadBalancer` with bare metal.
+`MetalLB` is a load-balancer implementation for bare-metal Kubernetes clusters, using standard routing protocols like `L2` and `BGP` as advertisement protocols. It is a network load balancer that can be used to expose services in a Kubernetes cluster to the outside world due to the need to use Kubernetes Services type `LoadBalancer` with bare-metal.
 
 To enable `MetalLB` in the `RKE2` cluster, the following steps are required:
 
 * Install `MetalLB` using the following command:
 
-[,shell]
+[,shell,subs="attributes,specialchars"]
 ----
 $ kubectl apply <<EOF -f
 apiVersion: helm.cattle.io/v1
@@ -1078,9 +1107,10 @@ metadata:
   name: metallb
   namespace: kube-system
 spec:
-  repo: https://metallb.github.io/metallb/
-  chart: metallb
+  chart: oci://registry.suse.com/edge/charts/metallb
   targetNamespace: metallb-system
+  version: {version-metallb-chart}
+  createNamespace: true
 ---
 apiVersion: helm.cattle.io/v1
 kind: HelmChart
@@ -1088,9 +1118,10 @@ metadata:
   name: endpoint-copier-operator
   namespace: kube-system
 spec:
-  repo: https://suse-edge.github.io/endpoint-copier-operator
-  chart: endpoint-copier-operator
+  chart: oci://registry.suse.com/edge/charts/endpoint-copier-operator
   targetNamespace: endpoint-copier-operator
+  version: {version-endpoint-copier-operator-chart}
+  createNamespace: true
 EOF
 ----
 
@@ -1204,5 +1235,378 @@ For the registry changes to take effect, you need to either configure this file 
 
 [NOTE]
 ====
-For more information about this, please check https://docs.rke2.io/install/containerd_registry_configuration#registries-configuration-file[containerd registry configuration rke2].
+For more information about this, please check https://documentation.suse.com/cloudnative/rke2/latest/en/install/containerd_registry_configuration.html#_registries_configuration_file[containerd registry configuration rke2].
 ====
+
+[#ptp-configuration]
+=== Precision Time Protocol
+
+Precision Time Protocol (PTP) is a network protocol developed by the Institute of Electrical and Electronics Engineers (IEEE) to enable sub-microsecond time synchronization in a computer network. Since its inception and for a couple of decades now, PTP has been in use in many industries. It has recently seen a growing adoption in the telecommunication networks as a vital element to 5G networks. While being a relatively simple protocol, its configuration can change significantly depending on the application. For this reason, multiple profiles have been defined and standardized.
+
+In this section, only telco-specific profiles will be covered. Consequently time-stamping capability and a PTP hardware clock (PHC) in the NIC will be assumed. Nowadays, all telco-grade network adapters come with PTP support in hardware, but you can verify such capabilities with the following command:
+
+[,console]
+----
+# ethtool -T p1p1
+Time stamping parameters for p1p1:
+Capabilities:
+        hardware-transmit
+        software-transmit
+        hardware-receive
+        software-receive
+        software-system-clock
+        hardware-raw-clock
+PTP Hardware Clock: 0
+Hardware Transmit Timestamp Modes:
+        off
+        on
+Hardware Receive Filter Modes:
+        none
+        all
+----
+
+Replace `p1p1` with name of the interface to be used for PTP.
+
+The following sections will provide guidance on how to install and configure PTP on SUSE Edge specifically, but familiarity with basic PTP concepts is expected. For a brief overview of PTP and the implementation included in SUSE Edge for Telco, refer to https://documentation.suse.com/sles/html/SLES-all/cha-tuning-ptp.html[].
+
+==== Install PTP software components
+
+In SUSE Edge for Telco, the PTP implementation is provided by the `linuxptp` package, which includes two components:
+
+- `ptp4l`: a daemon that controls the PHC on the NIC and runs the PTP protocol
+- `phc2sys`: a daemon that keeps the system clock in sync with the PTP-synchronized PHC on the NIC
+
+Both daemons are required for the system synchronization to fully work and must be correctly configured according to your setup. This is covered in <<ptp-telco-config>>.
+
+The easiest and best way to integrate PTP in your downstream cluster is to add the `linuxptp` package under `packageList` in the Edge Image Builder (EIB) definition file. This way the PTP control plane software will be installed automatically during the cluster provisioning. See the xref:../quickstart/eib.adoc#eib-configuring-rpm-packages[EIB documentation] for more information on installing packages.
+
+Below find a sample EIB manifest with `linuxptp`:
+
+[,yaml]
+----
+apiVersion: 1.0
+image:
+  imageType: RAW
+  arch: x86_64
+  baseImage: {micro-base-rt-image-raw}
+  outputImageName: eibimage-slmicrort-telco.raw
+operatingSystem:
+  time:
+    timezone: America/New_York
+  kernelArgs:
+    - ignition.platform.id=openstack
+    - net.ifnames=1
+  systemd:
+    disable:
+      - rebootmgr
+      - transactional-update.timer
+      - transactional-update-cleanup.timer
+      - fstrim
+      - time-sync.target
+    enable:
+      - ptp4l
+      - phc2sys
+  users:
+    - username: root
+      encryptedPassword: ${ROOT_PASSWORD}
+  packages:
+    packageList:
+      - jq
+      - dpdk
+      - dpdk-tools
+      - libdpdk-23
+      - pf-bb-config
+      - open-iscsi
+      - tuned
+      - cpupower
+      - linuxptp
+    sccRegistrationCode: ${SCC_REGISTRATION_CODE}
+----
+
+[NOTE]
+====
+The `linuxptp` package included in SUSE Edge for Telco does not enable `ptp4l` and `phc2sys` by default. If their system-specific configuration files are deployed at provisioning time (see <<ptp-capi>>), they should be enabled. Do so by adding them to the `systemd` section of the manifest, as in the example above.
+====
+
+Follow the usual process to build the image as described in the xref:../quickstart/eib.adoc#eib-how-to-build-image[EIB Documentation] and use it to deploy your cluster. If you are new to EIB, start from xref:../components/edge-image-builder.adoc#components-eib[] instead.
+
+[#ptp-telco-config]
+==== Configure PTP for telco deployments
+
+Many telco applications require strict phase and time synchronization with little deviance, which resulted in a definition of two telco-oriented profiles: the ITU-T G.8275.1 and ITU-T G.8275.2. They both have a high rate of sync messages and other distinctive traits, such as the use of an alternative Best Master Clock Algorithm (BMCA). Such behavior mandates specific settings in the configuration file consumed by `ptp4l`, provided in the following sections as a reference.
+
+[NOTE]
+====
+* Both sections only cover the case of an ordinary clock in Time Receiver configuration.
+* Any such profile must be used in a well-planned PTP infrastructure.
+* Your specific PTP network may require additional configuration tuning, make sure to review and adapt the provided examples if needed.
+====
+
+===== PTP profile ITU-T G.8275.1
+
+The G.8275.1 profile has the following specifics:
+
+* Runs directly on Ethernet and requires full network support (adjacent nodes/switches must support PTP).
+* The default domain setting is 24.
+* Dataset comparison is based on the G.8275.x algorithm and its `localPriority` values after `priority2`.
+
+Copy the following content to a file named `/etc/ptp4l-G.8275.1.conf`:
+
+[source,]
+----
+# Telecom G.8275.1 example configuration
+[global]
+domainNumber                    24
+priority2			255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout		3
+serverOnly                      0
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+----
+
+Once the file has been created, it must be referenced in `/etc/sysconfig/ptp4l` for the daemon to start correctly. This can be done by changing the `OPTIONS=` line to:
+
+[source,]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf -i $IFNAME --message_tag ptp-8275.1"
+----
+
+More precisely:
+
+- `-f` requires the file name of the configuration file to use; `/etc/ptp4l-G.8275.1.conf` in this case
+- `-i` requires the name of the interface to use, replace `$IFNAME` with a real interface name.
+- `--message_tag` allows to better identify the ptp4l output in the system logs and is optional.
+
+Once the steps above are complete, the `ptp4l` daemon must be (re)started:
+
+[,console]
+----
+# systemctl restart ptp4l
+----
+
+Check the synchronization status by observing the logs with:
+
+[,console]
+----
+# journalctl -e -u ptp4l
+----
+
+===== PTP profile ITU-T G.8275.2
+
+The G.8275.2 profile has the following specifics:
+
+* Runs on IP and does not require full network support (adjacent nodes/switches may not support PTP).
+* The default domain setting is 44.
+* Dataset comparison is based on the G.8275.x algorithm and its `localPriority` values after `priority2`.
+
+Copy the following content to a file named `/etc/ptp4l-G.8275.2.conf`:
+
+[source,]
+----
+# Telecom G.8275.2 example configuration
+[global]
+domainNumber                    44
+priority2			255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             0
+serverOnly                      0
+hybrid_e2e                      1
+inhibit_multicast_service       1
+unicast_listen                  1
+unicast_req_duration            60
+logSyncInterval                 -5
+logMinDelayReqInterval          -4
+announceReceiptTimeout		2
+#
+# Customize the following for slave operation:
+#
+[unicast_master_table]
+table_id                        1
+logQueryInterval                2
+UDPv4                           $PEER_IP_ADDRESS
+[$IFNAME]
+unicast_master_table            1
+----
+
+Make sure to replace the following placeholders:
+
+- `$PEER_IP_ADDRESS` - the IP address of the next PTP node to communicate with, such as the master or boundary clock that will provide synchronization.
+- `$IFNAME` - tells `ptp4l` what interface to use for PTP.
+
+Once the file has been created, it must be referenced, along with the name of the interface to use for PTP, in `/etc/sysconfig/ptp4l` for the daemon to start correctly. This can be done by changing the `OPTIONS=` line to:
+
+[,shell]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.2.conf --message_tag ptp-8275.2"
+----
+
+More precisely:
+
+- `-f` requires the file name of the configuration file to use. In this case, it is `/etc/ptp4l-G.8275.2.conf`.
+- `--message_tag` allows to better identify the ptp4l output in the system logs and is optional.
+
+Once the steps above are complete, the `ptp4l` daemon must be (re)started:
+
+[,console]
+----
+# systemctl restart ptp4l
+----
+
+Check the synchronization status by observing the logs with:
+
+[,console]
+----
+# journalctl -e -u ptp4l
+----
+
+===== Configuration of phc2sys
+
+Although not required, it is recommended that you fully complete the configuration of `ptp4l` before moving to `phc2sys`.
+`phc2sys` does not require a configuration file and its execution parameters can be solely controlled through the `OPTIONS=` variable present in `/etc/sysconfig/ptp4l`, in a similar fashion to `ptp4l`:
+
+[source,]
+----
+OPTIONS="-s $IFNAME -w"
+----
+
+Where `$IFNAME` is the name of the interface already set up in ptp4l that will be used as the source for the system clock. This is used to identify the source PHC.
+
+[#ptp-capi]
+==== Cluster API integration
+
+Whenever a cluster is deployed through a management cluster and directed provisioning, both the configuration file and the two configuration variables in `/etc/sysconfig` can be deployed on the host at provisioning time. Below is an excerpt from a cluster definition, focusing on a modified `RKE2ControlPlane` object that deploys the same G.8275.1 configuration file on all hosts:
+
+[,yaml]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  replicas: 1
+  version: ${RKE2_VERSION}
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  registrationMethod: "control-plane-endpoint"
+  serverConfig:
+    cni: canal
+  agentConfig:
+    format: ignition
+    cisProfile: cis
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+            - name: rke2-preinstall.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=rke2-preinstall
+                Wants=network-online.target
+                Before=rke2-install.service
+                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStartPost=/bin/sh -c "umount /mnt"
+                [Install]
+                WantedBy=multi-user.target
+        storage:
+          files:
+            - path: /etc/ptp4l-G.8275.1.conf
+              overwrite: true
+              contents:
+                inline: |
+                  # Telecom G.8275.1 example configuration
+                  [global]
+                  domainNumber                    24
+                  priority2                       255
+                  dataset_comparison              G.8275.x
+                  G.8275.portDS.localPriority     128
+                  G.8275.defaultDS.localPriority  128
+                  maxStepsRemoved                 255
+                  logAnnounceInterval             -3
+                  logSyncInterval                 -4
+                  logMinDelayReqInterval          -4
+                  announceReceiptTimeout          3
+                  serverOnly                      0
+                  ptp_dst_mac                     01:80:C2:00:00:0E
+                  network_transport               L2
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /etc/sysconfig/ptp4l
+              overwrite: true
+              contents:
+                inline: |
+                  ## Path:           Network/LinuxPTP
+                  ## Description:    Precision Time Protocol (PTP): ptp4l settings
+                  ## Type:           string
+                  ## Default:        "-i eth0 -f /etc/ptp4l.conf"
+                  ## ServiceRestart: ptp4l
+                  #
+                  # Arguments when starting ptp4l(8).
+                  #
+                  OPTIONS="-f /etc/ptp4l-G.8275.1.conf -i $IFNAME --message_tag ptp-8275.1"
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /etc/sysconfig/phc2sys
+              overwrite: true
+              contents:
+                inline: |
+                  ## Path:           Network/LinuxPTP
+                  ## Description:    Precision Time Protocol (PTP): phc2sys settings
+                  ## Type:           string
+                  ## Default:        "-s eth0 -w"
+                  ## ServiceRestart: phc2sys
+                  #
+                  # Arguments when starting phc2sys(8).
+                  #
+                  OPTIONS="-s $IFNAME -w"
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+    kubelet:
+      extraArgs:
+        - provider-id=metal3://BAREMETALHOST_UUID
+    nodeName: "localhost.localdomain"
+----
+
+Besides other variables, the above definition must be completed with the interface name and with the other Cluster API objects, as described in <<atip-automated-provisioning>>.
+
+[NOTE]
+====
+* This approach is convenient only if the hardware in the cluster is uniform and the same configuration is needed on all hosts, interface name included.
+* Alternative approaches are possible and will be covered in future releases.
+====
+
+At this point, your hosts should have a working and running PTP stack and will start negotiating their PTP role.

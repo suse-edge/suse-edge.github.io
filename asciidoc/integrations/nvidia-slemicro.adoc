@@ -1,4 +1,4 @@
-= NVIDIA GPUs on SLE Micro
+= NVIDIA GPUs on SUSE Linux Micro
 :experimental:
 
 ifdef::env-github[]
@@ -12,43 +12,42 @@ endif::[]
 
 == Intro
 
-This guide demonstrates how to implement host-level NVIDIA GPU support via the pre-built https://github.com/NVIDIA/open-gpu-kernel-modules[open-source drivers] on SLE Micro 5.5. These are drivers that are baked into the operating system rather than dynamically loaded by NVIDIA's https://github.com/NVIDIA/gpu-operator[GPU Operator]. This configuration is highly desirable for customers that want to pre-bake all artifacts required for deployment into the image, and where the dynamic selection of the driver version, that is, the user selecting the version of the driver via Kubernetes, is not a requirement. This guide initially explains how to deploy the additional components onto a system that has already been pre-deployed, but follows with a section that describes how to embed this configuration into the initial deployment via Edge Image Builder. If you do not want to run through the basics and set things up manually, skip right ahead to that section.
+This guide demonstrates how to implement host-level NVIDIA GPU support via the pre-built https://github.com/NVIDIA/open-gpu-kernel-modules[open-source drivers] on SUSE Linux Micro {version-operatingsystem}. These are drivers that are baked into the operating system rather than dynamically loaded by NVIDIA's https://github.com/NVIDIA/gpu-operator[GPU Operator]. This configuration is highly desirable for customers that want to pre-bake all artifacts required for deployment into the image, and where the dynamic selection of the driver version, that is, the user selecting the version of the driver via Kubernetes, is not a requirement. This guide initially explains how to deploy the additional components onto a system that has already been pre-deployed, but follows with a section that describes how to embed this configuration into the initial deployment via Edge Image Builder. If you do not want to run through the basics and set things up manually, skip right ahead to that section.
 
 It is important to call out that the support for these drivers is provided by both SUSE and NVIDIA in tight collaboration, where the driver is built and shipped by SUSE as part of the package repositories. However, if you have any concerns or questions about the combination in which you use the drivers, ask your SUSE or NVIDIA account managers for further assistance. If you plan to use https://www.nvidia.com/en-gb/data-center/products/ai-enterprise/[NVIDIA AI Enterprise] (NVAIE), ensure that you are using an https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/platform-support.html#supported-nvidia-gpus-and-systems[NVAIE certified GPU], which _may_ require the use of proprietary NVIDIA drivers. If you are unsure, speak with your NVIDIA representative.
 
-Further information about NVIDIA GPU operator integration is _not_ covered in this guide. While integrating the NVIDIA GPU Operator for Kubernetes is not covered here, you can still follow most of the steps in this guide to set up the underlying operating system and simply enable the GPU operator to use the _pre-installed_ drivers via the `driver.enabled=false` flag in the NVIDIA GPU Operator Helm chart, where it will simply pick up the installed drivers on the host. More comprehensive instructions are available from NVIDIA https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/install-gpu-operator.html#chart-customization-options[here]. SUSE recently also made a https://documentation.suse.com/trd/kubernetes/single-html/gs_rke2-slebci_nvidia-gpu-operator/[Technical Reference Document] (TRD) available that discusses how to use the GPU operator and the NVIDIA proprietary drivers, should this be a requirement for your use case.
+Further information about NVIDIA GPU operator integration is _not_ covered in this guide. While integrating the NVIDIA GPU Operator for Kubernetes is not covered here, you can still follow most of the steps in this guide to set up the underlying operating system and simply enable the GPU operator to use the _pre-installed_ drivers via the `driver.enabled=false` flag in the NVIDIA GPU Operator Helm chart, where it will simply pick up the installed drivers on the host. More comprehensive instructions are available from NVIDIA https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/install-gpu-operator.html#chart-customization-options[here].
+//This doc seems to have vanished from d.s.c.
+//SUSE recently also made a https://documentation.suse.com/trd/kubernetes/single-html/gs_rke2-slebci_nvidia-gpu-operator/[Technical Reference Document] (TRD) available that discusses how to use the GPU operator and the NVIDIA proprietary drivers, should this be a requirement for your use case.
 
 == Prerequisites
 
 If you are following this guide, it assumes that you have the following already available:
 
-* At least one host with SLE Micro 5.5 installed; this can be physical or virtual.
+* At least one host with SUSE Linux Micro {version-operatingsystem} installed; this can be physical or virtual.
 * Your hosts are attached to a subscription as this is required for package access — an evaluation is available https://www.suse.com/download/sle-micro/[here].
-* A https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus[compatible NVIDIA GPU] installed (or _fully_ passed through to the virtual machine in which SLE Micro is running).
+* A https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus[compatible NVIDIA GPU] installed (or _fully_ passed through to the virtual machine in which SUSE Linux Micro is running).
 * Access to the root user — these instructions assume you are the root user, and _not_ escalating your privileges via `sudo`.
 
 == Manual installation
 
-In this section, you are going to install the NVIDIA drivers directly onto the SLE Micro operating system as the NVIDIA open-driver is now part of the core SLE Micro package repositories, which makes it as easy as installing the required RPM packages. There is no compilation or downloading of executable packages required. Below we walk through deploying the "G06" generation of driver, which supports the latest GPUs (see https://en.opensuse.org/SDB:NVIDIA_drivers#Install[here] for further information), so select an appropriate driver generation for the NVIDIA GPU that your system has. For modern GPUs, the "G06" driver is the most common choice.
+In this section, you are going to install the NVIDIA drivers directly onto the SUSE Linux Micro operating system as the NVIDIA open-driver is now part of the core SUSE Linux Micro package repositories, which makes it as easy as installing the required RPM packages. There is no compilation or downloading of executable packages required. Below we walk through deploying the "G06" generation of driver, which supports the latest GPUs (see https://en.opensuse.org/SDB:NVIDIA_drivers#Install[here] for further information), so select an appropriate driver generation for the NVIDIA GPU that your system has. For modern GPUs, the "G06" driver is the most common choice.
 
-Before we begin, it is important to recognize that besides the NVIDIA open-driver that SUSE ships as part of SLE Micro, you might also need additional NVIDIA components for your setup. These could include OpenGL libraries, CUDA toolkits, command-line utilities such as `nvidia-smi`, and container-integration components such as `nvidia-container-toolkit`. Many of these components are not shipped by SUSE as they are proprietary NVIDIA software, or it makes no sense for us to ship them instead of NVIDIA. Therefore, as part of the instructions, we are going to configure additional repositories that give us access to said components and walk through certain examples of how to use these tools, resulting in a fully functional system. It is important to distinguish between SUSE repositories and NVIDIA repositories, as occasionally there can be a mismatch between the package versions that NVIDIA makes available versus what SUSE has built. This usually arises when SUSE makes a new version of the open-driver available, and it takes a couple of days before the equivalent packages are made available in NVIDIA repositories to match.
+Before we begin, it is important to recognize that besides the NVIDIA open-driver that SUSE ships as part of SUSE Linux Micro, you might also need additional NVIDIA components for your setup. These could include OpenGL libraries, CUDA toolkits, command-line utilities such as `nvidia-smi`, and container-integration components such as `nvidia-container-toolkit`. Many of these components are not shipped by SUSE as they are proprietary NVIDIA software, or it makes no sense for us to ship them instead of NVIDIA. Therefore, as part of the instructions, we are going to configure additional repositories that give us access to said components and walk through certain examples of how to use these tools, resulting in a fully functional system. It is important to distinguish between SUSE repositories and NVIDIA repositories, as occasionally there can be a mismatch between the package versions that NVIDIA makes available versus what SUSE has built. This usually arises when SUSE makes a new version of the open-driver available, and it takes a couple of days before the equivalent packages are made available in NVIDIA repositories to match.
 
 We recommend that you ensure that the driver version that you are selecting is compatible with your GPU and meets any CUDA requirements that you may have by checking:
 
 * The https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/[CUDA release notes]
-* The driver version that you plan on deploying has a matching version in the http://download.nvidia.com/suse/sle15sp5/x86_64/[NVIDIA SLE15-SP5 repository] and ensuring that you have equivalent package versions for the supporting components available 
+* The driver version that you plan on deploying has a matching version in the {link-nvidia-driver}[NVIDIA repository] and ensuring that you have equivalent package versions for the supporting components available
 
 [TIP] 
 ====
-To find the NVIDIA open-driver versions, either run `zypper se -s nvidia-open-driver` on the target machine _or_ search the SUSE Customer Center for the "nvidia-open-driver" in https://scc.suse.com/packages?name=SUSE%20Linux%20Enterprise%20Micro&version=5.5&arch=x86_64[SLE Micro 5.5 for x86_64]. 
-
-Here, you will see _four_ versions available, with _545.29.06_ being the newest:
+To find the NVIDIA open-driver versions, either run `zypper se -s nvidia-open-driver` on the target machine _or_ search the SUSE Customer Center for the "nvidia-open-driver" in {link-nvidia-open-driver}[SUSE Linux Micro {version-operatingsystem} for {x86-64}].
 
 image::scc-packages-nvidia.png[SUSE Customer Centre]
 ====
 
-
-When you have confirmed that an equivalent version is available in the NVIDIA repos, you are ready to install the packages on the host operating system. For this, we need to open up a `transactional-update` session, which creates a new read/write snapshot of the underlying operating system so we can make changes to the immutable platform (for further instructions on `transactional-update`, see https://documentation.suse.com/sle-micro/5.4/html/SLE-Micro-all/sec-transactional-udate.html[here]):
+When you have confirmed that an equivalent version is available in the NVIDIA repos, you are ready to install the packages on the host operating system. For this, we need to open up a `transactional-update` session, which creates a new read/write snapshot of the underlying operating system so we can make changes to the immutable platform (for further instructions on `transactional-update`, see {link-micro-transactional-updates}[here]):
 
 [,shell]
 ----
@@ -57,9 +56,9 @@ transactional-update shell
 
 When you are in your `transactional-update` shell, add an additional package repository from NVIDIA. This allows us to pull in additional utilities, for example, `nvidia-smi`:
 
-[,shell]
+[,shell,subs="attributes"]
 ----
-zypper ar https://download.nvidia.com/suse/sle15sp5/ nvidia-sle15sp5-main
+zypper ar {link-nvidia-package-repo} nvidia-suse-main
 zypper --gpg-auto-import-keys refresh
 ----
 
@@ -69,7 +68,7 @@ You can then install the driver and `nvidia-compute-utils` for additional utilit
 zypper install -y --auto-agree-with-licenses nvidia-open-driver-G06-signed-kmp nvidia-compute-utils-G06
 ----
 
-NOTE: If the installation fails, this might indicate a dependency mismatch between the selected driver version and what NVIDIA ships in their repositories. Refer to the previous section to verify that your versions match. Attempt to install a different driver version. For example, if the NVIDIA repositories have an earlier version, you can try specifying `nvidia-open-driver-G06-signed-kmp=545.29.06` on your install command to specify a version that aligns.
+NOTE: If the installation fails, this might indicate a dependency mismatch between the selected driver version and what NVIDIA ships in their repositories. Refer to the previous section to verify that your versions match. Attempt to install a different driver version. For example, if the NVIDIA repositories have an earlier version, you can try specifying `nvidia-open-driver-G06-signed-kmp=550.54.14` on your install command to specify a version that aligns.
 
 Next, if you are _not_ using a supported GPU (remembering that the list can be found https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus[here]), you can see if the driver works by enabling support at the module level, but your mileage may vary — skip this step if you are using a _supported_ GPU:
 
@@ -87,7 +86,7 @@ exit
 
 NOTE: Make sure that you have exited the `transactional-update` session before proceeding.
 
-Now that you have installed the drivers, it is time to reboot. As SLE Micro is an immutable operating system, it needs to reboot into the new snapshot that you created in a previous step. The drivers are only installed into this new snapshot, hence it is not possible to load the drivers without rebooting into this new snapshot, which happens automatically. Issue the reboot command when you are ready:
+Now that you have installed the drivers, it is time to reboot. As SUSE Linux Micro is an immutable operating system, it needs to reboot into the new snapshot that you created in a previous step. The drivers are only installed into this new snapshot, hence it is not possible to load the drivers without rebooting into this new snapshot, which happens automatically. Issue the reboot command when you are ready:
 
 [,shell]
 ----
@@ -105,7 +104,6 @@ The output of this command should show you something similar to the following ou
 
 [,shell]
 ----
-Wed Feb 28 12:31:06 2024
 +---------------------------------------------------------------------------------------+
 | NVIDIA-SMI 545.29.06              Driver Version: 545.29.06    CUDA Version: 12.3     |
 |-----------------------------------------+----------------------+----------------------+
@@ -131,7 +129,7 @@ Wed Feb 28 12:31:06 2024
 +---------------------------------------------------------------------------------------+
 ----
 
-This concludes the installation and verification process for the NVIDIA drivers on your SLE Micro system.
+This concludes the installation and verification process for the NVIDIA drivers on your SUSE Linux Micro system.
 
 == Further validation of the manual installation
 
@@ -174,7 +172,7 @@ With the machine rebooted, you can verify that the system can successfully enume
 nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
 ----
 
-This ensures that any container started on the machine can employ NVIDIA GPU devices that have been discovered. When ready, you can then run a podman-based container. Doing this via `podman` gives us a good way of validating access to the NVIDIA device from within a container, which should give confidence for doing the same with Kubernetes at a later stage. Give `podman` access to the labeled NVIDIA devices that were taken care of by the previous command, based on https://registry.suse.com/bci/bci-base-15sp5/index.html[SLE BCI], and simply run the Bash command:
+This ensures that any container started on the machine can employ NVIDIA GPU devices that have been discovered. When ready, you can then run a podman-based container. Doing this via `podman` gives us a good way of validating access to the NVIDIA device from within a container, which should give confidence for doing the same with Kubernetes at a later stage. Give `podman` access to the labeled NVIDIA devices that were taken care of by the previous command, based on {link-bci}[SLE BCI], and simply run the Bash command:
 
 [,shell]
 ----
@@ -183,9 +181,9 @@ podman run --rm --device nvidia.com/gpu=all --security-opt=label=disable -it reg
 
 You will now execute commands from within a temporary podman container. It does not have access to your underlying system and is ephemeral, so whatever we do here will not persist, and you should not be able to break anything on the underlying host. As we are now in a container, we can install the required CUDA libraries, again checking the correct CUDA version for your driver https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/[here], although the previous output of `nvidia-smi` should show the required CUDA version. In the example below, we are installing _CUDA 12.3_ and pulling many examples, demos and development kits so you can fully validate the GPU:
 
-[,shell]
+[,shell,subs="attributes"]
 ----
-zypper ar http://developer.download.nvidia.com/compute/cuda/repos/sles15/x86_64/ cuda-sle15-sp5
+zypper ar {link-nvidia-cuda-package-repo} cuda-suse
 zypper in -y cuda-libraries-devel-12-3 cuda-minimal-build-12-3 cuda-demo-suite-12-3
 ----
 
@@ -260,7 +258,7 @@ exit
 
 == Implementation with Kubernetes
 
-Now that we have proven the installation and use of the NVIDIA open-driver on SLE Micro, let us explore configuring Kubernetes on the same machine. This guide does not walk you through deploying Kubernetes, but it assumes that you have installed https://k3s.io/[K3s] or https://docs.rke2.io/install/quickstart[RKE2] and that your kubeconfig is configured accordingly, so that standard `kubectl` commands can be executed as the superuser. We assume that your node forms a single-node cluster, although the core steps should be similar for multi-node clusters. First, ensure that your `kubectl` access is working:
+Now that we have proven the installation and use of the NVIDIA open-driver on SUSE Linux Micro, let us explore configuring Kubernetes on the same machine. This guide does not walk you through deploying Kubernetes, but it assumes that you have installed https://k3s.io/[K3s] or https://docs.rke2.io/install/quickstart[RKE2] and that your kubeconfig is configured accordingly, so that standard `kubectl` commands can be executed as the superuser. We assume that your node forms a single-node cluster, although the core steps should be similar for multi-node clusters. First, ensure that your `kubectl` access is working:
 
 [,shell]
 ----
@@ -269,10 +267,10 @@ kubectl get nodes
 
 This should show something similar to the following:
 
-[,shell]
+[,shell,subs="attributes"]
 ----
 NAME       STATUS   ROLES                       AGE   VERSION
-node0001   Ready    control-plane,etcd,master   13d   v1.28.9+rke2r1
+node0001   Ready    control-plane,etcd,master   13d   {version-kubernetes-rke2}
 ----
 
 What you should find is that your k3s/rke2 installation has detected the NVIDIA Container Toolkit on the host and auto-configured the NVIDIA runtime integration into `containerd` (the Container Runtime Interface that k3s/rke2 use). Confirm this by checking the containerd `config.toml` file:
@@ -319,9 +317,9 @@ helm repo update
 
 Now you can install the NVIDIA Device Plugin:
 
-[,shell]
+[,shell,subs="attributes"]
 ----
-helm upgrade -i nvdp nvdp/nvidia-device-plugin --namespace nvidia-device-plugin --create-namespace --version 0.14.5 --set runtimeClassName=nvidia
+helm upgrade -i nvdp nvdp/nvidia-device-plugin --namespace nvidia-device-plugin --create-namespace --version {version-nvidia-device-plugin} --set runtimeClassName=nvidia
 ----
 
 After a few minutes, you see a new pod running that will complete the detection on your available nodes and tag them with the number of GPUs that have been detected:
@@ -414,13 +412,13 @@ NOTE: You need to reboot to make this package available to your applications. Th
 
 == Bringing it together via Edge Image Builder
 
-Okay, so you have demonstrated full functionality of your applications and GPUs on SLE Micro and you now want to use <<components-eib>> to provide it all together via a deployable/consumable ISO or RAW disk image. This guide does not explain how to use Edge Image Builder, but it provides the necessary configurations to build such image. Below you can find an example of an image definition, along with the necessary Kubernetes configuration files, to ensure that all the required components are deployed out of the box. Here is the directory structure of the Edge Image Builder directory for the example shown below:
+Okay, so you have demonstrated full functionality of your applications and GPUs on SUSE Linux Micro and you now want to use <<components-eib>> to provide it all together via a deployable/consumable ISO or RAW disk image. This guide does not explain how to use Edge Image Builder, but it provides the necessary configurations to build such image. Below you can find an example of an image definition, along with the necessary Kubernetes configuration files, to ensure that all the required components are deployed out of the box. Here is the directory structure of the Edge Image Builder directory for the example shown below:
 
-[,shell]
+[,shell,subs="attributes"]
 ----
 .
 ├── base-images
-│   └── SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso
+│   └── {micro-base-image-iso}
 ├── eib-config-iso.yaml
 ├── kubernetes
 │   ├── config
@@ -437,13 +435,13 @@ Okay, so you have demonstrated full functionality of your applications and GPUs 
 
 Let us explore those files. First, here is a sample image definition for a single-node cluster running K3s that deploys the utilities and OpenGL packages, too (`eib-config-iso.yaml`):
 
-[,yaml]
+[,yaml,subs="attributes"]
 ----
-apiVersion: 1.0
+apiVersion: {version-eib-api-latest}
 image:
   arch: x86_64
   imageType: iso
-  baseImage: SLE-Micro.x86_64-5.5.0-Default-SelfInstall-GM2.install.iso
+  baseImage: {micro-base-image-iso}
   outputImageName: deployimage.iso
 operatingSystem:
   time:
@@ -463,15 +461,15 @@ operatingSystem:
       - nvidia-gl-G06
       - nvidia-container-toolkit
     additionalRepos:
-      - url: https://download.nvidia.com/suse/sle15sp5/
+      - url: https://download.nvidia.com/suse/sle15sp6/
       - url: https://nvidia.github.io/libnvidia-container/stable/rpm/x86_64
-    sccRegistrationCode: <snip>
+    sccRegistrationCode: [snip]
 kubernetes:
-  version: v1.28.9+k3s1
+  version: {version-kubernetes-k3s}
   helm:
     charts:
       - name: nvidia-device-plugin
-        version: v0.14.5
+        version: {version-nvidia-device-plugin-chart}
         installationNamespace: kube-system
         targetNamespace: nvidia-device-plugin
         createNamespace: true
@@ -482,7 +480,7 @@ kubernetes:
         url: https://nvidia.github.io/k8s-device-plugin
 ----
 
-NOTE: This is just an example. You may need to customize it to fit your requirements and expectations. Additionally, if using SLE Micro, you need to provide your own `sccRegistrationCode` to resolve package dependencies and pull the NVIDIA drivers.
+NOTE: This is just an example. You may need to customize it to fit your requirements and expectations. Additionally, if using SUSE Linux Micro, you need to provide your own `sccRegistrationCode` to resolve package dependencies and pull the NVIDIA drivers.
 
 Besides this, we need to add additional components, so they get loaded by Kubernetes at boot time. The EIB directory needs a `kubernetes` directory first, with subdirectories for the configuration, Helm chart values and any additional manifests required:
 
@@ -532,16 +530,16 @@ mkdir -p rpms/gpg-keys
 curl -o rpms/gpg-keys/nvidia-container-toolkit.key https://nvidia.github.io/libnvidia-container/gpgkey
 ----
 
-All the required artifacts, including Kubernetes binary, container images, Helm charts (and any referenced images), will be automatically air-gapped, meaning that the systems at deploy time should require no Internet connectivity by default. Now you need only to grab the SLE Micro ISO from the https://www.suse.com/download/sle-micro/[SUSE Downloads Page] (and place it in the `base-images` directory), and you can call the Edge Image Builder tool to generate the ISO for you. To complete the example, here is the command that was used to build the image:
+All the required artifacts, including Kubernetes binary, container images, Helm charts (and any referenced images), will be automatically air-gapped, meaning that the systems at deploy time should require no Internet connectivity by default. Now you need only to grab the SUSE Linux Micro ISO from the https://www.suse.com/download/sle-micro/[SUSE Downloads Page] (and place it in the `base-images` directory), and you can call the Edge Image Builder tool to generate the ISO for you. To complete the example, here is the command that was used to build the image:
 
-[,shell]
+[,shell,subs="attributes"]
 ----
 podman run --rm --privileged -it -v /path/to/eib-files/:/eib \
-registry.suse.com/edge/edge-image-builder:1.0.2 \
+registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
 build --definition-file eib-config-iso.yaml
 ----
 
-For further instructions, please see the https://github.com/suse-edge/edge-image-builder/blob/release-1.0/docs/building-images.md[documentation] for Edge Image Builder.
+For further instructions, please see the {link-eib-building-images}[documentation] for Edge Image Builder.
 
 == Resolving issues
 
