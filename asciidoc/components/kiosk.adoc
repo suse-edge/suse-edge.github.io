@@ -1,0 +1,160 @@
+[#component-kiosk]
+= Building Kiosks with SUSE Edge
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+
+Many times workloads running in edge environments need to have a way for users to interact with them through a graphical interface. To enable these workloads in SUSE Edge, we provide a set of containers and a helm chart to run your graphical applications within K3s or RKE2. 
+
+Running your kiosk (or other HID) applications this way allows for more explicit security boundaries along with allowing for a wider range of languages/frameworks when building your app.
+
+In this guide, we will demonstrate how to manage these workloads in a secure, scalable, and maintainable way. 
+
+== Architecture
+
+image::kiosk-architecture.png[]
+
+The Kubernetes Pod contains the three containers (X11, PulseAudio, and the workload itself)
+
+The workload communicates with both the X11 and PulseAudio containers through a unix socket that's created in EmptyDir to allow communication between containers. They also use an EmptyDir to share the Xauthority token.
+
+Both the PulseAudio and X11 containers use udev to communicate with the hardware. (That's a slight oversimplification...)
+
+== Prerequisites
+
+To run this, you will need a system with:
+- SLE Micro 5.5+
+- Either K3s or RKE2 1.29+
+- Helm installed (if not using EIB or Fleet)
+- A display attached (when running in a VM, make sure to use a virtual display instead of the "console" output)
+
+== Deployment
+
+The preferred way to deploy on Kubernetes is through the helm chart.
+
+TODO add link to chart once published. 
+
+We need to install helm first with:
+[,bash]
+----
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+----
+
+Once helm is installed, install the chart by running:
+
+[,bash] 
+----
+helm upgrade --install kiosk --namespace kiosk --create-namespace oci://link-to-chart --version=0.1.0
+----
+
+To change the URL that's loaded:
+
+[,bash] 
+----
+helm upgrade --install kiosk --namespace kiosk --create-namespace oci://link-to-chart --version=0.1.0 --set workload.url=http://<svcname>.svc.<namespace>.cluster.local
+----
+
+
+== Custom Workloads
+
+By default, the helm chart runs Firefox in kiosk mode and uses the `workload.url` value to specify what page to load. 
+
+If you want to replace Firefox with your own application, you need to build your application into an OCI container image then specify it through the `workload.image.repository` and `workload.image.tag` values. 
+
+The application container needs the appropriate libraries to be able to communicate with X11. As an example, here are the libraries required for Electron apps:
+
+- `libX11-xcb1`
+- `libgtk-3-0`
+- `mozilla-nss`
+- `xorg-x11-fonts`
+- `libpulse0`
+- `libavcodec58`
+- `libasound2`
+- `npm-default`
+- `nodejs-default`
+
+## Flow of Display Control on System Boot
+
+When the server is starting up, here's the order of which components control what's being shown on the display.
+
+- UEFI (Firmware)
+
+The first thing you see is determined by the system's firmware. Different system manufactures provide more or less control over this portion of the process.
+
+- Grub Bootloader
+
+Grub then takes over from the firmware and shows the boot menu. This step can be branded or skipped depending on needs.
+
+- Linux Framebuffer device
+
+Once the system starts booting and execution is handed from the bootloader to the linux kernel, the system will start displaying logs or other basic graphics. The logs can be removed by adding `quiet` to the kernel arguments and we can write an image directly to the framebuffer.
+
+- X11 
+
+When X11 starts up, it will take over the display and show a desktop. When we don't run a taskbar or any applications, you will only see the background. By replacing the background, you can change what's displayed while the application is starting.
+
+- Application
+
+Lastly, the application itself will be composited on top of the background. For most kiosk applications, you will likely want to have this be fullscreen so the background becomes hidden.
+
+
+== FAQs
+
+=== How can I adjust what's displayed during boot?
+
+There are several parts of the boot process that can be branded based on your individual needs.
+
+
+TODO: The Grub2 menu can be bypassed or branded [...]
+
+
+Adding `quiet` to your kernel bootargs will remove the text that is seen on boot of linux systems.
+
+Masking `console-getty.service` and `getty@tty1.service` will remove the login prompt. 
+
+Doing both of these will show a blank screen with a flashing cursor in the top-left corner. To show something on screen between the GRUB splash screen, you could use `plymouth` or just `cat` a raw framebuffer file to `/dev/fb0`. (Check out https://github.com/zqb-all/convertfb for a tool on converting images to the right format)
+
+=== How can I turn off key combinations?
+
+To disallow closing the application or otherwise tampering with the kiosk, it can be useful to remap or turn off certain keys. This can be done using (xmodmap)[https://linux.die.net/man/1/xmodmap]
+
+The helm chart allows for customizing this file with values that looks like this: 
+
+[,yaml]
+```
+X11:
+  keyboardModMap: |
+    clear control
+    clear mod1
+    clear mod2 
+    clear mod3
+    clear mod4
+    clear mod5
+    keycode  66 =
+    keycode 108 =
+    keycode 133 =
+    keycode 134 =
+    keycode 150 =
+    keycode 204 =
+    keycode 205 =
+    keycode 206 =
+    keycode 207 =
+```
+
+=== How can I access services from the browser or workload
+
+Like any kubernetes workload, the kiosk workload can access resources that are available to the pod. This includes other services in the same kubernetes cluster through `<svc_name>.<ns>.<svc>.cluster.local` and can be controlled through the cluster's NetworkPolicies.
+
+If you need to access services on the node that are outside of the cluster (such as Cockpit for local administration), you need to either know your node's ip address or provide a loopback address that's not already assigned. For example, you could add the non-routable address of `172.16.0.1` to each of your nodes' `lo` device.
+
+=== How can I debug a web app while using Firefox
+
+TODO: write up how to attach Dev Tools through a remote socket with `--start-debugger-server`
