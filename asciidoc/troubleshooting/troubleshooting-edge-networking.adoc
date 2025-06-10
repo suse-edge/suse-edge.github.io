@@ -1,0 +1,60 @@
+[#troubleshooting-edge-networking]
+== Troubleshooting Edge Networking (NMC)
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+NMC is injected on SL Micro EIB images to configure the network of the Edge hosts at boot time via combustion. It is also being executed on the Metal3 workflow as part of the inspection process. Issues can happen when the host is being booted for the first time or on the Metal3 inspection process.
+
+.Common Issues
+
+* *Host not being able to boot properly the first time*:Malformed network definition files can lead to the combustion phase to fail and then the host drops a root shell.
+* *Files are not properly generated*:Ensure the network files matches https://nmstate.io/examples.html[NMState] format
+* *Network interfaces are not correctly configured*:Ensure the MAC addresses match the interfaces being used on the host.
+* *Mismatch between interface names*:The `net.ifnames=1` kernel argument enables https://documentation.suse.com/smart/network/html/network-interface-predictable-naming/index.html[Predictable Naming Scheme for Network Interfaces] so there is no `eth0` anymore but other naming schema such as `enp2s0`
+
+.Logs
+
+* *Combustion logs*:As nmc is being used at combustion time, check combustion logs with `journalctl -u combustion` on the host being provisioned.
+* *NetworkManager logs*: On the Metal^3^ deployment workflow, nmc is part of the IPA execution and it is being executed as a dependency of the NetworkManager service using systemd’s ExecStartPre functionality. Check NetworkManager logs on the IPA host as `journalctl -u NetworkManager` (see the Troubleshooting Directed-network provisioning section to understand how to access the host when booted with IPA)
+
+
+.Troubleshooting steps
+
+. *Verify the yaml syntax*: nmc configuration files are yaml files, check the proper syntax with `yamllint` or similar tools
+. *Run nmc manually*: As nmc is part of the edge-image-builder container, to debug any issues, a local podman command can be used.
+.. Create a temporary folder to store the nmc files
++
+[,shell]
+----
+	mkdir -p ${HOME}/tmp/foo
+----
+
+.. Save the nmc files on that location
++
+[,shell]
+----
+❯ tree --noreport ${HOME}/tmp/foo
+/Users/johndoe/tmp/foo
+├── host1.example.com.yaml
+└── host2.example.com.yaml
+----
+.. Run the EIB container with nmc as the entrypoint and the generate command to perform the same tasks nmc would do at combustion time:
++
+[,shell]
+----
+podman run -it --rm -v ${HOME}/tmp/foo:/tmp/foo:Z --entrypoint=/usr/bin/nmc registry.suse.com/edge/3.3/edge-image-builder:1.2.0 generate --config-dir /tmp/foo --output-dir /tmp/foo/
+[2025-06-04T11:58:37Z INFO  nmc::generate_conf] Generating config from "/tmp/foo/host2.example.com.yaml"...
+[2025-06-04T11:58:37Z INFO  nmc::generate_conf] Generating config from "/tmp/foo/host1.example.com.yaml"...
+[2025-06-04T11:58:37Z INFO  nmc] Successfully generated and stored network config
+----
+
+.. Observe the logs and files being generated on the temporary folder
+
