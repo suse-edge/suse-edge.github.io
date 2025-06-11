@@ -40,8 +40,6 @@ To run this, you will need a system with:
 
 The preferred way to deploy on Kubernetes is through the helm chart.
 
-TODO add link to chart once published. 
-
 We need to install helm first with:
 [,bash]
 ----
@@ -52,14 +50,14 @@ Once helm is installed, install the chart by running:
 
 [,bash] 
 ----
-helm upgrade --install kiosk --namespace kiosk --create-namespace oci://link-to-chart --version=0.1.0
+helm upgrade --install kiosk --namespace kiosk --create-namespace oci://registry.suse.com/suse/kiosk/kiosk-chart --version=1.0.0
 ----
 
 To change the URL that's loaded:
 
 [,bash] 
 ----
-helm upgrade --install kiosk --namespace kiosk --create-namespace oci://link-to-chart --version=0.1.0 --set workload.url=http://<svcname>.svc.<namespace>.cluster.local
+helm upgrade --install kiosk --namespace kiosk --create-namespace oci://registry.suse.com/suse/kiosk/kiosk-chart --version=1.0.0 --set workload.url=http://<svcname>.svc.<namespace>.cluster.local
 ----
 
 
@@ -82,6 +80,8 @@ The application container needs the appropriate libraries to be able to communic
 - `libxshmfence1`
 - `libdrm`
 - `libgbm1`
+- `libgdm1`
+
 
 == Flow of Display Control on System Boot
 
@@ -108,9 +108,9 @@ When X11 starts up, it will take over the display and show a desktop. When we do
 Lastly, the application itself will be composited on top of the background. For most kiosk applications, you will likely want to have this be fullscreen so the background becomes hidden.
 
 
-== FAQs
+== Customizations
 
-=== How can I adjust what's displayed during boot?
+=== Adjusting what's displayed during boot
 
 There are several parts of the boot process that can be branded based on your individual needs.
 
@@ -124,7 +124,7 @@ Masking `console-getty.service` and `getty@tty1.service` will remove the login p
 
 Doing both of these will show a blank screen with a flashing cursor in the top-left corner. To show something on screen between the GRUB splash screen, you could use `plymouth` or just `cat` a raw framebuffer file to `/dev/fb0`. (Check out https://github.com/zqb-all/convertfb for a tool on converting images to the right format)
 
-=== How can I turn off key combinations?
+=== Turning off key combinations
 
 To disallow closing the application or otherwise tampering with the kiosk, it can be useful to remap or turn off certain keys. This can be done using (xmodmap)[https://linux.die.net/man/1/xmodmap]
 
@@ -151,18 +151,13 @@ X11:
     keycode 207 =
 ```
 
-=== How can I access services from the browser or workload?
+=== Accessing services from the GUI workload
 
 Like any kubernetes workload, the kiosk workload can access resources that are available to the pod. This includes other services in the same kubernetes cluster through `<svc_name>.<ns>.<svc>.cluster.local` and can be controlled through the cluster's NetworkPolicies.
 
 If you need to access services on the node that are outside of the cluster (such as Cockpit for local administration), you need to either know your node's ip address or provide a loopback address that's not already assigned. For example, you could add the non-routable address of `172.16.0.1` to each of your nodes' `lo` device.
 
-=== How can I debug a web app while using Firefox?
-
-TODO: write up how to attach Dev Tools through a remote socket with `--start-debugger-server`
-
-
-=== How can I force custom hostnames?
+=== How can I add custom hostnames?
 
 The helm chart allows for adding additional hostname resolution in case your workload needs to refer to static ip addresses: 
 
@@ -174,7 +169,7 @@ hostAliases:
   ip: "172.16.0.1"
 ```
 
-=== How can I connect to a service that uses self signed certs?
+=== Connecting to a service that uses self signed certs
 
 If your UI needs to load from locations that are secured with self-signed certificates, this is complicated by Chromium (and related stacks such as Electron) using it's own trust store for certificates so you need to load a new one in separately.
 
@@ -215,6 +210,7 @@ workload:
 === Forcing a specific resolution
 
 Most displays will negotiate the best resolution possible but sometimes you may want to force a specific resolution. To achieve this, you can overwrite the script that does the display setup with the xinitrcOverride helm value:
+
 [,yaml]
 ```
 X11:
@@ -242,9 +238,9 @@ X11:
     exec icewm-session-lite
 ```
 
-=== Change /dev/shm size
+=== Changing /dev/shm size
 
-By default, we mount in an in-memory tmpfs to be used by the application. The limit for this volume is set to 256Mi but can be adjusted with the following helm values:
+By default, the chart mounts in an in-memory tmpfs to be used by the application. The limit for this volume is set to 256Mi but can be adjusted with the following helm values:
 
 [,yaml]
 ```
@@ -262,11 +258,15 @@ workload:
     enabled: false
 ```
 
-=== Run a VNC server to allow for development in VMs
 
-When doing development work on a GUI application, it may be needed to run inside VMs that wouldn't have a display attached. We can get around this issue by adding a VNC server. Please note that this is not recommended in production environments due to potential security issues.
+=== Running additional sidecars in the same pod
 
-To add a VNC server, install the helm chart with the following values:
+If you have additional workloads that need to get run as sidecars for your GUI application, you can do that by adding them to the `additionalContainers` section in the values file. If the container needs access to the display, you can achieve that with `accessDisplay: true`. 
+
+
+An example of where this can be useful is when doing development work on a GUI application. It may be needed to run inside VMs that wouldn't have a display attached. We can get around this issue by adding a VNC server. (Please note that this is not recommended in production environments due to potential security issues)
+
+To add a VNC server, install the helm chart with the following values included:
 
 [,yaml]
 ```
