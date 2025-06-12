@@ -52,6 +52,42 @@ Summary: SUSE Edge 3.1.2 is the second release z-stream in the SUSE Edge 3.1 rel
 == Known Issues
 
 * When updating to RKE2 1.30.11, which resolves https://nvd.nist.gov/vuln/detail/CVE-2025-1974[CVE-2025-1974], SUSE Linux Micro 6.0 *must* be updated to include kernel `>=6.4.0-26-default` or `>=6.4.0-30-rt` (real-time kernel) due to required SELinux kernel patches. If not applied, the ingress-nginx pod will remain in a `CrashLoopBackOff` state. To apply the kernel update run `transactional-update` on the host itself (to update all packages), or `transactional-update pkg update kernel-default` (or kernel-rt) to update just the kernel, then reboot the host. If deploying new clusters, please follow <<guides-kiwi-builder-images>> to build fresh images containing the latest kernel.
+* A bug with Kubernetes Job Controller has been identified that on certain conditions it can cause the RKE2/K3s nodes to stay in `NotReady` state (see the https://github.com/rancher/rke2/issues/8357[#8357 RKE2 issue]). The errors can look like:
+
+[,bash]
+----
+E0605 23:11:18.489721   	1 job_controller.go:631] "Unhandled Error" err="syncing job: tracking status: adding uncounted pods to status: Operation cannot be fulfilled on jobs.batch \"helm-install-rke2-ingress-nginx\": StorageError: invalid object, Code: 4, Key: /registry/jobs/kube-system/helm-install-rke2-ingress-nginx, ResourceVersion: 0, AdditionalErrorMsg: Precondition failed: UID in precondition: 0aa6a781-7757-4c61-881a-cb1a4e47802c, UID in object meta: 6a320146-16b8-4f83-88c5-fc8b5a59a581" logger="UnhandledError"
+----
+
+As a workaround, the `kube-controller-manager` pod can be restarted with `crictl` as:
+
+[,bash]
+----
+export CONTAINER_RUNTIME_ENDPOINT=unix:///run/k3s/containerd/containerd.sock
+export KUBEMANAGER_POD=$(/var/lib/rancher/rke2/bin/crictl ps --label io.kubernetes.container.name=kube-controller-manager --quiet)
+/var/lib/rancher/rke2/bin/crictl stop ${KUBEMANAGER_POD} && \
+/var/lib/rancher/rke2/bin/crictl rm ${KUBEMANAGER_POD}
+----
+
+* On RKE2/K3s 1.31 and 1.32 versions, the directory `/etc/cni` being used to store CNI configurations may not trigger a notification of the files being written there to `containerd` due to certain conditions related to `overlayfs` (see the https://github.com/rancher/rke2/issues/8356[#8356 RKE2 issue]). This in turn results in the deployment of RKE2/K3s to get stuck waiting for the CNI to start, and the RKE2/K3s nodes to stay in `NotReady` state. This can be seen at node level with `kubectl describe node <affected_node>`:
+
+[,bash]
+----
+​​Conditions:
+  Type         	Status  LastHeartbeatTime             	LastTransitionTime            	Reason                   	Message
+  ----         	------  -----------------             	------------------            	------                   	-------
+  Ready        	False   Thu, 05 Jun 2025 17:41:28 +0000   Thu, 05 Jun 2025 14:38:16 +0000   KubeletNotReady          	container runtime network not ready: NetworkReady=false reason:NetworkPluginNotReady message:Network plugin returns error: cni plugin not initialized
+----
+
+As a workaround, a tmpfs volume can be mounted at the `/etc/cni` directory before RKE2 starts. It avoids the usage of overlayfs which results in containerd missing notifications and the configs should get rewritten every time the node is restarted and the pods initcontainers run again. If using EIB, this can be a `04-tmpfs-cni.sh` script in the `custom/scripts` directory (as explained here[https://github.com/suse-edge/edge-image-builder/blob/release-1.2/docs/building-images.md#custom]) that looks like:
+
+[,bash]
+----
+#!/bin/bash
+mkdir -p /etc/cni
+mount -t tmpfs -o mode=0700,size=5M tmpfs /etc/cni
+echo "tmpfs /etc/cni tmpfs defaults,size=5M,mode=0700 0 0" >> /etc/fstab
+----
 
 == Components Versions
 
@@ -161,6 +197,44 @@ Summary: SUSE Edge 3.1.1 is the first release z-stream in the SUSE Edge 3.1 rele
 * The Metal^3^ chart resolves security issues identified in https://www.cve.org/CVERecord?id=CVE-2024-43803:[CVE-2024-43803]: https://github.com/suse-edge/charts/pull/162[SUSE Edge issue #162]
 * The Metal^3^ chart resolves security issues identified in https://www.cve.org/CVERecord?id=CVE-2024-44082:[CVE-2024-44082]: https://github.com/suse-edge/charts/pull/160[SUSE Edge issue #160]
 * The RKE2 CAPI provider is updated to resolve an issue where ETCD becomes unavailable on update: https://github.com/rancher/cluster-api-provider-rke2/issues/449[RKE2 provider issue #449]
+
+== Known issues
+* A bug with Kubernetes Job Controller has been identified that on certain conditions it can cause the RKE2/K3s nodes to stay in `NotReady` state (see the https://github.com/rancher/rke2/issues/8357[#8357 RKE2 issue]). The errors can look like:
+
+[,bash]
+----
+E0605 23:11:18.489721   	1 job_controller.go:631] "Unhandled Error" err="syncing job: tracking status: adding uncounted pods to status: Operation cannot be fulfilled on jobs.batch \"helm-install-rke2-ingress-nginx\": StorageError: invalid object, Code: 4, Key: /registry/jobs/kube-system/helm-install-rke2-ingress-nginx, ResourceVersion: 0, AdditionalErrorMsg: Precondition failed: UID in precondition: 0aa6a781-7757-4c61-881a-cb1a4e47802c, UID in object meta: 6a320146-16b8-4f83-88c5-fc8b5a59a581" logger="UnhandledError"
+----
+
+As a workaround, the `kube-controller-manager` pod can be restarted with `crictl` as:
+
+[,bash]
+----
+export CONTAINER_RUNTIME_ENDPOINT=unix:///run/k3s/containerd/containerd.sock
+export KUBEMANAGER_POD=$(/var/lib/rancher/rke2/bin/crictl ps --label io.kubernetes.container.name=kube-controller-manager --quiet)
+/var/lib/rancher/rke2/bin/crictl stop ${KUBEMANAGER_POD} && \
+/var/lib/rancher/rke2/bin/crictl rm ${KUBEMANAGER_POD}
+----
+
+* On RKE2/K3s 1.31 and 1.32 versions, the directory `/etc/cni` being used to store CNI configurations may not trigger a notification of the files being written there to `containerd` due to certain conditions related to `overlayfs` (see the https://github.com/rancher/rke2/issues/8356[#8356 RKE2 issue]). This in turn results in the deployment of RKE2/K3s to get stuck waiting for the CNI to start, and the RKE2/K3s nodes to stay in `NotReady` state. This can be seen at node level with `kubectl describe node <affected_node>`:
+
+[,bash]
+----
+​​Conditions:
+  Type         	Status  LastHeartbeatTime             	LastTransitionTime            	Reason                   	Message
+  ----         	------  -----------------             	------------------            	------                   	-------
+  Ready        	False   Thu, 05 Jun 2025 17:41:28 +0000   Thu, 05 Jun 2025 14:38:16 +0000   KubeletNotReady          	container runtime network not ready: NetworkReady=false reason:NetworkPluginNotReady message:Network plugin returns error: cni plugin not initialized
+----
+
+As a workaround, a tmpfs volume can be mounted at the `/etc/cni` directory before RKE2 starts. It avoids the usage of overlayfs which results in containerd missing notifications and the configs should get rewritten every time the node is restarted and the pods initcontainers run again. If using EIB, this can be a `04-tmpfs-cni.sh` script in the `custom/scripts` directory (as explained here[https://github.com/suse-edge/edge-image-builder/blob/release-1.2/docs/building-images.md#custom]) that looks like:
+
+[,bash]
+----
+#!/bin/bash
+mkdir -p /etc/cni
+mount -t tmpfs -o mode=0700,size=5M tmpfs /etc/cni
+echo "tmpfs /etc/cni tmpfs defaults,size=5M,mode=0700 0 0" >> /etc/fstab
+----
 
 == Components Versions
 
@@ -294,6 +368,44 @@ Summary: SUSE Edge 3.1.0 is the first release in the SUSE Edge 3.1 release strea
 * Edge Image Builder Fixes
 ** Certain Helm charts fail when templated without specified API Versions: https://github.com/suse-edge/edge-image-builder/issues/481[EIB issue #481]
 ** Large Helm manifests fail to install: https://github.com/suse-edge/edge-image-builder/issues/491[EIB issue #491]
+
+== Known issues
+* A bug with Kubernetes Job Controller has been identified that on certain conditions it can cause the RKE2/K3s nodes to stay in `NotReady` state (see the https://github.com/rancher/rke2/issues/8357[#8357 RKE2 issue]). The errors can look like:
+
+[,bash]
+----
+E0605 23:11:18.489721   	1 job_controller.go:631] "Unhandled Error" err="syncing job: tracking status: adding uncounted pods to status: Operation cannot be fulfilled on jobs.batch \"helm-install-rke2-ingress-nginx\": StorageError: invalid object, Code: 4, Key: /registry/jobs/kube-system/helm-install-rke2-ingress-nginx, ResourceVersion: 0, AdditionalErrorMsg: Precondition failed: UID in precondition: 0aa6a781-7757-4c61-881a-cb1a4e47802c, UID in object meta: 6a320146-16b8-4f83-88c5-fc8b5a59a581" logger="UnhandledError"
+----
+
+As a workaround, the `kube-controller-manager` pod can be restarted with `crictl` as:
+
+[,bash]
+----
+export CONTAINER_RUNTIME_ENDPOINT=unix:///run/k3s/containerd/containerd.sock
+export KUBEMANAGER_POD=$(/var/lib/rancher/rke2/bin/crictl ps --label io.kubernetes.container.name=kube-controller-manager --quiet)
+/var/lib/rancher/rke2/bin/crictl stop ${KUBEMANAGER_POD} && \
+/var/lib/rancher/rke2/bin/crictl rm ${KUBEMANAGER_POD}
+----
+
+* On RKE2/K3s 1.31 and 1.32 versions, the directory `/etc/cni` being used to store CNI configurations may not trigger a notification of the files being written there to `containerd` due to certain conditions related to `overlayfs` (see the https://github.com/rancher/rke2/issues/8356[#8356 RKE2 issue]). This in turn results in the deployment of RKE2/K3s to get stuck waiting for the CNI to start, and the RKE2/K3s nodes to stay in `NotReady` state. This can be seen at node level with `kubectl describe node <affected_node>`:
+
+[,bash]
+----
+​​Conditions:
+  Type         	Status  LastHeartbeatTime             	LastTransitionTime            	Reason                   	Message
+  ----         	------  -----------------             	------------------            	------                   	-------
+  Ready        	False   Thu, 05 Jun 2025 17:41:28 +0000   Thu, 05 Jun 2025 14:38:16 +0000   KubeletNotReady          	container runtime network not ready: NetworkReady=false reason:NetworkPluginNotReady message:Network plugin returns error: cni plugin not initialized
+----
+
+As a workaround, a tmpfs volume can be mounted at the `/etc/cni` directory before RKE2 starts. It avoids the usage of overlayfs which results in containerd missing notifications and the configs should get rewritten every time the node is restarted and the pods initcontainers run again. If using EIB, this can be a `04-tmpfs-cni.sh` script in the `custom/scripts` directory (as explained here[https://github.com/suse-edge/edge-image-builder/blob/release-1.2/docs/building-images.md#custom]) that looks like:
+
+[,bash]
+----
+#!/bin/bash
+mkdir -p /etc/cni
+mount -t tmpfs -o mode=0700,size=5M tmpfs /etc/cni
+echo "tmpfs /etc/cni tmpfs defaults,size=5M,mode=0700 0 0" >> /etc/fstab
+----
 
 == Components Versions
 
