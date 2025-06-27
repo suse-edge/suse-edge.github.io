@@ -18,13 +18,13 @@ The following topics are covered in this section:
 
 * <<kernel-image-for-real-time,Kernel image for real time>>: Kernel image to be used by the real-time kernel.
 * <<kernel-args,Kernel arguments for low latency and high performance>>: Kernel arguments to be used by the real-time kernel for maximum performance and low latency running telco workloads.
-* <<cpu-tuned-configuration,CPU tuned configuration>>: Tuned configuration to be used by the real-time kernel.
+* <<cpu-tuned-configuration,CPU Pinning via Tuned and kernel args>>: Isolating the CPUs via kernel arguments and Tuned profile.
 * <<cni-configuration,CNI configuration>>: CNI configuration to be used by the Kubernetes cluster.
 * <<sriov,SR-IOV configuration>>: SR-IOV configuration to be used by the Kubernetes workloads.
 * <<dpdk,DPDK configuration>>: DPDK configuration to be used by the system.
 * <<acceleration,vRAN acceleration card>>: Acceleration card configuration to be used by the Kubernetes workloads.
 * <<huge-pages,Huge pages>>: Huge pages configuration to be used by the Kubernetes workloads.
-* <<cpu-pinning-configuration,CPU pinning configuration>>: CPU pinning configuration to be used by the Kubernetes workloads.
+* <<cpu-pinning-kubernetes,CPU pinning on Kubernetes>>: Configuring Kubernetes and the applications to leverage CPU pinning.
 * <<numa-aware-scheduling,NUMA-aware scheduling configuration>>: NUMA-aware scheduling configuration to be used by the Kubernetes workloads.
 * <<metal-lb-configuration,Metal LB configuration>>: Metal LB configuration to be used by the Kubernetes workloads.
 * <<private-registry,Private registry configuration>>: Private registry configuration to be used by the Kubernetes workloads.
@@ -70,7 +70,10 @@ The kernel arguments are important to be configured to enable the real-time kern
 * Remove `kthread_cpus` when using SUSE real-time kernel. This parameter controls on which CPUs kernel threads are created. It also controls which CPUs are allowed for PID 1 and for loading kernel modules (the kmod user-space helper). This parameter is not
 recognized and does not have any effect.
 
+* Isolate the CPU cores using `isolcpus`, `nohz_full`, `rcu_nocbs`, and `irqaffinity`. For a comprehensive list of CPU pinning techniques, refer to  <<cpu-tuned-configuration,CPU Pinning via Tuned and kernel args>> chapter.
+
 * Add `domain,nohz,managed_irq` flags to `isolcpus` kernel argument. Without any flags, `isolcpus` is equivalent to specifying only the `domain` flag. This isolates the specified CPUs from scheduling, including kernel tasks. The `nohz` flag stops the scheduler tick on the specified CPUs (if only one task is runnable on a CPU), and the `managed_irq` flag avoids routing managed external (device) interrupts at the specified CPUs. Note that the IRQ lines of NVMe devices are fully managed by the kernel and will be routed to the non-isolated (housekeeping) cores as a consequence. For example, the command line provided at the end of this section will result in only four queues (plus an admin/control queue) allocated on the system:
+
 +
 [,shell]
 ----
@@ -80,6 +83,28 @@ for I in $(grep nvme0 /proc/interrupts | cut -d ':' -f1); do cat /proc/irq/${I}/
 +
 This behavior prevents any disruption caused by disk I/O to any time sensitive application running on the isolated cores, but might require attention and careful design for storage focused workloads.
 
+* Tune the ticks (kernel's periodic timer interrupts):
+** `skew_tick=1`: ticks can sometimes happen simultaenously. Instead of all CPUs receiving their timer tick at the exact same moment, `skew_tick=1` makes them occur at slightly offset times. This helps reduce system jitter, resulting in more consistent and lower interrupt response times (an essential requirement for latency-sensitive applications).
+** `nohz=on`: stops the periodic timer tick on idle CPUs.
+** `nohz_full=<cpu-cores>`: Stops the period timer tick on specified CPUs that are dedicated for real-time applications.
+
+* Disable Machine Check Exception (MCE) handling by specifying `mce=off`. MCEs are hardware errors detected by the processor and disabling them can avoid noisy logs.
+
+* Add `nowatchdog` to disable the soft-lockup watchdog which is implemented as a timer running in the timer hard-interrupt context. When it expires (i.e. a soft lockup is detected), it will print a warning (in the hard interrupt context), running any latency targets. Even if it never expires, it goes onto the timer list, slightly increasing the overhead of every timer interrupt. This option also disables the NMI watchdog, so NMIs cannot interfere.
+
+* `nmi_watchdog=0` disables the NMI (Non-Maskable Interrupt) watchdog. This can be omitted when `nowatchdog` is used.
+
+* RCU (Read-Copy-Update) is a kernel mechanism that enables concurrent, lock-free access for many readers to shared data. An RCU callback, a function triggered after a 'grace period', ensures all previous readers have finished so old data can be safely reclaimed. We fine-tune RCU, particularly for sensitive workloads, to offload these callbacks from dedicated (pinned) CPUs, preventing kernel operations from interfering with critical, time-sensitive tasks.
+** Specify the pinned CPUs in `rcu_nocbs` so that RCU callbacks do not run on them. This helps reducing jitter and latency for the real-time workloads.
+** `rcu_nocb_poll` makes the no-callback CPUs regularly 'poll' to see if callback handling is required. This can reduce the interrupt overhead.
+** `rcupdate.rcu_cpu_stall_suppress=1` suppresses RCU CPU stall warnings, which can sometimes be false positives in heavily loaded real-time systems
+** `rcupdate.rcu_expedited=1` speeds up the grace period for RCU operations, making read-side critical sections more responsive
+** `rcupdate.rcu_normal_after_boot=1` When used with rcu_expedited, it allows RCU to rever to normal (non-expedited) operation after the system boot.
+** `rcupdate.rcu_task_stall_timeout=0` disables the RCU task stall detector, preventing potential warnings or system halts from long-running RCU tasks.
+** `rcutree.kthread_prio=99` sets the priority of the RCU callback kernel thread to the highest possible (99), ensuring it gets scheduled and handles RCU callbacks promptly, when needed.
+
+* Add `ignition.platform.id=openstack` for Metal3 and Cluster API to successfully provision/deprovision the cluster. This is used by Metal3 Python agent, which originated from Openstack Ironic.
+
 * Remove `intel_pstate=passive`. This option configures `intel_pstate` to work with generic cpufreq governors, but to make this work, it disables hardware-managed P-states (`HWP`) as a side effect. To reduce the hardware latency, this option is not recommended for real-time workloads.
 
 * Replace `intel_idle.max_cstate=0 processor.max_cstate=1` with `idle=poll`. To avoid C-State transitions, the `idle=poll` option is used to disable the C-State transitions and keep the CPU in the highest C-State. The `intel_idle.max_cstate=0` option disables `intel_idle`, so `acpi_idle` is used, and `acpi_idle.max_cstate=1` then sets max C-state for acpi_idle.
@@ -88,31 +113,35 @@ In contrast, `idle=poll` runs in a tight loop, busy-waiting for a task to be res
 
 * Disable C1E in BIOS. This option is important to disable the C1E state in the BIOS to avoid the CPU from entering the C1E state when idle. The C1E state is a low-power state that can introduce latency when the CPU is idle.
 
-* Add `nowatchdog` to disable the soft-lockup watchdog which is implemented as a timer running in the timer hard-interrupt context. When it expires (i.e. a soft lockup is detected), it will print a warning (in the hard interrupt context), running any latency targets. Even if it never expires, it goes onto the timer list, slightly increasing the overhead of every timer interrupt.
-This option also disables the NMI watchdog, so NMIs cannot interfere.
+The rest of this documentation covers additional parameters, including huge pages and IOMMU.
 
-* Add `nmi_watchdog=0`. This option disables only the NMI watchdog.
-
-This is an example of the kernel argument list including the aforementioned adjustments:
+This provides an example of kernel arguments for a 32-core Intel server, including the aforementioned adjustments:
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
+$ cat /proc/cmdline
+BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off net.ifnames=0 nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll
 ----
 
+Here is another configuration example for a 64-core AMD server. Among the 128 logical processors (`0-127`), first 8 cores (`0-7`) are designated for housekeeping, while the remaining 120 cores (`8-127`) are pinned for the applications:
+[,shell]
+----
+$ cat /proc/cmdline
+BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=575291cf-74e8-42cf-8f2c-408a20dc00b8 skew_tick=1 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack amd_iommu=on iommu=pt irqaffinity=0-7 isolcpus=domain,nohz,managed_irq,8-127 nohz_full=8-127 rcu_nocbs=8-127 mce=off nohz=on net.ifnames=0 nowatchdog nmi_watchdog=0 nosoftlockup quiet rcu_nocb_poll rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll
+----
 
 [#cpu-tuned-configuration]
-=== CPU tuned configuration
+=== CPU pinning via Tuned and kernel args
 
-The CPU Tuned configuration allows the possibility to isolate the CPU cores to be used by the real-time kernel. It is important to prevent the OS from using the same cores as the real-time kernel, because the OS could use the cores and increase the latency in the real-time kernel.
+`tuned` is a system tuning tool that monitors system conditions to optimize performance using various predefined profiles. A key feature is its ability to isolate CPU cores for specific workloads, like real-time applications. This prevents the OS from utilizing these cores and potentially increasing latency.
 
-To enable and configure this feature, the first thing is to create a profile for the CPU cores we want to isolate. In this case, we are isolating the cores `1-30` and `33-62`.
+To enable and configure this feature, the first thing is to create a profile for the CPU cores we want to isolate. In this example, among 64 cores, we dedicate 60 cores (`1-30,33-62`) for the application and remaining 4 cores are used for housekeeping. Note that the design of isolated CPUs heavily depends on the real-time applications.
 
 [,shell]
 ----
 $ echo "export tuned_params" >> /etc/grub.d/00_tuned
 
-$ echo "isolated_cores=1-18,21-38" >> /etc/tuned/cpu-partitioning-variables.conf
+$ echo "isolated_cores=1-30,33-62" >> /etc/tuned/cpu-partitioning-variables.conf
 
 $ tuned-adm profile cpu-partitioning
 Tuned (re)started, changes applied.
@@ -127,8 +156,8 @@ The following options are important to be customized with your current hardware 
 | parameter | value | description
 
 | isolcpus
-| domain,nohz,managed_irq,1-18,21-38
-| Isolate the cores 1-18 and 21-38
+| domain,nohz,managed_irq,1-30,33-62
+| Isolate the cores 1-30 and 33-62. `domain` indicates these CPUs are part of isolation domain. `nohz` enables tickless operation on these isolated CPUs when they are idle, to reduce interruptions. `managed_irq` isolates pinned CPUs from being targeted by IRQs. This contemplates `irqaffinity=0-7`, which already directs mosts IRQs to the housekeeping cores.
 
 | skew_tick
 | 1
@@ -136,19 +165,23 @@ The following options are important to be customized with your current hardware 
 
 | nohz
 | on
-| This option allows the kernel to run the timer tick on a single CPU when the system is idle.
+| When enabled, kernel's periodic timer interrupt (the 'tick') will stop on any CPU core that is idle. This primary benefits the housekeeping CPUs (`0,31,32,63`). This conserves power and reduces unnecessary wake-ups on those general-purpose cores.
 
 | nohz_full
-| 1-18,21-38
-| kernel boot parameter is the current main interface to configure full dynticks along with CPU Isolation.
+| 1-30,33-62
+| For the isolated cores, this stops the tick and it does so even when the CPU is running a single active task. It means it makes the CPU run in full tickless mode (or 'dyntick'). The kernel will only deliver timer interrupts when they are actually needed.
 
 | rcu_nocbs
-| 1-18,21-38
-| This option allows the kernel to run the RCU callbacks on a single CPU when the system is idle.
+| 1-30,33-62
+| This option offloads the RCU callback processing from specified CPU cores.
+
+| rcu_nocb_poll
+| 
+| When this option is set, no-RCU-callback CPUs will regularly 'poll' to see if callback handling is required, rather than being explicitly woken up by other CPUs. This can reduce the interrupt overhead.
 
 | irqaffinity
-| 0,19,20,39
-| This option allows the kernel to run the interrupts on a single CPU when the system is idle.
+| 0,31,32,63
+| This option allows the kernel to run the interrupts to the housekeeping cores.
 
 | idle
 | poll
@@ -156,22 +189,20 @@ The following options are important to be customized with your current hardware 
 
 | nmi_watchdog
 | 0
-| This option disables only the NMI watchdog.
+| This option disables only the NMI watchdog. This can be omitted when `nowatchdog` is set.
 
 | nowatchdog
 |
 | This option disables the soft-lockup watchdog which is implemented as a timer running in the timer hard-interrupt context.
 |===
 
-With the values shown above, we are isolating 60 cores, and we are using four cores for the OS.
-
 The following commands modify the GRUB configuration and apply the changes mentioned above to be present on the next boot:
 
-Edit the `/etc/default/grub` file and add the parameters mentioned above:
+Edit the `/etc/default/grub` file with above parameters and the file will look like this:
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off net.ifnames=0 nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
 ----
 
 Update the GRUB configuration:
@@ -711,7 +742,7 @@ To use DPDK, employ some drivers to enable certain parameters in the kernel:
 | pt
 | This option enables the use  of the `vfio` driver for the DPDK interfaces.
 
-| intel_iommu
+| intel_iommu or amd_iommu
 | on
 | This option enables the use of `vfio` for `VFs`.
 |===
@@ -720,7 +751,7 @@ To enable the parameters, add them to the `/etc/default/grub` file:
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off net.ifnames=0 nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
 ----
 
 Update the GRUB configuration and reboot the system to apply the changes:
@@ -802,7 +833,7 @@ To enable the `vRAN` acceleration, we need to enable the following kernel parame
 | pt
 | This option enables the use of vfio for the DPDK interfaces.
 
-| intel_iommu
+| intel_iommu or amd_iommu
 | on
 | This option enables the use of vfio for VFs.
 |===
@@ -811,7 +842,7 @@ Modify the GRUB file `/etc/default/grub` to add them to the kernel command line:
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off net.ifnames=0 nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
 ----
 
 Update the GRUB configuration and reboot the system to apply the changes:
@@ -900,7 +931,7 @@ Most current `CPU` architectures support larger-than-default pages, which give t
 
 * Kernel parameters
 
-To enable the huge pages, we should add the next kernel parameters:
+To enable the huge pages, we should add the following kernel parameters. In this example, we configure 40 1G pages, though the huge page size and exact number should be tailored to your application's memory requirements:
 
 |===
 | parameter | value | description
@@ -918,11 +949,11 @@ To enable the huge pages, we should add the next kernel parameters:
 | This is the default value to get the huge pages
 |===
 
-Modify the GRUB file `/etc/default/grub` to add them to the kernel command line:
+Modify the GRUB file `/etc/default/grub` to add these parameters in `GRUB_CMDLINE_LINUX`:
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
+default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0
 ----
 
 Update the GRUB configuration and reboot the system to apply the changes:
@@ -981,28 +1012,27 @@ volumes:
 ...
 ----
 
-[#cpu-pinning-configuration]
-=== CPU pinning configuration
+[#cpu-pinning-kubernetes]
+=== CPU pinning on Kubernetes
 
-* Requirements
+==== Prerequisite
+Must have the `CPU` tuned to the performance profile covered in this <<cpu-tuned-configuration,section>>.
 
-
-1.  Must have the `CPU` tuned to the performance profile covered in this <<cpu-tuned-configuration,section>>.
-2.  Must have the `RKE2` cluster kubelet configured with the CPU management arguments adding the following block (as an example) to the `/etc/rancher/rke2/config.yaml` file:
+==== Configure Kubernetes for CPU Pinning
+Configure kubelet arguments to implement CPU management in the `RKE2` cluster. Add the following configuration block such as below example to your `/etc/rancher/rke2/config.yaml` file. Make sure specifying the housekeeping CPU cores in `kubelet-reserved` and `system-reserved` arguments:
 
 [,yaml]
 ----
 kubelet-arg:
-- "cpu-manager=true"
 - "cpu-manager-policy=static"
 - "cpu-manager-policy-options=full-pcpus-only=true"
 - "cpu-manager-reconcile-period=0s"
-- "kubelet-reserved=cpu=1"
-- "system-reserved=cpu=1"
+- "kubelet-reserved=cpu=0,31,32,63"
+- "system-reserved=cpu=0,31,32,63"
 ----
 
 
-* Using CPU pinning on Kubernetes
+==== Leveraging Pinned CPUs for Workloads
 
 There are three ways to use that feature using the `Static Policy` defined in kubelet depending on the requests and limits you define on your workload:
 
