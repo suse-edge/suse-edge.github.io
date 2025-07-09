@@ -2,7 +2,7 @@
 <?asciidoc-toc?><?asciidoc-numbered?><book xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" xmlns:its="http://www.w3.org/2005/11/its" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xi="http://www.w3.org/2001/XInclude">
 <info>
 <title>SUSE Edge Documentation</title>
-<date>2025-05-21</date>
+<date>2025-07-09</date>
 <!-- https://tdg.docbook.org/tdg/5.2/info -->
 
 <dm:docmanager xmlns:dm="urn:x-suse:ns:docmanager">
@@ -11,8 +11,8 @@
     </dm:bugtracker>
 </dm:docmanager>
 </info>
-<preface xml:id="id-suse-edge-3-3-0-documentation">
-<title>SUSE Edge 3.3.0 Documentation</title>
+<preface xml:id="id-suse-edge-3-3-1-documentation">
+<title>SUSE Edge 3.3.1 Documentation</title>
 <para>Welcome to the SUSE Edge documentation. You will find the high level architectural overview, quick start guides, validated designs, guidance on using components, third-party integrations, and best practices for managing your edge computing infrastructure and workloads.</para>
 <section xml:id="id-what-is-suse-edge">
 <title>What is SUSE Edge?</title>
@@ -418,10 +418,13 @@ helm install \
 </section>
 <section xml:id="id-prepare-downstream-cluster-image">
 <title>Prepare downstream cluster image</title>
-<para>Edge Image Builder (<xref linkend="components-eib"/>) is used to prepare a modified SLEMicro base image which is provisioned on downstream cluster hosts.</para>
+<para>Kiwi (<xref linkend="guides-kiwi-builder-images"/>) and Edge Image Builder (<xref linkend="components-eib"/>) are used to prepare a modified SLEMicro base image which is provisioned on downstream cluster hosts.</para>
 <para>In this guide, we cover the minimal configuration necessary to deploy the downstream cluster.</para>
 <section xml:id="id-image-configuration">
 <title>Image configuration</title>
+<note>
+<para>Please follow <xref linkend="guides-kiwi-builder-images"/> first to build a fresh image as the first step required to create clusters.</para>
+</note>
 <para>When running Edge Image Builder, a directory is mounted from the host, so it is necessary to create a directory structure to store the configuration files used to define the target image.</para>
 <itemizedlist>
 <listitem>
@@ -492,7 +495,7 @@ hich is required.</para>
 <para>The <literal>time</literal> section is optional but it is highly recommended to configure it to avoid potential issues with certificates and clock skew. The values provided in this example are for illustrative purposes only. Please adjust them to fit your specific requirements.</para>
 </note>
 </section>
-<section xml:id="id-growfs-script">
+<section xml:id="growfs-script">
 <title>Growfs script</title>
 <para>Currently, a custom script (<literal>custom/scripts/01-fix-growfs.sh</literal>) is required to grow the file system to match the disk size on first-boot after provisioning. The <literal>01-fix-growfs.sh</literal> script contains the following information:</para>
 <screen language="shell" linenumbering="unnumbered">#!/bin/bash
@@ -519,11 +522,18 @@ For more information, see <xref linkend="quickstart-eib"/>.</para>
 <title>Image creation</title>
 <para>Once the directory structure is prepared following the previous sections, run the following command to build the image:</para>
 <screen language="shell" linenumbering="unnumbered">podman run --rm --privileged -it -v $PWD:/eib \
- registry.suse.com/edge/3.3/edge-image-builder:1.2.0 \
+ registry.suse.com/edge/3.3/edge-image-builder:1.2.1 \
  build --definition-file downstream-cluster-config.yaml</screen>
 <para>This creates the output image file named <literal>SLE-Micro-eib-output.raw</literal>, based on the definition described above.</para>
 <para>The output image must then be made available via a webserver, either the media-server container enabled via the Metal3 chart (<xref linkend="metal3-media-server"/>)
 or some other locally accessible server.  In the examples below, we refer to this server as <literal>imagecache.local:8080</literal></para>
+<note>
+<para>When deploying EIB images to downstream clusters, it is required also to include the sha256 sum of the image on the <literal>Metal3MachineTemplate</literal> object.
+It can be generated as:</para>
+<screen language="shell" linenumbering="unnumbered">sha256sum &lt;image_file&gt; &gt; &lt;image_file&gt;.sha256
+# On this example:
+sha256sum SLE-Micro-eib-output.raw &gt; SLE-Micro-eib-output.raw.sha256</screen>
+</note>
 </section>
 </section>
 <section xml:id="id-adding-baremetalhost-inventory">
@@ -758,7 +768,7 @@ spec:
     kind: Metal3MachineTemplate
     name: sample-cluster-controlplane
   replicas: 1
-  version: v1.32.3+rke2r1
+  version: v1.32.4+rke2r1
   rolloutStrategy:
     type: "RollingUpdate"
     rollingUpdate:
@@ -883,7 +893,7 @@ spec:
         kind: Metal3MachineTemplate
         name: sample-cluster-workers
       nodeDrainTimeout: 0s
-      version: v1.32.3+rke2r1
+      version: v1.32.4+rke2r1
 ---
 apiVersion: bootstrap.cluster.x-k8s.io/v1alpha1
 kind: RKE2ConfigTemplate
@@ -895,7 +905,7 @@ spec:
     spec:
       agentConfig:
         format: ignition
-        version: v1.32.3+rke2r1
+        version: v1.32.4+rke2r1
         kubelet:
           extraArgs:
             - provider-id=metal3://BAREMETALHOST_UUID
@@ -1027,7 +1037,7 @@ metal3-ironic:
   service:
     type: NodePort</screen>
 </section>
-<section xml:id="id-disabling-tls-for-virtualmedia-iso-attachment">
+<section xml:id="disabling-tls-for-virtualmedia-iso-attachment">
 <title>Disabling TLS for virtualmedia ISO attachment</title>
 <para>Some server vendors verify the SSL connection when attaching virtual-media ISO images to the BMC, which can cause a problem because the generated
 certificates for the Metal<superscript>3</superscript> deployment are self-signed, to work around this issue it’s possible to disable TLS only for the virtualmedia disk attachment
@@ -1107,7 +1117,7 @@ with persistent storage.</para>
 <para>A USB flash drive to boot from (if using physical hardware)</para>
 </listitem>
 <listitem>
-<para>A downloaded copy of the latest SUSE Linux Micro 6.1 SelfInstall "GM2" ISO image found <link xl:href="https://www.suse.com/download/sle-micro/">here</link>.</para>
+<para>A downloaded copy of the latest SUSE Linux Micro 6.1 SelfInstall ISO image found <link xl:href="https://www.suse.com/download/sle-micro/">here</link>.</para>
 </listitem>
 </itemizedlist>
 <note>
@@ -1154,7 +1164,7 @@ helm install rancher rancher-prime/rancher \
   --set hostname=&lt;DNS or sslip from above&gt; \
   --set replicas=1 \
   --set bootstrapPassword=&lt;PASSWORD_FOR_RANCHER_ADMIN&gt; \
-  --version 2.11.1</screen>
+  --version 2.11.2</screen>
 <note>
 <para>If this is intended to be a production system, please use cert-manager to configure a real certificate (such as one from Let’s Encrypt).</para>
 </note>
@@ -1327,13 +1337,13 @@ kubectl apply -f $ELEM/registration.yaml</screen>
 </section>
 <section xml:id="build-installation-media">
 <title>Build the image</title>
-<para>While the current version of Elemental has a way to build its own installation media, in SUSE Edge 3.3.0 we do this with the Edge Image Builder instead, so the resulting system is built with <link xl:href="https://www.suse.com/products/micro/">SUSE Linux Micro</link> as the base Operating System.</para>
+<para>While the current version of Elemental has a way to build its own installation media, in SUSE Edge 3.3.1 we do this with Kiwi and Edge Image Builder instead, so the resulting system is built with <link xl:href="https://www.suse.com/products/micro/">SUSE Linux Micro</link> as the base Operating System.</para>
 <tip>
-<para>For more details on the Edge Image Builder, check out the Getting Started Guide for it (<xref linkend="quickstart-eib"/>) and also the Component Documentation (<xref linkend="components-eib"/>).</para>
+<para>For more details on Kiwi, please follow Kiwi Image Builder process (<xref linkend="guides-kiwi-builder-images"/>) to build fresh images first and for Edge Image Builder, check out the Edge Image Builder Getting Started Guide (<xref linkend="quickstart-eib"/>) and also the Component Documentation (<xref linkend="components-eib"/>).</para>
 </tip>
-<para>From a Linux system with Podman installed, create the directories and place the base image:</para>
+<para>From a Linux system with Podman installed, create the directories and place the base image being built by Kiwi:</para>
 <screen language="bash" linenumbering="unnumbered">mkdir -p $ELEM/eib_quickstart/base-images
-cp /path/to/downloads/{micro-base-image-iso} $ELEM/eib_quickstart/base-images/
+cp /path/to/{micro-base-image-iso} $ELEM/eib_quickstart/base-images/
 mkdir -p $ELEM/eib_quickstart/elemental</screen>
 <screen language="bash" linenumbering="unnumbered">curl $REGISURL -o $ELEM/eib_quickstart/elemental/elemental_config.yaml</screen>
 <screen language="bash" linenumbering="unnumbered">cat &lt;&lt; EOF &gt; $ELEM/eib_quickstart/eib-config.yaml
@@ -1381,7 +1391,7 @@ EOF</screen>
 </itemizedlist>
 </note>
 <screen language="bash" linenumbering="unnumbered">podman run --privileged --rm -it -v $ELEM/eib_quickstart/:/eib \
- registry.suse.com/edge/3.3/edge-image-builder:1.2.0 \
+ registry.suse.com/edge/3.3/edge-image-builder:1.2.1 \
  build --definition-file eib-config.yaml</screen>
 <para>If you are booting a physical device, we need to burn the image to a USB flash drive. This can be done with:</para>
 <screen language="bash" linenumbering="unnumbered">sudo dd if=/eib_quickstart/elemental-image.iso of=/dev/&lt;PATH_TO_DISK_DEVICE&gt; status=progress</screen>
@@ -1440,7 +1450,7 @@ metadata:
   name: location-123
   namespace: fleet-default
 spec:
-  kubernetesVersion: v1.32.3+k3s1
+  kubernetesVersion: v1.32.4+k3s1
   rkeConfig:
     machinePools:
       - name: pool1
@@ -1523,31 +1533,35 @@ metadata:
 <chapter xml:id="quickstart-eib">
 <title>Standalone clusters with Edge Image Builder</title>
 <para>Edge Image Builder (EIB) is a tool that streamlines the process of generating Customized, Ready-to-Boot (CRB) disk images for bootstrapping machines, even in fully air-gapped scenarios. EIB is used to create deployment images for use in all three of the SUSE Edge deployment footprints, as it’s flexible enough to offer the smallest customizations, e.g. adding a user or setting the timezone, through offering a comprehensively configured image that sets up, for example, complex networking configurations, deploys multi-node Kubernetes clusters, deploys customer workloads, and registers to the centralized management platform via Rancher/Elemental and SUSE Multi-Linux Manager. EIB runs as in a container image, making it incredibly portable across platforms and ensuring that all of the required dependencies are self-contained, having a very minimal impact on the installed packages of the system that’s being used to operate the tool.</para>
+<note>
+<para>For multi-node scenarios, EIB automatically deploys MetalLB and Endpoint Copier Operator in order for hosts provisioned using the same built image to automatically join a Kubernetes cluster.</para>
+</note>
 <para>For more information, read the Edge Image Builder Introduction (<xref linkend="components-eib"/>).</para>
 <warning>
-<para>Edge Image Builder 1.2.0 supports customizing SUSE Linux Micro 6.1 images.
+<para>Edge Image Builder 1.2.1 supports customizing SUSE Linux Micro 6.1 images.
 Older versions, such as SUSE Linux Enterprise Micro 5.5, or 6.0 are not supported.</para>
 </warning>
 <section xml:id="id-prerequisites-2">
 <title>Prerequisites</title>
 <itemizedlist>
 <listitem>
-<para>An AMD64/Intel 64 physical host (or virtual machine) running SLES 15 SP6, openSUSE Leap 15.6, or openSUSE Tumbleweed.</para>
+<para>An AMD64/Intel 64 build host machine (physical or virtual) running SLES 15 SP6.</para>
 </listitem>
 <listitem>
-<para>An available container runtime (e.g. Podman)</para>
+<para>The Podman container engine</para>
 </listitem>
 <listitem>
-<para>A downloaded copy of the latest SUSE Linux Micro 6.1 SelfInstall ISO image found <link xl:href="https://www.suse.com/download/sle-micro/">here</link>.</para>
+<para>A SUSE Linux Micro 6.1 SelfInstall ISO image created using the Kiwi Builder procedure (<xref linkend="guides-kiwi-builder-images"/>)</para>
 </listitem>
 </itemizedlist>
 <note>
-<para>Other operating systems may function so long as a compatible container runtime is available, but testing on other platforms has not been extensive. The documentation focuses on Podman, but the same functionality should be able to be achieved with Docker.</para>
+<para>For non-production purposes, openSUSE Leap 15.6, or openSUSE Tumbleweed may be used as a build host machine.
+Other operating systems may function, so long as a compatible container runtime is available.</para>
 </note>
 <section xml:id="id-getting-the-eib-image">
 <title>Getting the EIB Image</title>
 <para>The EIB container image is publicly available and can be downloaded from the SUSE Edge registry by running the following command on your image build host:</para>
-<screen language="shell" linenumbering="unnumbered">podman pull registry.suse.com/edge/3.3/edge-image-builder:1.2.0</screen>
+<screen language="shell" linenumbering="unnumbered">podman pull registry.suse.com/edge/3.3/edge-image-builder:1.2.1</screen>
 </section>
 </section>
 <section xml:id="id-creating-the-image-configuration-directory">
@@ -1555,8 +1569,8 @@ Older versions, such as SUSE Linux Enterprise Micro 5.5, or 6.0 are not supporte
 <para>As EIB runs within a container, we need to mount a configuration directory from the host, enabling you to specify your desired configuration, and during the build process EIB has access to any required input files and supporting artifacts. This directory must follow a specific structure. Let’s create it, assuming that this directory will exist in your home directory, and called "eib":</para>
 <screen language="shell" linenumbering="unnumbered">export CONFIG_DIR=$HOME/eib
 mkdir -p $CONFIG_DIR/base-images</screen>
-<para>In the previous step we created a "base-images" directory that will host the SUSE Linux Micro 6.1 input image, let’s ensure that the downloaded image is copied over to the configuration directory:</para>
-<screen language="shell" linenumbering="unnumbered">cp /path/to/downloads/SL-Micro.x86_64-6.1-Base-SelfInstall-GM.install.iso $CONFIG_DIR/base-images/slemicro.iso</screen>
+<para>In the previous step we created a "base-images" directory that will host the SUSE Linux Micro 6.1 input image, let’s ensure that the image is copied over to the configuration directory:</para>
+<screen language="shell" linenumbering="unnumbered">cp /path/to/SL-Micro.x86_64-6.1-Base-SelfInstall-GM.install.iso $CONFIG_DIR/base-images/slemicro.iso</screen>
 <note>
 <para>During the EIB run, the original base image is <emphasis role="strong">not</emphasis> modified; a new and customized version is created with the desired configuration in the root of the EIB config directory.</para>
 </note>
@@ -1603,7 +1617,7 @@ operatingSystem:
 <para>It’s also possible to add additional users, create the home directories, set user-id’s, add ssh-key authentication, and modify group information. Please refer to the <link xl:href="https://github.com/suse-edge/edge-image-builder/blob/release-1.2/docs/building-images.md">upstream building images guide</link> for further examples.</para>
 </note>
 </section>
-<section xml:id="id-configuring-os-time">
+<section xml:id="configuring-os-time">
 <title>Configuring OS time</title>
 <para>The <literal>time</literal> section is optional but it is highly recommended to be configured to avoid potential issues with certificates and clock skew. EIB will configure chronyd and <literal>/etc/localtime</literal> depending on the parameters here.</para>
 <screen language="console" linenumbering="unnumbered">operatingSystem:
@@ -1636,6 +1650,16 @@ operatingSystem:
 <note>
 <para>The values provided in this example are for illustrative purposes only. Please adjust them to fit your specific requirements.</para>
 </note>
+</section>
+<section xml:id="adding-certificates">
+<title>Adding certificates</title>
+<para>Certificate files with the extension ".pem" or ".crt" stored in the <literal>certificates</literal> directory will be installed in the node system-wide certificate store:</para>
+<screen language="console" linenumbering="unnumbered">.
+├── definition.yaml
+└── certificates
+    ├── my-ca.pem
+    └── my-ca.crt</screen>
+<para>See the <link xl:href="https://documentation.suse.com/smart/security/html/tls-certificates/index.html#tls-adding-new-certificates">"Securing Communication with TLS Certificate" guide</link> for more information.</para>
 </section>
 <section xml:id="eib-configuring-rpm-packages">
 <title>Configuring RPM packages</title>
@@ -1696,18 +1720,18 @@ $ curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey &gt; $CONFIG_DI
 <para>This method enables not only the deployment of the customized operating system, but also the ability to specify Kubernetes configuration, any additional layered components via Helm charts, and any user workloads via supplied Kubernetes manifests. However, the design principle behind using this method is that we default to assuming that the user is wanting to air-gap and therefore any items specified in the image definition will be pulled into the image, which includes user-supplied workloads, where EIB will make sure that any discovered images that are required by definitions supplied are copied locally, and are served by the embedded image registry in the resulting deployed system.</para>
 <para>In this next example, we’re going to take our existing image definition and will specify a Kubernetes configuration (in this example it doesn’t list the systems and their roles, so we default to assuming single-node), which will instruct EIB to provision a single-node RKE2 Kubernetes cluster. To show the automation of both the deployment of both user-supplied workloads (via manifest) and layered components (via Helm), we are going to install KubeVirt via the SUSE Edge Helm chart, as well as NGINX via a Kubernetes manifest. The additional configuration we need to append to the existing image definition is as follows:</para>
 <screen language="yaml" linenumbering="unnumbered">kubernetes:
-  version: v1.32.3+rke2r1
+  version: v1.32.4+rke2r1
   manifests:
     urls:
       - https://k8s.io/examples/application/nginx-app.yaml
   helm:
     charts:
-      - name: kubevirt-chart
+      - name: kubevirt
         version: 303.0.0+up0.5.0
         repositoryName: suse-edge
     repositories:
       - name: suse-edge
-        url: oci://registry.suse.com/edge/3.3</screen>
+        url: oci://registry.suse.com/edge/charts</screen>
 <para>The resulting full definition file should now look like:</para>
 <screen language="yaml" linenumbering="unnumbered">apiVersion: 1.2
 image:
@@ -1725,18 +1749,18 @@ operatingSystem:
     additionalRepos:
       - url: https://nvidia.github.io/libnvidia-container/stable/rpm/x86_64
 kubernetes:
-  version: v1.32.3+k3s1
+  version: v1.32.4+k3s1
   manifests:
     urls:
       - https://k8s.io/examples/application/nginx-app.yaml
   helm:
     charts:
-      - name: kubevirt-chart
+      - name: kubevirt
         version: 303.0.0+up0.5.0
         repositoryName: suse-edge
     repositories:
       - name: suse-edge
-        url: oci://registry.suse.com/edge/3.3</screen>
+        url: oci://registry.suse.com/edge/charts</screen>
 <note>
 <para>Further examples of options such as multi-node deployments, custom networking, and Helm chart options/values can be found in the <link xl:href="https://github.com/suse-edge/edge-image-builder/blob/release-1.2/docs/building-images.md">upstream documentation</link>.</para>
 </note>
@@ -1799,7 +1823,7 @@ EOF</screen>
 <title>Building the image</title>
 <para>Now that we’ve got a base image and an image definition for EIB to consume, let’s go ahead and build the image. For this, we simply use <literal>podman</literal> to call the EIB container with the "build" command, specifying the definition file:</para>
 <screen language="bash" linenumbering="unnumbered">podman run --rm -it --privileged -v $CONFIG_DIR:/eib \
-registry.suse.com/edge/3.3/edge-image-builder:1.2.0 \
+registry.suse.com/edge/3.3/edge-image-builder:1.2.1 \
 build --definition-file iso-definition.yaml</screen>
 <para>The output of the command should be similar to:</para>
 <screen language="console" linenumbering="unnumbered">Setting up Podman API listener...
@@ -1899,7 +1923,7 @@ and the <literal>combustion</literal> and <literal>artefacts</literal> directori
 │   ├── eib-build.log
 │   ├── embedded-registry.log
 │   ├── helm
-│   │   └── kubevirt-chart
+│   │   └── kubevirt
 │   │       └── kubevirt-0.4.0.tgz
 │   ├── helm-pull.log
 │   ├── helm-template.log
@@ -2077,14 +2101,14 @@ A number prefix is automatically added to the key. For the default organization,
 <para>For a minimal lab setup, we can actually use the same virtual machine SUSE Multi-Linux Manager Server is running on. Please make sure that you have enough disk space in the virtual machine! This is not a recommended setup for production use. See <xref linkend="id-prerequisites-2"/> for host operating systems we have tested Edge Image Builder with.</para>
 <para>Log into your SUSE Multi-Linux Manager Server host as root.</para>
 <para>Pull the Edge Image Builder container:</para>
-<screen language="shell" linenumbering="unnumbered">podman pull registry.suse.com/edge/3.3/edge-image-builder:1.2.0</screen>
+<screen language="shell" linenumbering="unnumbered">podman pull registry.suse.com/edge/3.3/edge-image-builder:1.2.1</screen>
 <para>Create the directory <literal>/opt/eib</literal> and a sub-directory <literal>base-images</literal>:</para>
 <screen language="shell" linenumbering="unnumbered">mkdir -p /opt/eib/base-images</screen>
 <para>In this quickstart we’re using the "self-install" flavor of the SUSE Linux Micro image. That image can later be written to a physical USB thumb drive that you can use to install on physical servers. If your server has the option of remote attachment of installation ISOs via a BMC (Baseboard Management Controller), you can also use that approach. Finally that image can also be used with most virtualization tools.</para>
 <para>If you either want to preload the image directly to a physical node or directly start it from a VM, you can also use the "raw" image flavor.</para>
 <para>You can find those images in the SUSE Customer Center or on <link xl:href="https://www.suse.com/download/sle-micro/">https://www.suse.com/download/sle-micro/</link></para>
 <para>Download or copy the image <literal>SL-Micro.x86_64-6.1-Default-SelfInstall-GM.install.iso</literal> to the <literal>base-images</literal> directoy and name it "slemicro.iso".</para>
-<para>Building AArch64 images on an Arm-based build host is a technology preview in SUSE Edge 3.3.0. It will most likely work, but isn’t supported yet. If you want to try it out, you need to be running Podman on a 64-bit Arm machine, and you need to replace "x86_64" in all the examples and code snippets with "aarch64".</para>
+<para>Building AArch64 images on an Arm-based build host is a technology preview in SUSE Edge 3.3.1. It will most likely work, but isn’t supported yet. If you want to try it out, you need to be running Podman on a 64-bit Arm machine, and you need to replace "x86_64" in all the examples and code snippets with "aarch64".</para>
 <para>In <literal>/opt/eib</literal>, create a file called <literal>iso-definition.yaml</literal>. This is your build definition for Edge Image Builder.</para>
 <para>Here is a simple example that installs SL Micro 6.1, sets a root password and the keymap, starts the Cockpit graphical UI and registers your node to SUSE Multi-Linux Manager:</para>
 <screen language="yaml" linenumbering="unnumbered">apiVersion: 1.0
@@ -2144,7 +2168,7 @@ operatingSystem:
 <para>Now you can run Edge Image Builder:</para>
 <screen language="bash" linenumbering="unnumbered">cd /opt/eib
 podman run --rm -it --privileged -v /opt/eib:/eib \
-registry.suse.com/edge/3.3/edge-image-builder:1.2.0 \
+registry.suse.com/edge/3.3/edge-image-builder:1.2.1 \
 build --definition-file iso-definition.yaml</screen>
 <para>If you have used a different name for your YAML definition file or want to use a different version of Edge Image Builder, you need to adapt the command accordingly.</para>
 <para>After the build is finished, you’ll find the installation ISO in the <literal>/opt/eib</literal> directory as <literal>eib-image.iso</literal>.</para>
@@ -2201,14 +2225,6 @@ build --definition-file iso-definition.yaml</screen>
 <title>Security and policy enforcement</title>
 <para>Rancher provides policy-based governance tools, role-based access control (RBAC), and integration with external authentication providers. This helps SUSE Edge deployments maintain security and compliance, critical in distributed environments.</para>
 </section>
-<section xml:id="id-known-issues-2">
-<title>Known issues</title>
-<itemizedlist>
-<listitem>
-<para>Due to a <link xl:href="https://github.com/rancher/rancher/issues/48746">known bug</link>, Rancher UI is currently not able to list SUSE Edge charts from OCI registry in the Application catalog. Charts installed via HELM or GitOps (Fleet) can be normally viewed in the Installed Apps page.</para>
-</listitem>
-</itemizedlist>
-</section>
 </section>
 <section xml:id="id-best-practices">
 <title>Best practices</title>
@@ -2253,7 +2269,7 @@ Follow <xref linkend="rancher-install"/> for an air-gapped installation of Ranch
 <para>See <literal><link xl:href="https://ranchermanager.docs.rancher.com/v2.11/integrations-in-rancher/rancher-extensions">Rancher documentation</link></literal> for general information about Rancher Dashboard Extensions.</para>
 <section xml:id="id-installation">
 <title>Installation</title>
-<para>All of the SUSE Edge 3.3.0 components, including dashboard extensions, are distributed as OCI artifacts. To install SUSE Edge Extensions you can use Rancher Dashboard UI, Helm or Fleet:</para>
+<para>All of the SUSE Edge 3.3.1 components, including dashboard extensions, are distributed as OCI artifacts. To install SUSE Edge Extensions you can use Rancher Dashboard UI, Helm or Fleet:</para>
 <section xml:id="id-installing-with-rancher-dashboard-ui">
 <title>Installing with Rancher Dashboard UI</title>
 <orderedlist numeration="arabic">
@@ -2570,7 +2586,7 @@ A graph of <emphasis role="strong">Repo &gt; Bundles &gt; BundleDeployments</emp
 <para>This service is disabled by default but can be started by enabling the systemd service <literal>cockpit.socket</literal>.</para>
 </section>
 </section>
-<section xml:id="id-known-issues-3">
+<section xml:id="id-known-issues-2">
 <title>Known issues</title>
 <itemizedlist>
 <listitem>
@@ -2594,7 +2610,7 @@ infrastructure management flow is desired.</para>
 <para>This method provides declarative APIs that enable inventory and state management of bare-metal servers, including
 automated inspection, cleaning and provisioning/deprovisioning.</para>
 </section>
-<section xml:id="id-known-issues-4">
+<section xml:id="id-known-issues-3">
 <title>Known issues</title>
 <itemizedlist>
 <listitem>
@@ -2662,7 +2678,7 @@ automated inspection, cleaning and provisioning/deprovisioning.</para>
 <para>Additionally, see <xref linkend="quickstart-eib"/> covering a basic deployment scenario.</para>
 <para>Once you are familiar with this tool, please find some more useful information on our <link xl:href="../tips/eib.adoc">Tips and tricks</link> page.</para>
 </section>
-<section xml:id="id-known-issues-5">
+<section xml:id="id-known-issues-4">
 <title>Known issues</title>
 <itemizedlist>
 <listitem>
@@ -2728,7 +2744,7 @@ In this section we’ll show how you can use a declarative approach to describe 
 <section xml:id="id-getting-the-edge-image-builder-container-image">
 <title>Getting the Edge Image Builder container image</title>
 <para>The EIB container image is publicly available and can be downloaded from the SUSE Edge registry by running:</para>
-<screen language="shell" linenumbering="unnumbered">podman pull registry.suse.com/edge/3.3/edge-image-builder:1.2.0</screen>
+<screen language="shell" linenumbering="unnumbered">podman pull registry.suse.com/edge/3.3/edge-image-builder:1.2.1</screen>
 </section>
 <section xml:id="image-config-dir-creation">
 <title>Creating the image configuration directory</title>
@@ -2981,7 +2997,7 @@ They correspond to the hostnames which will be set during the provisioning proce
 <section xml:id="id-building-the-os-image">
 <title>Building the OS image</title>
 <para>Now that all the necessary configurations are in place, we can build the image by simply running:</para>
-<screen language="shell" linenumbering="unnumbered">podman run --rm -it -v $CONFIG_DIR:/eib registry.suse.com/edge/3.3/edge-image-builder:1.2.0 build --definition-file definition.yaml</screen>
+<screen language="shell" linenumbering="unnumbered">podman run --rm -it -v $CONFIG_DIR:/eib registry.suse.com/edge/3.3/edge-image-builder:1.2.1 build --definition-file definition.yaml</screen>
 <para>The output should be similar to the following:</para>
 <screen language="shell" linenumbering="unnumbered">Generating image customization components...
 Identifier ................... [SUCCESS]
@@ -3255,7 +3271,7 @@ interfaces:
     enabled: false
 EOF</screen>
 <para>Let’s build the image:</para>
-<screen language="shell" linenumbering="unnumbered">podman run --rm -it -v $CONFIG_DIR:/eib registry.suse.com/edge/3.3/edge-image-builder:1.2.0 build --definition-file definition.yaml</screen>
+<screen language="shell" linenumbering="unnumbered">podman run --rm -it -v $CONFIG_DIR:/eib registry.suse.com/edge/3.3/edge-image-builder:1.2.1 build --definition-file definition.yaml</screen>
 <para>Once the image is successfully built, let’s create a virtual machine using it:</para>
 <screen language="shell" linenumbering="unnumbered">virt-install --name node1 --ram 10000 --vcpus 6 --disk path=$CONFIG_DIR/modified-image.raw,format=raw --osinfo detect=on,name=sle-unknown --graphics none --console pty,target_type=serial --network default --network default --virt-type kvm --import</screen>
 <para>The provisioning process might take a few minutes. Once it’s finished, log in to the system with the provided credentials.</para>
@@ -3414,7 +3430,7 @@ It is NOT possible to configure a network by working with both static configurat
 └── base-images/
     └── SL-Micro.x86_64-6.1-Base-GM.raw</screen>
 <para>Let’s build the image:</para>
-<screen language="shell" linenumbering="unnumbered">podman run --rm -it -v $CONFIG_DIR:/eib registry.suse.com/edge/3.3/edge-image-builder:1.2.0 build --definition-file definition.yaml</screen>
+<screen language="shell" linenumbering="unnumbered">podman run --rm -it -v $CONFIG_DIR:/eib registry.suse.com/edge/3.3/edge-image-builder:1.2.1 build --definition-file definition.yaml</screen>
 <para>Once the image is successfully built, let’s create a virtual machine using it:</para>
 <screen language="shell" linenumbering="unnumbered">virt-install --name node1 --ram 10000 --vcpus 6 --disk path=$CONFIG_DIR/modified-image.raw,format=raw --osinfo detect=on,name=sle-unknown --graphics none --console pty,target_type=serial --network default --virt-type kvm --import</screen>
 <para>The provisioning process might take a few minutes. Once it’s finished, log in to the system with the provided credentials.</para>
@@ -3493,7 +3509,7 @@ method=disabled</screen>
 <title>How does SUSE Edge use Elemental?</title>
 <para>We use portions of Elemental for managing remote devices where Metal<superscript>3</superscript> is not an option (for example, there is no BMC, or the device is behind a NAT gateway). This tooling allows for an operator to bootstrap their devices in a lab before knowing when or where they will be shipped to. Namely, we leverage the <literal>elemental-register</literal> and <literal>elemental-system-agent</literal> components to enable the onboarding of SUSE Linux Micro hosts to Rancher for "phone home" network provisioning use-cases. When using Edge Image Builder (EIB) to create deployment images, the automatic registration through Rancher via Elemental can be achieved by specifying the registration configuration in the configuration directory for EIB.</para>
 <note>
-<para>In SUSE Edge 3.3.0 we do <emphasis role="strong">not</emphasis> leverage the operating system management aspects of Elemental, and therefore it’s not possible to manage your operating system patching via Rancher. Instead of using the Elemental tools to build deployment images, SUSE Edge uses the Edge Image Builder tooling, which consumes the registration configuration.</para>
+<para>In SUSE Edge 3.3.1 we do <emphasis role="strong">not</emphasis> leverage the operating system management aspects of Elemental, and therefore it’s not possible to manage your operating system patching via Rancher. Instead of using the Elemental tools to build deployment images, SUSE Edge uses the Edge Image Builder tooling, which consumes the registration configuration.</para>
 </note>
 </section>
 <section xml:id="id-best-practices-3">
@@ -3507,7 +3523,7 @@ method=disabled</screen>
 <para>Elemental tracks its inventory with the <literal>MachineInventory</literal> CRD and provides a way to select inventory, e.g. for selecting machines to deploy Kubernetes clusters to, based on labels. This provides a way for users to predefine most (if not all) of their infrastructure needs prior to hardware even being purchased. Also, since nodes can add/remove labels on their respective inventory object (by re-running <literal>elemental-register</literal> with the additional flag <literal>--label "FOO=BAR"</literal>), we can write scripts that will discover and let Rancher know where a node is booted.</para>
 </section>
 </section>
-<section xml:id="id-known-issues-6">
+<section xml:id="id-known-issues-5">
 <title>Known issues</title>
 <itemizedlist>
 <listitem>
@@ -3948,7 +3964,7 @@ image:
   arch: x86_64
   outputImageName: eib-image.iso
 kubernetes:
-  version: v1.32.3+rke2r1
+  version: v1.32.4+rke2r1
   helm:
     charts:
       - name: longhorn
@@ -3980,7 +3996,7 @@ EOF</screen>
 Refer to the <link xl:href="https://github.com/suse-edge/edge-image-builder/blob/release-1.2/docs/building-images.md#kubernetes">upstream documentation</link> for details.</para>
 </note>
 <para>Let’s build the image:</para>
-<screen language="shell" linenumbering="unnumbered">podman run --rm --privileged -it -v $CONFIG_DIR:/eib registry.suse.com/edge/3.3/edge-image-builder:1.2.0 build --definition-file $CONFIG_DIR/iso-definition.yaml</screen>
+<screen language="shell" linenumbering="unnumbered">podman run --rm --privileged -it -v $CONFIG_DIR:/eib registry.suse.com/edge/3.3/edge-image-builder:1.2.1 build --definition-file $CONFIG_DIR/iso-definition.yaml</screen>
 <para>After the image is built, you can use it to install your OS on a physical or virtual host.
 Once the provisioning is complete, you are able to log in to the system using the <literal>root:eib</literal> credentials pair.</para>
 <para>Ensure that Longhorn has been successfully deployed:</para>
@@ -4104,7 +4120,7 @@ Follow <xref linkend="suse-security-install"/> for an air-gapped installation of
 <para>Installation of MetalLB in L2 mode is described in <xref linkend="guides-metallb-k3s"/>.</para>
 <para>A guide on installing MetalLB in front of the <literal>kube-api-server</literal> to achieve high-availability topology can be found in <xref linkend="guides-metallb-kubernetes"/>.</para>
 </section>
-<section xml:id="id-known-issues-7">
+<section xml:id="id-known-issues-6">
 <title>Known issues</title>
 <itemizedlist>
 <listitem>
@@ -4125,7 +4141,7 @@ Follow <xref linkend="suse-security-install"/> for an air-gapped installation of
 <para>Comprehensive documentation for using the Endpoint Copier Operator can be found <link xl:href="https://github.com/suse-edge/endpoint-copier-operator/blob/main/README.md">here</link>.</para>
 <para>Additionally, refer to our guide (<xref linkend="guides-metallb-k3s"/>)  on achieving a K3s/RKE2 HA setup using the Endpoint Copier Operator and MetalLB.</para>
 </section>
-<section xml:id="id-known-issues-8">
+<section xml:id="id-known-issues-7">
 <title>Known issues</title>
 <para>Presently, the Endpoint Copier Operator is limited to working with only one Service/Endpoint. Enhancements to support multiple Services/Endpoints are planned for the future.</para>
 </section>
@@ -4749,7 +4765,7 @@ system-upgrade-controller   1/1     1            1           111s</screen>
 <listitem>
 <para>Deploy the SUC chart:</para>
 <screen language="bash" linenumbering="unnumbered">helm install system-upgrade-controller rancher-charts/system-upgrade-controller --version 106.0.0 --set global.cattle.psp.enabled=false -n cattle-system --create-namespace</screen>
-<para>This will install SUC version 0.15.2 which is needed by the Edge 3.3.0 platform.</para>
+<para>This will install SUC version 0.15.2 which is needed by the Edge 3.3.1 platform.</para>
 </listitem>
 <listitem>
 <para>Validate the SUC deployment:</para>
@@ -4879,7 +4895,7 @@ system-upgrade-controller   1/1     1            1           37s</screen>
 <orderedlist numeration="arabic">
 <listitem>
 <para>Install the Upgrade Controller Helm chart on your management cluster:</para>
-<screen language="bash" linenumbering="unnumbered">helm install upgrade-controller oci://registry.suse.com/edge/charts/upgrade-controller --version 303.0.0+up0.1.1 --create-namespace --namespace upgrade-controller-system</screen>
+<screen language="bash" linenumbering="unnumbered">helm install upgrade-controller oci://registry.suse.com/edge/charts/upgrade-controller --version 303.0.1+up0.1.1 --create-namespace --namespace upgrade-controller-system</screen>
 </listitem>
 <listitem>
 <para>Validate the Upgrade Controller deployment:</para>
@@ -5066,7 +5082,7 @@ metadata:
   name: upgrade-plan-mgmt
   namespace: upgrade-controller-system
 spec:
-  releaseVersion: 3.3.0
+  releaseVersion: 3.3.1
 status:
   conditions:
   - lastTransitionTime: "2024-10-01T06:26:27Z"
@@ -5202,7 +5218,7 @@ metadata:
   name: upgrade-plan-mgmt
   namespace: upgrade-controller-system
 spec:
-  releaseVersion: 3.3.0
+  releaseVersion: 3.3.1
 status:
   conditions:
   - lastTransitionTime: "2024-10-01T06:26:48Z"
@@ -5275,7 +5291,7 @@ status:
     reason: Skipped
     status: "False"
     type: RancherTurtlesUpgraded
-  lastSuccessfulReleaseVersion: 3.3.0
+  lastSuccessfulReleaseVersion: 3.3.1
   observedGeneration: 1
   sucNameSuffix: 90315a2b6d</screen>
 </para>
@@ -6054,13 +6070,13 @@ operatingSystem:
     - username: root
       encryptedPassword: $6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
 kubernetes:
-  version: v1.32.3+rke2r1
+  version: v1.32.4+rke2r1
 embeddedArtifactRegistry:
   images:
     - ...</screen>
 <para>The <literal>image</literal> section is required, and it specifies the input image, its architecture and type, as well as what the output image will be called.</para>
 <para>The <literal>operatingSystem</literal> section is optional, and contains configuration to enable login on the provisioned systems with the <literal>root/eib</literal> username/password.</para>
-<para>The <literal>kubernetes</literal> section is optional, and it defines the Kubernetes type and version. We are going to use the RKE2 distribution. Use <literal>kubernetes.version: v1.32.3+k3s1</literal> if K3s is desired instead. Unless explicitly configured via the <literal>kubernetes.nodes</literal> field, all clusters we bootstrap in this guide will be single-node ones.</para>
+<para>The <literal>kubernetes</literal> section is optional, and it defines the Kubernetes type and version. We are going to use the RKE2 distribution. Use <literal>kubernetes.version: v1.32.4+k3s1</literal> if K3s is desired instead. Unless explicitly configured via the <literal>kubernetes.nodes</literal> field, all clusters we bootstrap in this guide will be single-node ones.</para>
 <para>The <literal>embeddedArtifactRegistry</literal> section will include all images which are only referenced and pulled at runtime for the specific component.</para>
 </section>
 <section xml:id="rancher-install">
@@ -6068,7 +6084,7 @@ embeddedArtifactRegistry:
 <note>
 <para>The Rancher (<xref linkend="components-rancher"/>) deployment that will be demonstrated will be highly slimmed down for demonstration purposes. For your actual deployments, additional artifacts may be necessary depending on your configuration.</para>
 </note>
-<para>The <link xl:href="https://github.com/rancher/rancher/releases/tag/v2.11.1">Rancher 2.11.1</link> release assets contain a <literal>rancher-images.txt</literal> file which lists all the images required for an air-gapped installation.</para>
+<para>The <link xl:href="https://github.com/rancher/rancher/releases/tag/v2.11.2">Rancher 2.11.2</link> release assets contain a <literal>rancher-images.txt</literal> file which lists all the images required for an air-gapped installation.</para>
 <para>There are over 600 container images in total which means that the resulting CRB image would be roughly 30GB. For our Rancher installation, we will strip down that list to the smallest working configuration. From there, you can add back any images you may need for your deployments.</para>
 <para>We will create the definition file and include the stripped down image list:</para>
 <screen language="console" linenumbering="unnumbered">apiVersion: 1.2
@@ -6082,14 +6098,14 @@ operatingSystem:
     - username: root
       encryptedPassword: $6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
 kubernetes:
-  version: v1.32.3+rke2r1
+  version: v1.32.4+rke2r1
   manifests:
     urls:
     - https://github.com/cert-manager/cert-manager/releases/download/v1.15.3/cert-manager.crds.yaml
   helm:
     charts:
       - name: rancher
-        version: 2.11.1
+        version: 2.11.2
         repositoryName: rancher-prime
         valuesFile: rancher-values.yaml
         targetNamespace: cattle-system
@@ -6174,7 +6190,7 @@ EOF</screen>
 </warning>
 <para>Let’s build the image:</para>
 <screen language="shell" linenumbering="unnumbered">podman run --rm -it --privileged -v $CONFIG_DIR:/eib \
-registry.suse.com/edge/3.3/edge-image-builder:1.2.0 \
+registry.suse.com/edge/3.3/edge-image-builder:1.2.1 \
 build --definition-file eib-iso-definition.yaml</screen>
 <para>The output should be similar to the following:</para>
 <screen language="console" linenumbering="unnumbered">Downloading file: dl-manifest-1.yaml 100% |██████████████████████████████████████████████████████████████████████████████| (583/583 kB, 12 MB/s)
@@ -6263,18 +6279,18 @@ operatingSystem:
     - username: root
       encryptedPassword: $6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
 kubernetes:
-  version: v1.32.3+rke2r1
+  version: v1.32.4+rke2r1
   helm:
     charts:
       - name: neuvector-crd
-        version: 106.0.0+up2.8.5
+        version: 106.0.1+up2.8.6
         repositoryName: rancher-charts
         targetNamespace: neuvector
         createNamespace: true
         installationNamespace: kube-system
         valuesFile: neuvector-values.yaml
       - name: neuvector
-        version: 106.0.0+up2.8.5
+        version: 106.0.1+up2.8.6
         repositoryName: rancher-charts
         targetNamespace: neuvector
         createNamespace: true
@@ -6300,7 +6316,7 @@ crdwebhook:
 EOF</screen>
 <para>Let’s build the image:</para>
 <screen language="shell" linenumbering="unnumbered">podman run --rm -it --privileged -v $CONFIG_DIR:/eib \
-registry.suse.com/edge/3.3/edge-image-builder:1.2.0 \
+registry.suse.com/edge/3.3/edge-image-builder:1.2.1 \
 build --definition-file eib-iso-definition.yaml</screen>
 <para>The output should be similar to the following:</para>
 <screen language="console" linenumbering="unnumbered">Pulling selected Helm charts... 100% |███████████████████████████████████████████████████████████████████████████████████████████| (2/2, 4 it/s)
@@ -6380,7 +6396,7 @@ operatingSystem:
     packageList:
       - open-iscsi
 kubernetes:
-  version: v1.32.3+rke2r1
+  version: v1.32.4+rke2r1
   helm:
     charts:
       - name: longhorn
@@ -6399,27 +6415,27 @@ kubernetes:
         url: https://charts.rancher.io
 embeddedArtifactRegistry:
   images:
-    - name: registry.suse.com/rancher/mirrored-longhornio-csi-attacher:v4.7.0
-    - name: registry.suse.com/rancher/mirrored-longhornio-csi-provisioner:v4.0.1-20241007
-    - name: registry.suse.com/rancher/mirrored-longhornio-csi-resizer:v1.12.0
-    - name: registry.suse.com/rancher/mirrored-longhornio-csi-snapshotter:v7.0.2-20241007
-    - name: registry.suse.com/rancher/mirrored-longhornio-csi-node-driver-registrar:v2.12.0
-    - name: registry.suse.com/rancher/mirrored-longhornio-livenessprobe:v2.14.0
-    - name: registry.suse.com/rancher/mirrored-longhornio-backing-image-manager:v1.7.2
-    - name: registry.suse.com/rancher/mirrored-longhornio-longhorn-engine:v1.7.2
-    - name: registry.suse.com/rancher/mirrored-longhornio-longhorn-instance-manager:v1.7.2
-    - name: registry.suse.com/rancher/mirrored-longhornio-longhorn-manager:v1.7.2
-    - name: registry.suse.com/rancher/mirrored-longhornio-longhorn-share-manager:v1.7.2
-    - name: registry.suse.com/rancher/mirrored-longhornio-longhorn-ui:v1.7.2
-    - name: registry.suse.com/rancher/mirrored-longhornio-support-bundle-kit:v0.0.45
-    - name: registry.suse.com/rancher/mirrored-longhornio-longhorn-cli:v1.7.2</screen>
+    - name: registry.suse.com/rancher/mirrored-longhornio-csi-attacher:v4.8.1
+    - name: registry.suse.com/rancher/mirrored-longhornio-csi-provisioner:v5.2.0
+    - name: registry.suse.com/rancher/mirrored-longhornio-csi-resizer:v1.13.2
+    - name: registry.suse.com/rancher/mirrored-longhornio-csi-snapshotter:v8.2.0
+    - name: registry.suse.com/rancher/mirrored-longhornio-csi-node-driver-registrar:v2.13.0
+    - name: registry.suse.com/rancher/mirrored-longhornio-livenessprobe:v2.15.0
+    - name: registry.suse.com/rancher/mirrored-longhornio-backing-image-manager:v1.8.1
+    - name: registry.suse.com/rancher/mirrored-longhornio-longhorn-engine:v1.8.1
+    - name: registry.suse.com/rancher/mirrored-longhornio-longhorn-instance-manager:v1.8.1
+    - name: registry.suse.com/rancher/mirrored-longhornio-longhorn-manager:v1.8.1
+    - name: registry.suse.com/rancher/mirrored-longhornio-longhorn-share-manager:v1.8.1
+    - name: registry.suse.com/rancher/mirrored-longhornio-longhorn-ui:v1.8.1
+    - name: registry.suse.com/rancher/mirrored-longhornio-support-bundle-kit:v0.0.52
+    - name: registry.suse.com/rancher/mirrored-longhornio-longhorn-cli:v1.8.1</screen>
 <note>
 <para>You will notice that the definition file lists the <literal>open-iscsi</literal> package. This is necessary since Longhorn
 relies on a <literal>iscsiadm</literal> daemon running on the different nodes to provide persistent volumes to Kubernetes.</para>
 </note>
 <para>Let’s build the image:</para>
 <screen language="shell" linenumbering="unnumbered">podman run --rm -it --privileged -v $CONFIG_DIR:/eib \
-registry.suse.com/edge/3.3/edge-image-builder:1.2.0 \
+registry.suse.com/edge/3.3/edge-image-builder:1.2.1 \
 build --definition-file eib-iso-definition.yaml</screen>
 <para>The output should be similar to the following:</para>
 <screen language="console" linenumbering="unnumbered">Setting up Podman API listener...
@@ -6523,16 +6539,16 @@ operatingSystem:
     - username: root
       encryptedPassword: $6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
 kubernetes:
-  version: v1.32.3+rke2r1
+  version: v1.32.4+rke2r1
   helm:
     charts:
-      - name: kubevirt-chart
+      - name: kubevirt
         repositoryName: suse-edge
         version: 303.0.0+up0.5.0
         targetNamespace: kubevirt-system
         createNamespace: true
         installationNamespace: kube-system
-      - name: cdi-chart
+      - name: cdi
         repositoryName: suse-edge
         version: 303.0.0+up0.5.0
         targetNamespace: cdi-system
@@ -6540,7 +6556,7 @@ kubernetes:
         installationNamespace: kube-system
     repositories:
       - name: suse-edge
-        url: oci://registry.suse.com/edge/3.3
+        url: oci://registry.suse.com/edge/charts
 embeddedArtifactRegistry:
   images:
     - name: registry.suse.com/suse/sles/15.6/cdi-uploadproxy:1.60.1-150600.3.9.1
@@ -6557,7 +6573,7 @@ embeddedArtifactRegistry:
     - name: registry.suse.com/suse/sles/15.6/virt-exportserver:1.3.1-150600.5.9.1</screen>
 <para>Let’s build the image:</para>
 <screen language="shell" linenumbering="unnumbered">podman run --rm -it --privileged -v $CONFIG_DIR:/eib \
-registry.suse.com/edge/3.3/edge-image-builder:1.2.0 \
+registry.suse.com/edge/3.3/edge-image-builder:1.2.1 \
 build --definition-file eib-iso-definition.yaml</screen>
 <para>The output should be similar to the following:</para>
 <screen language="console" linenumbering="unnumbered">Pulling selected Helm charts... 100% |███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| (2/2, 48 it/min)
@@ -6892,7 +6908,7 @@ spec:
     kind: Metal3MachineTemplate
     name: emea-spa-cluster-3
   replicas: 1
-  version: v1.32.3+rke2r1
+  version: v1.32.4+rke2r1
   rolloutStrategy:
     type: "RollingUpdate"
     rollingUpdate:
@@ -7099,7 +7115,7 @@ spec:
         name: example-controlplane    # This will be replaced by the patch applied in each cluster instances
         namespace: emea-spa
       replicas: 1
-      version: v1.32.3+rke2r1
+      version: v1.32.4+rke2r1
       rolloutStrategy:
         type: "RollingUpdate"
         rollingUpdate:
@@ -7359,7 +7375,7 @@ metadata:
 spec:
   topology:
     class: example-clusterclass-type2  # Correct way to reference ClusterClass
-    version: v1.32.3+rke2r1
+    version: v1.32.4+rke2r1
     controlPlane:
       replicas: 1
     variables:                         # Variables to be replaced for this cluster instance
@@ -7413,7 +7429,7 @@ spec:
 </section>
 </chapter>
 </part>
-<part xml:id="id-tips-and-tricks">
+<part xml:id="tips-and-tricks">
 <title>Tips and Tricks</title>
 <partintro>
 <para>Tips and tricks for Edge components</para>
@@ -7947,7 +7963,7 @@ Result = PASS</screen>
 <screen language="shell" linenumbering="unnumbered">kubectl get nodes</screen>
 <para>This should show something similar to the following:</para>
 <screen language="shell" linenumbering="unnumbered">NAME       STATUS   ROLES                       AGE   VERSION
-node0001   Ready    control-plane,etcd,master   13d   v1.32.3+rke2r1</screen>
+node0001   Ready    control-plane,etcd,master   13d   v1.32.4+rke2r1</screen>
 <para>What you should find is that your k3s/rke2 installation has detected the NVIDIA Container Toolkit on the host and auto-configured the NVIDIA runtime integration into <literal>containerd</literal> (the Container Runtime Interface that k3s/rke2 use). Confirm this by checking the containerd <literal>config.toml</literal> file:</para>
 <screen language="shell" linenumbering="unnumbered">tail -n8 /var/lib/rancher/rke2/agent/etc/containerd/config.toml</screen>
 <para>This must show something akin to the following. The equivalent K3s location is <literal>/var/lib/rancher/k3s/agent/etc/containerd/config.toml</literal>:</para>
@@ -8089,7 +8105,7 @@ operatingSystem:
       - url: https://nvidia.github.io/libnvidia-container/stable/rpm/x86_64
     sccRegistrationCode: [snip]
 kubernetes:
-  version: v1.32.3+k3s1
+  version: v1.32.4+k3s1
   helm:
     charts:
       - name: nvidia-device-plugin
@@ -8130,7 +8146,7 @@ EOF</screen>
 curl -o rpms/gpg-keys/nvidia-container-toolkit.key https://nvidia.github.io/libnvidia-container/gpgkey</screen>
 <para>All the required artifacts, including Kubernetes binary, container images, Helm charts (and any referenced images), will be automatically air-gapped, meaning that the systems at deploy time should require no Internet connectivity by default. Now you need only to grab the SUSE Linux Micro ISO from the <link xl:href="https://www.suse.com/download/sle-micro/">SUSE Downloads Page</link> (and place it in the <literal>base-images</literal> directory), and you can call the Edge Image Builder tool to generate the ISO for you. To complete the example, here is the command that was used to build the image:</para>
 <screen language="shell" linenumbering="unnumbered">podman run --rm --privileged -it -v /path/to/eib-files/:/eib \
-registry.suse.com/edge/3.3/edge-image-builder:1.2.0 \
+registry.suse.com/edge/3.3/edge-image-builder:1.2.1 \
 build --definition-file eib-config-iso.yaml</screen>
 <para>For further instructions, please see the <link xl:href="https://github.com/suse-edge/edge-image-builder/blob/release-1.2/docs/building-images.md">documentation</link> for Edge Image Builder.</para>
 </section>
@@ -8179,7 +8195,7 @@ build --definition-file eib-config-iso.yaml</screen>
 <orderedlist numeration="arabic">
 <listitem>
 <para>Manually apply the BMO CRDs:</para>
-<screen language="bash" linenumbering="unnumbered">helm show crds oci://registry.suse.com/edge/charts/metal3 --version 303.0.5+up0.11.3 | kubectl apply -f -</screen>
+<screen language="bash" linenumbering="unnumbered">helm show crds oci://registry.suse.com/edge/charts/metal3 --version 303.0.7+up0.11.5 | kubectl apply -f -</screen>
 </listitem>
 </orderedlist>
 </section>
@@ -8201,7 +8217,7 @@ build --definition-file eib-config-iso.yaml</screen>
 <orderedlist numeration="arabic">
 <listitem>
 <para>If you already have <literal>Upgrade Controller</literal> deployed from a previous Edge release, upgrade its chart:</para>
-<screen language="bash" linenumbering="unnumbered">helm upgrade upgrade-controller -n upgrade-controller-system oci://registry.suse.com/edge/charts/upgrade-controller --version 303.0.0+up0.1.1</screen>
+<screen language="bash" linenumbering="unnumbered">helm upgrade upgrade-controller -n upgrade-controller-system oci://registry.suse.com/edge/charts/upgrade-controller --version 303.0.1+up0.1.1</screen>
 </listitem>
 <listitem>
 <para>If you do <emphasis role="strong">not</emphasis> have <literal>Upgrade Controller</literal> deployed, follow <xref linkend="components-upgrade-controller-installation"/>.</para>
@@ -9870,7 +9886,7 @@ EOF</screen>
 ...</screen>
 </listitem>
 <listitem>
-<para><literal>SUSE Storage</literal> needs to be upgraded to a version that is compatible with the Edge 3.3.0 release. Meaning it needs to be upgraded to <literal>106.2.0+up1.8.1</literal>.</para>
+<para><literal>SUSE Storage</literal> needs to be upgraded to a version that is compatible with the Edge 3.3.1 release. Meaning it needs to be upgraded to <literal>106.2.0+up1.8.1</literal>.</para>
 </listitem>
 <listitem>
 <para>It is assumed that the <literal>management cluster</literal> is <emphasis role="strong">air-gapped</emphasis>, without support for a local Git server and has a working Rancher setup.</para>
@@ -11532,7 +11548,7 @@ EOF</screen>
 ...</screen>
 </listitem>
 <listitem>
-<para><literal>SUSE Storage</literal> needs to be upgraded to a version that is compatible with the Edge 3.3.0 release. Meaning it needs to be upgraded to <literal>106.2.0+up1.8.1</literal>.</para>
+<para><literal>SUSE Storage</literal> needs to be upgraded to a version that is compatible with the Edge 3.3.1 release. Meaning it needs to be upgraded to <literal>106.2.0+up1.8.1</literal>.</para>
 </listitem>
 <listitem>
 <para>It is assumed that the <literal>management cluster</literal> in charge of managing <literal>doc-example</literal> is <emphasis role="strong">air-gapped</emphasis>, without support for a local Git server and has a working Rancher setup.</para>
@@ -12256,7 +12272,7 @@ operatingSystem:
     - jq
     sccRegistrationCode: $SCC_REGISTRATION_CODE
 kubernetes:
-  version: v1.32.3+rke2r1
+  version: v1.32.4+rke2r1
   helm:
     charts:
       - name: cert-manager
@@ -12278,35 +12294,35 @@ kubernetes:
         targetNamespace: longhorn-system
         createNamespace: true
         installationNamespace: kube-system
-      - name: metal3-chart
-        version: 303.0.5+up0.11.3
+      - name: metal3
+        version: 303.0.7+up0.11.5
         repositoryName: suse-edge-charts
         targetNamespace: metal3-system
         createNamespace: true
         installationNamespace: kube-system
         valuesFile: metal3.yaml
-      - name: rancher-turtles-chart
-        version: 303.0.2+up0.19.0
+      - name: rancher-turtles
+        version: 303.0.4+up0.20.0
         repositoryName: suse-edge-charts
         targetNamespace: rancher-turtles-system
         createNamespace: true
         installationNamespace: kube-system
       - name: neuvector-crd
-        version: 106.0.0+up2.8.5
+        version: 106.0.1+up2.8.6
         repositoryName: rancher-charts
         targetNamespace: neuvector
         createNamespace: true
         installationNamespace: kube-system
         valuesFile: neuvector.yaml
       - name: neuvector
-        version: 106.0.0+up2.8.5
+        version: 106.0.1+up2.8.6
         repositoryName: rancher-charts
         targetNamespace: neuvector
         createNamespace: true
         installationNamespace: kube-system
         valuesFile: neuvector.yaml
       - name: rancher
-        version: 2.11.1
+        version: 2.11.2
         repositoryName: rancher-prime
         targetNamespace: cattle-system
         createNamespace: true
@@ -12318,7 +12334,7 @@ kubernetes:
       - name: rancher-charts
         url: https://charts.rancher.io/
       - name: suse-edge-charts
-        url: oci://registry.suse.com/edge/3.3
+        url: oci://registry.suse.com/edge/charts
       - name: rancher-prime
         url: https://charts.rancher.com/server-charts/prime
   network:
@@ -12370,7 +12386,7 @@ The encrypted password can be generated using the <literal>openssl</literal> com
 </listitem>
 </itemizedlist>
 <screen language="yaml" linenumbering="unnumbered">kubernetes:
-  version: v1.32.3+rke2r1
+  version: v1.32.4+rke2r1
   helm:
     charts:
       - name: cert-manager
@@ -12392,35 +12408,35 @@ The encrypted password can be generated using the <literal>openssl</literal> com
         targetNamespace: longhorn-system
         createNamespace: true
         installationNamespace: kube-system
-      - name: metal3-chart
-        version: 303.0.5+up0.11.3
+      - name: metal3
+        version: 303.0.7+up0.11.5
         repositoryName: suse-edge-charts
         targetNamespace: metal3-system
         createNamespace: true
         installationNamespace: kube-system
         valuesFile: metal3.yaml
-      - name: rancher-turtles-chart
-        version: 303.0.2+up0.19.0
+      - name: rancher-turtles
+        version: 303.0.4+up0.20.0
         repositoryName: suse-edge-charts
         targetNamespace: rancher-turtles-system
         createNamespace: true
         installationNamespace: kube-system
       - name: neuvector-crd
-        version: 106.0.0+up2.8.5
+        version: 106.0.1+up2.8.6
         repositoryName: rancher-charts
         targetNamespace: neuvector
         createNamespace: true
         installationNamespace: kube-system
         valuesFile: neuvector.yaml
       - name: neuvector
-        version: 106.0.0+up2.8.5
+        version: 106.0.1+up2.8.6
         repositoryName: rancher-charts
         targetNamespace: neuvector
         createNamespace: true
         installationNamespace: kube-system
         valuesFile: neuvector.yaml
       - name: rancher
-        version: 2.11.1
+        version: 2.11.2
         repositoryName: rancher-prime
         targetNamespace: cattle-system
         createNamespace: true
@@ -12432,7 +12448,7 @@ The encrypted password can be generated using the <literal>openssl</literal> com
       - name: rancher-charts
         url: https://charts.rancher.io/
       - name: suse-edge-charts
-        url: oci://registry.suse.com/edge/3.3
+        url: oci://registry.suse.com/edge/charts
       - name: rancher-prime
         url: https://charts.rancher.com/server-charts/prime
     network:
@@ -13046,7 +13062,7 @@ operatingSystem:
     - jq
     sccRegistrationCode: $SCC_REGISTRATION_CODE
 kubernetes:
-  version: v1.32.3+rke2r1
+  version: v1.32.4+rke2r1
   helm:
     charts:
       - name: cert-manager
@@ -13068,42 +13084,42 @@ kubernetes:
         targetNamespace: longhorn-system
         createNamespace: true
         installationNamespace: kube-system
-      - name: metal3-chart
-        version: 303.0.5+up0.11.3
+      - name: metal3
+        version: 303.0.7+up0.11.5
         repositoryName: suse-edge-charts
         targetNamespace: metal3-system
         createNamespace: true
         installationNamespace: kube-system
         valuesFile: metal3.yaml
-      - name: rancher-turtles-chart
-        version: 303.0.2+up0.19.0
+      - name: rancher-turtles
+        version: 303.0.4+up0.20.0
         repositoryName: suse-edge-charts
         targetNamespace: rancher-turtles-system
         createNamespace: true
         installationNamespace: kube-system
         valuesFile: turtles.yaml
-      - name: rancher-turtles-airgap-resources-chart
-        version: 303.0.2+up0.19.0
+      - name: rancher-turtles-airgap-resources
+        version: 303.0.4+up0.20.0
         repositoryName: suse-edge-charts
         targetNamespace: rancher-turtles-system
         createNamespace: true
         installationNamespace: kube-system
       - name: neuvector-crd
-        version: 106.0.0+up2.8.5
+        version: 106.0.1+up2.8.6
         repositoryName: rancher-charts
         targetNamespace: neuvector
         createNamespace: true
         installationNamespace: kube-system
         valuesFile: neuvector.yaml
       - name: neuvector
-        version: 106.0.0+up2.8.5
+        version: 106.0.1+up2.8.6
         repositoryName: rancher-charts
         targetNamespace: neuvector
         createNamespace: true
         installationNamespace: kube-system
         valuesFile: neuvector.yaml
       - name: rancher
-        version: 2.11.1
+        version: 2.11.2
         repositoryName: rancher-prime
         targetNamespace: cattle-system
         createNamespace: true
@@ -13115,7 +13131,7 @@ kubernetes:
       - name: rancher-charts
         url: https://charts.rancher.io/
       - name: suse-edge-charts
-        url: oci://registry.suse.com/edge/3.3
+        url: oci://registry.suse.com/edge/charts
       - name: rancher-prime
         url: https://charts.rancher.com/server-charts/prime
     network:
@@ -13132,15 +13148,14 @@ kubernetes:
 #       type: server
 embeddedArtifactRegistry:
   images:
-    - name: registry.suse.com/rancher/hardened-cluster-autoscaler:v1.9.0-build20241126
-    - name: registry.suse.com/rancher/hardened-cni-plugins:v1.6.2-build20250124
+    - name: registry.suse.com/rancher/hardened-cluster-autoscaler:v1.9.0-build20241203
     - name: registry.suse.com/rancher/hardened-cni-plugins:v1.6.2-build20250306
-    - name: registry.suse.com/rancher/hardened-coredns:v1.12.0-build20241126
+    - name: registry.suse.com/rancher/hardened-coredns:v1.12.1-build20250401
     - name: registry.suse.com/rancher/hardened-k8s-metrics-server:v0.7.2-build20250110
-    - name: registry.suse.com/rancher/hardened-multus-cni:v4.1.4-build20250108
-    - name: registry.suse.com/rancher/klipper-helm:v0.9.4-build20250113
-    - name: registry.suse.com/rancher/mirrored-cilium-cilium:v1.17.1
-    - name: registry.suse.com/rancher/mirrored-cilium-operator-generic:v1.17.1
+    - name: registry.suse.com/rancher/hardened-multus-cni:v4.2.0-build20250326
+    - name: registry.suse.com/rancher/klipper-helm:v0.9.5-build20250306
+    - name: registry.suse.com/rancher/mirrored-cilium-cilium:v1.17.3
+    - name: registry.suse.com/rancher/mirrored-cilium-operator-generic:v1.17.3
     - name: registry.suse.com/rancher/mirrored-longhornio-csi-attacher:v4.8.1
     - name: registry.suse.com/rancher/mirrored-longhornio-csi-node-driver-registrar:v2.13.0
     - name: registry.suse.com/rancher/mirrored-longhornio-csi-provisioner:v5.2.0
@@ -13153,24 +13168,24 @@ embeddedArtifactRegistry:
     - name: registry.suse.com/rancher/mirrored-longhornio-longhorn-share-manager:v1.8.1
     - name: registry.suse.com/rancher/mirrored-longhornio-longhorn-ui:v1.8.1
     - name: registry.suse.com/rancher/mirrored-sig-storage-snapshot-controller:v8.2.0
-    - name: registry.suse.com/rancher/neuvector-compliance-config:1.0.4
-    - name: registry.suse.com/rancher/neuvector-controller:5.4.3
-    - name: registry.suse.com/rancher/neuvector-enforcer:5.4.3
-    - name: registry.suse.com/rancher/nginx-ingress-controller:v1.12.1-hardened1
-    - name: registry.rancher.com/rancher/cluster-api-addon-provider-fleet:v0.8.1
+    - name: registry.suse.com/rancher/neuvector-compliance-config:1.0.5
+    - name: registry.suse.com/rancher/neuvector-controller:5.4.4
+    - name: registry.suse.com/rancher/neuvector-enforcer:5.4.4
+    - name: registry.suse.com/rancher/nginx-ingress-controller:v1.12.1-hardened3
+    - name: registry.rancher.com/rancher/cluster-api-addon-provider-fleet:v0.10.0
     - name: registry.rancher.com/rancher/cluster-api-operator:v0.17.0
-    - name: registry.rancher.com/rancher/fleet-agent:v0.12.2
-    - name: registry.rancher.com/rancher/fleet:v0.12.2
+    - name: registry.rancher.com/rancher/fleet-agent:v0.12.3
+    - name: registry.rancher.com/rancher/fleet:v0.12.3
     - name: registry.rancher.com/rancher/hardened-node-feature-discovery:v0.15.7-build20250425
-    - name: registry.rancher.com/rancher/rancher-webhook:v0.7.1
-    - name: registry.rancher.com/rancher/rancher/turtles:v0.19.0
-    - name: registry.rancher.com/rancher/rancher:v2.11.1
-    - name: registry.rancher.com/rancher/shell:v0.4.0
+    - name: registry.rancher.com/rancher/rancher-webhook:v0.7.2
+    - name: registry.rancher.com/rancher/rancher/turtles:v0.20.0
+    - name: registry.rancher.com/rancher/rancher:v2.11.2
+    - name: registry.rancher.com/rancher/shell:v0.4.1
     - name: registry.rancher.com/rancher/system-upgrade-controller:v0.15.2
     - name: registry.suse.com/rancher/cluster-api-controller:v1.9.5
     - name: registry.suse.com/rancher/cluster-api-provider-metal3:v1.9.3
-    - name: registry.suse.com/rancher/cluster-api-provider-rke2-bootstrap:v0.15.1
-    - name: registry.suse.com/rancher/cluster-api-provider-rke2-controlplane:v0.15.1
+    - name: registry.suse.com/rancher/cluster-api-provider-rke2-bootstrap:v0.16.1
+    - name: registry.suse.com/rancher/cluster-api-provider-rke2-controlplane:v0.16.1
     - name: registry.suse.com/rancher/hardened-sriov-network-operator:v1.5.0-build20250425
     - name: registry.suse.com/rancher/ip-address-manager:v1.9.4
     - name: registry.rancher.com/rancher/kubectl:v1.32.2</screen>
@@ -13212,7 +13227,7 @@ embeddedArtifactRegistry:
 <title>Image creation</title>
 <para>Once the directory structure is prepared following the previous sections (for both, connected and air-gap scenarios), run the following command to build the image:</para>
 <screen language="shell" linenumbering="unnumbered">podman run --rm --privileged -it -v $PWD:/eib \
- registry.suse.com/edge/3.3/edge-image-builder:1.2.0 \
+ registry.suse.com/edge/3.3/edge-image-builder:1.2.1 \
  build --definition-file mgmt-cluster.yaml</screen>
 <para>This creates the ISO output image file that, in our case, based on the image definition described above, is <literal>eib-mgmt-cluster-image.iso</literal>.</para>
 </section>
@@ -13234,7 +13249,7 @@ embeddedArtifactRegistry:
 <para>Kernel arguments for low latency and high performance (<xref linkend="kernel-args"/>): Kernel arguments to be used by the real-time kernel for maximum performance and low latency running telco workloads.</para>
 </listitem>
 <listitem>
-<para>CPU tuned configuration (<xref linkend="cpu-tuned-configuration"/>): Tuned configuration to be used by the real-time kernel.</para>
+<para>CPU Pinning via Tuned and kernel args (<xref linkend="cpu-tuned-configuration"/>): Isolating the CPUs via kernel arguments and Tuned profile.</para>
 </listitem>
 <listitem>
 <para>CNI configuration (<xref linkend="cni-configuration"/>): CNI configuration to be used by the Kubernetes cluster.</para>
@@ -13252,7 +13267,7 @@ embeddedArtifactRegistry:
 <para>Huge pages (<xref linkend="huge-pages"/>): Huge pages configuration to be used by the Kubernetes workloads.</para>
 </listitem>
 <listitem>
-<para>CPU pinning configuration (<xref linkend="cpu-pinning-configuration"/>): CPU pinning configuration to be used by the Kubernetes workloads.</para>
+<para>CPU pinning on Kubernetes (<xref linkend="cpu-pinning-kubernetes"/>): Configuring Kubernetes and the applications to leverage CPU pinning.</para>
 </listitem>
 <listitem>
 <para>NUMA-aware scheduling configuration (<xref linkend="numa-aware-scheduling"/>): NUMA-aware scheduling configuration to be used by the Kubernetes workloads.</para>
@@ -13304,8 +13319,65 @@ It is a different kernel tuned to a specific use case. The real-time kernel is t
 recognized and does not have any effect.</para>
 </listitem>
 <listitem>
-<para>Add <literal>domain,nohz,managed_irq</literal> flags to <literal>isolcpus</literal> kernel argument. Without any flags, <literal>isolcpus</literal> is equivalent to specifying only the <literal>domain</literal> flag. This isolates the specified CPUs from scheduling, including kernel tasks. The <literal>nohz</literal> flag stops the scheduler tick on the specified CPUs (if only one task is runnable on a CPU), and the <literal>managed_irq</literal> flag avoids routing
-managed external (device) interrupts at the specified CPUs.</para>
+<para>Isolate the CPU cores using <literal>isolcpus</literal>, <literal>nohz_full</literal>, <literal>rcu_nocbs</literal>, and <literal>irqaffinity</literal>. For a comprehensive list of CPU pinning techniques, refer to  CPU Pinning via Tuned and kernel args (<xref linkend="cpu-tuned-configuration"/>) chapter.</para>
+</listitem>
+<listitem>
+<para>Add <literal>domain,nohz,managed_irq</literal> flags to <literal>isolcpus</literal> kernel argument. Without any flags, <literal>isolcpus</literal> is equivalent to specifying only the <literal>domain</literal> flag. This isolates the specified CPUs from scheduling, including kernel tasks. The <literal>nohz</literal> flag stops the scheduler tick on the specified CPUs (if only one task is runnable on a CPU), and the <literal>managed_irq</literal> flag avoids routing managed external (device) interrupts at the specified CPUs. Note that the IRQ lines of NVMe devices are fully managed by the kernel and will be routed to the non-isolated (housekeeping) cores as a consequence. For example, the command line provided at the end of this section will result in only four queues (plus an admin/control queue) allocated on the system:</para>
+<screen language="shell" linenumbering="unnumbered">for I in $(grep nvme0 /proc/interrupts | cut -d ':' -f1); do cat /proc/irq/${I}/effective_affinity_list; done | column
+39      0       19      20      39</screen>
+<para>This behavior prevents any disruption caused by disk I/O to any time sensitive application running on the isolated cores, but might require attention and careful design for storage focused workloads.</para>
+</listitem>
+<listitem>
+<para>Tune the ticks (kernel’s periodic timer interrupts):</para>
+<itemizedlist>
+<listitem>
+<para><literal>skew_tick=1</literal>: ticks can sometimes happen simultaenously. Instead of all CPUs receiving their timer tick at the exact same moment, <literal>skew_tick=1</literal> makes them occur at slightly offset times. This helps reduce system jitter, resulting in more consistent and lower interrupt response times (an essential requirement for latency-sensitive applications).</para>
+</listitem>
+<listitem>
+<para><literal>nohz=on</literal>: stops the periodic timer tick on idle CPUs.</para>
+</listitem>
+<listitem>
+<para><literal>nohz_full=&lt;cpu-cores&gt;</literal>: Stops the period timer tick on specified CPUs that are dedicated for real-time applications.</para>
+</listitem>
+</itemizedlist>
+</listitem>
+<listitem>
+<para>Disable Machine Check Exception (MCE) handling by specifying <literal>mce=off</literal>. MCEs are hardware errors detected by the processor and disabling them can avoid noisy logs.</para>
+</listitem>
+<listitem>
+<para>Add <literal>nowatchdog</literal> to disable the soft-lockup watchdog which is implemented as a timer running in the timer hard-interrupt context. When it expires (i.e. a soft lockup is detected), it will print a warning (in the hard interrupt context), running any latency targets. Even if it never expires, it goes onto the timer list, slightly increasing the overhead of every timer interrupt. This option also disables the NMI watchdog, so NMIs cannot interfere.</para>
+</listitem>
+<listitem>
+<para><literal>nmi_watchdog=0</literal> disables the NMI (Non-Maskable Interrupt) watchdog. This can be omitted when <literal>nowatchdog</literal> is used.</para>
+</listitem>
+<listitem>
+<para>RCU (Read-Copy-Update) is a kernel mechanism that enables concurrent, lock-free access for many readers to shared data. An RCU callback, a function triggered after a 'grace period', ensures all previous readers have finished so old data can be safely reclaimed. We fine-tune RCU, particularly for sensitive workloads, to offload these callbacks from dedicated (pinned) CPUs, preventing kernel operations from interfering with critical, time-sensitive tasks.</para>
+<itemizedlist>
+<listitem>
+<para>Specify the pinned CPUs in <literal>rcu_nocbs</literal> so that RCU callbacks do not run on them. This helps reducing jitter and latency for the real-time workloads.</para>
+</listitem>
+<listitem>
+<para><literal>rcu_nocb_poll</literal> makes the no-callback CPUs regularly 'poll' to see if callback handling is required. This can reduce the interrupt overhead.</para>
+</listitem>
+<listitem>
+<para><literal>rcupdate.rcu_cpu_stall_suppress=1</literal> suppresses RCU CPU stall warnings, which can sometimes be false positives in heavily loaded real-time systems</para>
+</listitem>
+<listitem>
+<para><literal>rcupdate.rcu_expedited=1</literal> speeds up the grace period for RCU operations, making read-side critical sections more responsive</para>
+</listitem>
+<listitem>
+<para><literal>rcupdate.rcu_normal_after_boot=1</literal> When used with rcu_expedited, it allows RCU to rever to normal (non-expedited) operation after the system boot.</para>
+</listitem>
+<listitem>
+<para><literal>rcupdate.rcu_task_stall_timeout=0</literal> disables the RCU task stall detector, preventing potential warnings or system halts from long-running RCU tasks.</para>
+</listitem>
+<listitem>
+<para><literal>rcutree.kthread_prio=99</literal> sets the priority of the RCU callback kernel thread to the highest possible (99), ensuring it gets scheduled and handles RCU callbacks promptly, when needed.</para>
+</listitem>
+</itemizedlist>
+</listitem>
+<listitem>
+<para>Add <literal>ignition.platform.id=openstack</literal> for Metal3 and Cluster API to successfully provision/deprovision the cluster. This is used by Metal3 Python agent, which originated from Openstack Ironic.</para>
 </listitem>
 <listitem>
 <para>Remove <literal>intel_pstate=passive</literal>. This option configures <literal>intel_pstate</literal> to work with generic cpufreq governors, but to make this work, it disables hardware-managed P-states (<literal>HWP</literal>) as a side effect. To reduce the hardware latency, this option is not recommended for real-time workloads.</para>
@@ -13318,24 +13390,22 @@ In contrast, <literal>idle=poll</literal> runs in a tight loop, busy-waiting for
 <listitem>
 <para>Disable C1E in BIOS. This option is important to disable the C1E state in the BIOS to avoid the CPU from entering the C1E state when idle. The C1E state is a low-power state that can introduce latency when the CPU is idle.</para>
 </listitem>
-<listitem>
-<para>Add <literal>nowatchdog</literal> to disable the soft-lockup watchdog which is implemented as a timer running in the timer hard-interrupt context. When it expires (i.e. a soft lockup is detected), it will print a warning (in the hard interrupt context), running any latency targets. Even if it never expires, it goes onto the timer list, slightly increasing the overhead of every timer interrupt.
-This option also disables the NMI watchdog, so NMIs cannot interfere.</para>
-</listitem>
-<listitem>
-<para>Add <literal>nmi_watchdog=0</literal>. This option disables only the NMI watchdog.</para>
-</listitem>
 </itemizedlist>
-<para>This is an example of the kernel argument list including the aforementioned adjustments:</para>
-<screen language="shell" linenumbering="unnumbered">GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"</screen>
+<para>The rest of this documentation covers additional parameters, including huge pages and IOMMU.</para>
+<para>This provides an example of kernel arguments for a 32-core Intel server, including the aforementioned adjustments:</para>
+<screen language="shell" linenumbering="unnumbered">$ cat /proc/cmdline
+BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off net.ifnames=0 nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll</screen>
+<para>Here is another configuration example for a 64-core AMD server. Among the 128 logical processors (<literal>0-127</literal>), first 8 cores (<literal>0-7</literal>) are designated for housekeeping, while the remaining 120 cores (<literal>8-127</literal>) are pinned for the applications:</para>
+<screen language="shell" linenumbering="unnumbered">$ cat /proc/cmdline
+BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=575291cf-74e8-42cf-8f2c-408a20dc00b8 skew_tick=1 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack amd_iommu=on iommu=pt irqaffinity=0-7 isolcpus=domain,nohz,managed_irq,8-127 nohz_full=8-127 rcu_nocbs=8-127 mce=off nohz=on net.ifnames=0 nowatchdog nmi_watchdog=0 nosoftlockup quiet rcu_nocb_poll rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll</screen>
 </section>
 <section xml:id="cpu-tuned-configuration">
-<title>CPU tuned configuration</title>
-<para>The CPU Tuned configuration allows the possibility to isolate the CPU cores to be used by the real-time kernel. It is important to prevent the OS from using the same cores as the real-time kernel, because the OS could use the cores and increase the latency in the real-time kernel.</para>
-<para>To enable and configure this feature, the first thing is to create a profile for the CPU cores we want to isolate. In this case, we are isolating the cores <literal>1-30</literal> and <literal>33-62</literal>.</para>
+<title>CPU pinning via Tuned and kernel args</title>
+<para><literal>tuned</literal> is a system tuning tool that monitors system conditions to optimize performance using various predefined profiles. A key feature is its ability to isolate CPU cores for specific workloads, like real-time applications. This prevents the OS from utilizing these cores and potentially increasing latency.</para>
+<para>To enable and configure this feature, the first thing is to create a profile for the CPU cores we want to isolate. In this example, among 64 cores, we dedicate 60 cores (<literal>1-30,33-62</literal>) for the application and remaining 4 cores are used for housekeeping. Note that the design of isolated CPUs heavily depends on the real-time applications.</para>
 <screen language="shell" linenumbering="unnumbered">$ echo "export tuned_params" &gt;&gt; /etc/grub.d/00_tuned
 
-$ echo "isolated_cores=1-18,21-38" &gt;&gt; /etc/tuned/cpu-partitioning-variables.conf
+$ echo "isolated_cores=1-30,33-62" &gt;&gt; /etc/tuned/cpu-partitioning-variables.conf
 
 $ tuned-adm profile cpu-partitioning
 Tuned (re)started, changes applied.</screen>
@@ -13356,8 +13426,8 @@ The following options are important to be customized with your current hardware 
 <tbody>
 <row>
 <entry align="left" valign="top"><para>isolcpus</para></entry>
-<entry align="left" valign="top"><para>domain,nohz,managed_irq,1-18,21-38</para></entry>
-<entry align="left" valign="top"><para>Isolate the cores 1-18 and 21-38</para></entry>
+<entry align="left" valign="top"><para>domain,nohz,managed_irq,1-30,33-62</para></entry>
+<entry align="left" valign="top"><para>Isolate the cores 1-30 and 33-62. <literal>domain</literal> indicates these CPUs are part of isolation domain. <literal>nohz</literal> enables tickless operation on these isolated CPUs when they are idle, to reduce interruptions. <literal>managed_irq</literal> isolates pinned CPUs from being targeted by IRQs. This contemplates <literal>irqaffinity=0-7</literal>, which already directs mosts IRQs to the housekeeping cores.</para></entry>
 </row>
 <row>
 <entry align="left" valign="top"><para>skew_tick</para></entry>
@@ -13367,22 +13437,27 @@ The following options are important to be customized with your current hardware 
 <row>
 <entry align="left" valign="top"><para>nohz</para></entry>
 <entry align="left" valign="top"><para>on</para></entry>
-<entry align="left" valign="top"><para>This option allows the kernel to run the timer tick on a single CPU when the system is idle.</para></entry>
+<entry align="left" valign="top"><para>When enabled, kernel’s periodic timer interrupt (the 'tick') will stop on any CPU core that is idle. This primary benefits the housekeeping CPUs (<literal>0,31,32,63</literal>). This conserves power and reduces unnecessary wake-ups on those general-purpose cores.</para></entry>
 </row>
 <row>
 <entry align="left" valign="top"><para>nohz_full</para></entry>
-<entry align="left" valign="top"><para>1-18,21-38</para></entry>
-<entry align="left" valign="top"><para>kernel boot parameter is the current main interface to configure full dynticks along with CPU Isolation.</para></entry>
+<entry align="left" valign="top"><para>1-30,33-62</para></entry>
+<entry align="left" valign="top"><para>For the isolated cores, this stops the tick and it does so even when the CPU is running a single active task. It means it makes the CPU run in full tickless mode (or 'dyntick'). The kernel will only deliver timer interrupts when they are actually needed.</para></entry>
 </row>
 <row>
 <entry align="left" valign="top"><para>rcu_nocbs</para></entry>
-<entry align="left" valign="top"><para>1-18,21-38</para></entry>
-<entry align="left" valign="top"><para>This option allows the kernel to run the RCU callbacks on a single CPU when the system is idle.</para></entry>
+<entry align="left" valign="top"><para>1-30,33-62</para></entry>
+<entry align="left" valign="top"><para>This option offloads the RCU callback processing from specified CPU cores.</para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para>rcu_nocb_poll</para></entry>
+<entry align="left" valign="top"/>
+<entry align="left" valign="top"><para>When this option is set, no-RCU-callback CPUs will regularly 'poll' to see if callback handling is required, rather than being explicitly woken up by other CPUs. This can reduce the interrupt overhead.</para></entry>
 </row>
 <row>
 <entry align="left" valign="top"><para>irqaffinity</para></entry>
-<entry align="left" valign="top"><para>0,19,20,39</para></entry>
-<entry align="left" valign="top"><para>This option allows the kernel to run the interrupts on a single CPU when the system is idle.</para></entry>
+<entry align="left" valign="top"><para>0,31,32,63</para></entry>
+<entry align="left" valign="top"><para>This option allows the kernel to run the interrupts to the housekeeping cores.</para></entry>
 </row>
 <row>
 <entry align="left" valign="top"><para>idle</para></entry>
@@ -13392,7 +13467,7 @@ The following options are important to be customized with your current hardware 
 <row>
 <entry align="left" valign="top"><para>nmi_watchdog</para></entry>
 <entry align="left" valign="top"><para>0</para></entry>
-<entry align="left" valign="top"><para>This option disables only the NMI watchdog.</para></entry>
+<entry align="left" valign="top"><para>This option disables only the NMI watchdog. This can be omitted when <literal>nowatchdog</literal> is set.</para></entry>
 </row>
 <row>
 <entry align="left" valign="top"><para>nowatchdog</para></entry>
@@ -13402,10 +13477,9 @@ The following options are important to be customized with your current hardware 
 </tbody>
 </tgroup>
 </informaltable>
-<para>With the values shown above, we are isolating 60 cores, and we are using four cores for the OS.</para>
 <para>The following commands modify the GRUB configuration and apply the changes mentioned above to be present on the next boot:</para>
-<para>Edit the <literal>/etc/default/grub</literal> file and add the parameters mentioned above:</para>
-<screen language="shell" linenumbering="unnumbered">GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"</screen>
+<para>Edit the <literal>/etc/default/grub</literal> file with above parameters and the file will look like this:</para>
+<screen language="shell" linenumbering="unnumbered">GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off net.ifnames=0 nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"</screen>
 <para>Update the GRUB configuration:</para>
 <screen language="shell" linenumbering="unnumbered">$ transactional-update grub.cfg
 $ reboot</screen>
@@ -13925,7 +13999,7 @@ $ reboot</screen>
 <entry align="left" valign="top"><para>This option enables the use  of the <literal>vfio</literal> driver for the DPDK interfaces.</para></entry>
 </row>
 <row>
-<entry align="left" valign="top"><para>intel_iommu</para></entry>
+<entry align="left" valign="top"><para>intel_iommu or amd_iommu</para></entry>
 <entry align="left" valign="top"><para>on</para></entry>
 <entry align="left" valign="top"><para>This option enables the use of <literal>vfio</literal> for <literal>VFs</literal>.</para></entry>
 </row>
@@ -13933,7 +14007,7 @@ $ reboot</screen>
 </tgroup>
 </informaltable>
 <para>To enable the parameters, add them to the <literal>/etc/default/grub</literal> file:</para>
-<screen language="shell" linenumbering="unnumbered">GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"</screen>
+<screen language="shell" linenumbering="unnumbered">GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off net.ifnames=0 nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"</screen>
 <para>Update the GRUB configuration and reboot the system to apply the changes:</para>
 <screen language="shell" linenumbering="unnumbered">$ transactional-update grub.cfg
 $ reboot</screen>
@@ -14014,7 +14088,7 @@ Network devices using kernel driver
 <entry align="left" valign="top"><para>This option enables the use of vfio for the DPDK interfaces.</para></entry>
 </row>
 <row>
-<entry align="left" valign="top"><para>intel_iommu</para></entry>
+<entry align="left" valign="top"><para>intel_iommu or amd_iommu</para></entry>
 <entry align="left" valign="top"><para>on</para></entry>
 <entry align="left" valign="top"><para>This option enables the use of vfio for VFs.</para></entry>
 </row>
@@ -14022,7 +14096,7 @@ Network devices using kernel driver
 </tgroup>
 </informaltable>
 <para>Modify the GRUB file <literal>/etc/default/grub</literal> to add them to the kernel command line:</para>
-<screen language="shell" linenumbering="unnumbered">GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"</screen>
+<screen language="shell" linenumbering="unnumbered">GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off net.ifnames=0 nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"</screen>
 <para>Update the GRUB configuration and reboot the system to apply the changes:</para>
 <screen language="shell" linenumbering="unnumbered">$ transactional-update grub.cfg
 $ reboot</screen>
@@ -14092,7 +14166,7 @@ Other Baseband devices
 <para>Kernel parameters</para>
 </listitem>
 </itemizedlist>
-<para>To enable the huge pages, we should add the next kernel parameters:</para>
+<para>To enable the huge pages, we should add the following kernel parameters. In this example, we configure 40 1G pages, though the huge page size and exact number should be tailored to your application’s memory requirements:</para>
 <informaltable frame="all" rowsep="1" colsep="1">
 <tgroup cols="3">
 <colspec colname="col_1" colwidth="33.3333*"/>
@@ -14124,8 +14198,8 @@ Other Baseband devices
 </tbody>
 </tgroup>
 </informaltable>
-<para>Modify the GRUB file <literal>/etc/default/grub</literal> to add them to the kernel command line:</para>
-<screen language="shell" linenumbering="unnumbered">GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"</screen>
+<para>Modify the GRUB file <literal>/etc/default/grub</literal> to add these parameters in <literal>GRUB_CMDLINE_LINUX</literal>:</para>
+<screen language="shell" linenumbering="unnumbered">default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0</screen>
 <para>Update the GRUB configuration and reboot the system to apply the changes:</para>
 <screen language="shell" linenumbering="unnumbered">$ transactional-update grub.cfg
 $ reboot</screen>
@@ -14162,33 +14236,24 @@ volumes:
       medium: HugePages
 ...</screen>
 </section>
-<section xml:id="cpu-pinning-configuration">
-<title>CPU pinning configuration</title>
-<itemizedlist>
-<listitem>
-<para>Requirements</para>
-<orderedlist numeration="arabic">
-<listitem>
+<section xml:id="cpu-pinning-kubernetes">
+<title>CPU pinning on Kubernetes</title>
+<section xml:id="id-prerequisite">
+<title>Prerequisite</title>
 <para>Must have the <literal>CPU</literal> tuned to the performance profile covered in this section (<xref linkend="cpu-tuned-configuration"/>).</para>
-</listitem>
-<listitem>
-<para>Must have the <literal>RKE2</literal> cluster kubelet configured with the CPU management arguments adding the following block (as an example) to the <literal>/etc/rancher/rke2/config.yaml</literal> file:</para>
-</listitem>
-</orderedlist>
-</listitem>
-</itemizedlist>
+</section>
+<section xml:id="id-configure-kubernetes-for-cpu-pinning">
+<title>Configure Kubernetes for CPU Pinning</title>
+<para>Configure kubelet arguments to implement CPU management in the <literal>RKE2</literal> cluster. Add the following configuration block such as below example to your <literal>/etc/rancher/rke2/config.yaml</literal> file. Make sure specifying the housekeeping CPU cores in <literal>kubelet-reserved</literal> and <literal>system-reserved</literal> arguments:</para>
 <screen language="yaml" linenumbering="unnumbered">kubelet-arg:
-- "cpu-manager=true"
 - "cpu-manager-policy=static"
 - "cpu-manager-policy-options=full-pcpus-only=true"
 - "cpu-manager-reconcile-period=0s"
-- "kubelet-reserved=cpu=1"
-- "system-reserved=cpu=1"</screen>
-<itemizedlist>
-<listitem>
-<para>Using CPU pinning on Kubernetes</para>
-</listitem>
-</itemizedlist>
+- "kubelet-reserved=cpu=0,31,32,63"
+- "system-reserved=cpu=0,31,32,63"</screen>
+</section>
+<section xml:id="id-leveraging-pinned-cpus-for-workloads">
+<title>Leveraging Pinned CPUs for Workloads</title>
 <para>There are three ways to use that feature using the <literal>Static Policy</literal> defined in kubelet depending on the requests and limits you define on your workload:</para>
 <orderedlist numeration="arabic">
 <listitem>
@@ -14240,6 +14305,7 @@ volumes:
           cpu: "2"</screen>
 </listitem>
 </orderedlist>
+</section>
 </section>
 <section xml:id="numa-aware-scheduling">
 <title>NUMA-aware scheduling</title>
@@ -15021,7 +15087,7 @@ umount /mnt
 <title>Image creation</title>
 <para>Once the directory structure is prepared following the previous sections, run the following command to build the image:</para>
 <screen language="shell" linenumbering="unnumbered">podman run --rm --privileged -it -v $PWD:/eib \
- registry.suse.com/edge/3.3/edge-image-builder:1.2.0 \
+ registry.suse.com/edge/3.3/edge-image-builder:1.2.1 \
  build --definition-file downstream-cluster-config.yaml</screen>
 <para>This creates the output ISO image file named <literal>eibimage-output-telco.raw</literal>, based on the definition described above.</para>
 <para>The output image must then be made available via a webserver, either the media-server container enabled via the Management Cluster Documentation (<xref linkend="metal3-media-server"/>)
@@ -15111,7 +15177,7 @@ or some other locally accessible server.  In the examples below, we refer to thi
 <title>Downstream cluster image definition file</title>
 <para>The <literal>downstream-cluster-airgap-config.yaml</literal> file is the main configuration file for the downstream cluster image and the content has been described in the previous section (<xref linkend="add-telco-feature-eib"/>).</para>
 </section>
-<section xml:id="id-growfs-script-2">
+<section xml:id="id-growfs-script">
 <title>Growfs script</title>
 <para>Currently, a custom script (<literal>custom/scripts/01-fix-growfs.sh</literal>) is required to grow the file system to match the disk size on first-boot after provisioning. The <literal>01-fix-growfs.sh</literal> script contains the following information:</para>
 <screen language="shell" linenumbering="unnumbered">#!/bin/bash
@@ -15262,7 +15328,7 @@ $ ./edge-load-images.sh -ad edge-release-images-tgz-20240705 -r myregistry:5000<
 <title>Image creation for air-gap scenarios</title>
 <para>Once the directory structure is prepared following the previous sections, run the following command to build the image:</para>
 <screen language="shell" linenumbering="unnumbered">podman run --rm --privileged -it -v $PWD:/eib \
- registry.suse.com/edge/3.3/edge-image-builder:1.2.0 \
+ registry.suse.com/edge/3.3/edge-image-builder:1.2.1 \
  build --definition-file downstream-cluster-airgap-config.yaml</screen>
 <para>This creates the output ISO image file named <literal>eibimage-output-telco.raw</literal>, based on the definition described above.</para>
 <para>The output image must then be made available via a webserver, either the media-server container enabled via the Management Cluster Documentation (<xref linkend="metal3-media-server"/>)
@@ -15423,7 +15489,7 @@ spec:
 Also, it contains the information about the number of replicas to be used (in this case, one) and the <literal>CNI</literal> plug-in to be used (in this case, <literal>Cilium</literal>).
 The agentConfig block contains the <literal>Ignition</literal> format to be used and the <literal>additionalUserData</literal> to be used to configure the <literal>RKE2</literal> node with information like a systemd named <literal>rke2-preinstall.service</literal> to replace automatically the <literal>BAREMETALHOST_UUID</literal> and <literal>node-name</literal> during the provisioning process using the Ironic information.
 To enable multus with cilium a file is created in the <literal>rke2</literal> server manifests directory named <literal>rke2-cilium-config.yaml</literal> with the configuration to be used.
-The last block of information contains the Kubernetes version to be used. <literal>${RKE2_VERSION}</literal> is the version of <literal>RKE2</literal> to be used replacing this value (for example, <literal>v1.32.3+rke2r1</literal>).</para>
+The last block of information contains the Kubernetes version to be used. <literal>${RKE2_VERSION}</literal> is the version of <literal>RKE2</literal> to be used replacing this value (for example, <literal>v1.32.4+rke2r1</literal>).</para>
 <screen language="yaml" linenumbering="unnumbered">apiVersion: controlplane.cluster.x-k8s.io/v1beta1
 kind: RKE2ControlPlane
 metadata:
@@ -15716,7 +15782,7 @@ spec:
 </itemizedlist>
 </listitem>
 <listitem>
-<para>The last block of information contains the Kubernetes version to be used. The <literal>${RKE2_VERSION}</literal> is the version of <literal>RKE2</literal> to be used replacing this value (for example, <literal>v1.32.3+rke2r1</literal>).</para>
+<para>The last block of information contains the Kubernetes version to be used. The <literal>${RKE2_VERSION}</literal> is the version of <literal>RKE2</literal> to be used replacing this value (for example, <literal>v1.32.4+rke2r1</literal>).</para>
 </listitem>
 </itemizedlist>
 <screen language="yaml" linenumbering="unnumbered">apiVersion: controlplane.cluster.x-k8s.io/v1beta1
@@ -16296,7 +16362,7 @@ spec:
 </itemizedlist>
 </listitem>
 <listitem>
-<para>The <literal>${RKE2_VERSION}</literal> is the version of <literal>RKE2</literal> to be used replacing this value (for example, <literal>v1.32.3+rke2r1</literal>).</para>
+<para>The <literal>${RKE2_VERSION}</literal> is the version of <literal>RKE2</literal> to be used replacing this value (for example, <literal>v1.32.4+rke2r1</literal>).</para>
 </listitem>
 </itemizedlist>
 <para>With all these changes mentioned, the <literal>RKE2ControlPlane</literal> block in the <literal>capi-provisioning-example.yaml</literal> will look like the following:</para>
@@ -16890,7 +16956,7 @@ spec:
 <section xml:id="id-management-cluster-upgrades">
 <title>Management cluster upgrades</title>
 <para>The upgrade of the management cluster involves several components. For a list of the general components that require an upgrade, see the <literal>Day 2</literal> management cluster (<xref linkend="day2-mgmt-cluster"/>) documentation.</para>
-<para>The upgrade procedure for comoponents specific to this setup can be seen below.</para>
+<para>The upgrade procedure for components specific to this setup can be seen below.</para>
 <para><emphasis role="strong">Upgrading Metal<superscript>3</superscript></emphasis></para>
 <para>To upgrade <literal>Metal<superscript>3</superscript></literal>, use the following command to update the Helm repository cache and fetch the latest chart to install <literal>Metal<superscript>3</superscript></literal> from the Helm chart repository:</para>
 <screen language="shell" linenumbering="unnumbered">helm repo update
@@ -16901,7 +16967,7 @@ If any change is required in the new version, the file can be edited before the 
 helm upgrade metal3 suse-edge/metal3 \
   --namespace metal3-system \
   -f metal3-values.yaml \
-  --version=303.0.5+up0.11.3</screen>
+  --version=303.0.7+up0.11.5</screen>
 </section>
 <section xml:id="atip-lifecycle-downstream">
 <title>Downstream cluster upgrades</title>
@@ -17017,6 +17083,539 @@ spec:
 </section>
 </chapter>
 </part>
+<part xml:id="id-troubleshooting-3">
+<title>Troubleshooting</title>
+<partintro>
+<para>This section provides guidance to diagnose and resolve common issues with SUSE Edge deployments and operations. It covers various topics, offering component-specific troubleshooting steps, key tools, and relevant log locations.</para>
+</partintro>
+<chapter xml:id="general-troubleshooting-principles">
+<title>General Troubleshooting Principles</title>
+<para>Before diving into component-specific issues, consider these general principles:</para>
+<itemizedlist>
+<listitem>
+<para><emphasis role="strong">Check logs</emphasis>: Logs are the primary source of information. Most of the times the errors are self explanatory and contain hints on what failed.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Check clocks</emphasis>: Having clock differences between systems can lead to all kinds of different errors. Ensure clocks are in sync. EIB can be instructed to force clock sync at boot time, see Configuring OS Time (<xref linkend="quickstart-eib"/>).</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Boot Issues</emphasis>: If the system is stuck during boot, note down the last messages displayed. Access the console (physical or via BMC) to observe boot messages.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Network Issues</emphasis>: Verify network interface configuration (<literal>ip a</literal>), routing table (<literal>ip route</literal>), test connectivity from/to other nodes and external services (<literal>ping</literal>, <literal>nc</literal>). Ensure firewall rules are not blocking necessary ports.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Verify component status</emphasis>: Use <literal>kubectl get</literal> and <literal>kubectl describe</literal> for Kubernetes resources. Use <literal>kubectl get events --sort-by='.lastTimestamp' -n &lt;namespace&gt;</literal> to see the events on a particular Kubernetes namespace.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Verify services status</emphasis>: Use <literal>systemctl status &lt;service&gt;</literal> for systemd services.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Check syntax</emphasis>: Software expects certain structure and syntax on configuration files. For yaml files, for example, use <literal>yamllint</literal> or similar tools to verify the proper syntax.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Isolate the problem</emphasis>: Try to narrow down the issue to a specific component or layer (for example, network, storage, OS, Kubernetes, Metal<superscript>3</superscript>, Ironic,…​).</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Documentation</emphasis>: Always refer to the official <link xl:href="https://documentation.suse.com/suse-edge/">SUSE Edge documentation</link> and also upstream documentation for detailed information.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Versions</emphasis>: SUSE Edge is an opinionated and thorough tested version of different SUSE components. he versions of each component per SUSE Edge release can be observed in the <link xl:href="https://documentation.suse.com/suse-edge/support-matrix/html/support-matrix/index.html">SUSE Edge support matrix</link>.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Known issues</emphasis>: For each SUSE Edge release there is a “Known issues” section on the release notes that contains information of issues that will be fixed on future releases but can affect the current one.</para>
+</listitem>
+</itemizedlist>
+</chapter>
+<chapter xml:id="troubleshooting-kiwi">
+<title>Troubleshooting Kiwi</title>
+<para>Kiwi is used to generate updated SUSE Linux Micro images to be used with Edge Image Builder.</para>
+<itemizedlist>
+<title>Common Issues</title>
+<listitem>
+<para><emphasis role="strong">SL Micro Version Mismatch</emphasis>: The build host operating system version must match the operating system version being built (SL Micro 6.0 host → SL Micro 6.0 image).</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">SELinux in Enforcing State</emphasis>: Due to certain limitations, it is currently required to disable SELinux temporarily to be able to build images with Kiwi. Check the SElinux status with <literal>getenforce</literal> and disable it before running the build process with <literal>setenforce 0</literal>.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Build host not registered</emphasis>: The build process uses the build host subscriptions to be able to pull packages from SUSE SCC. If the host is not registered it fails.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Loop Device Test Failure</emphasis>: The first time that the Kiwi build process is executed, it will fail shortly after starting with "ERROR: Early loop device test failed, please retry the container run.", this is a symptom of loop devices being created on the underlying host system that are not immediately visible inside of the container image. Re-run the Kiwi build process again and it should proceed without issue.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Missing Permissions</emphasis>: The build process expects to be run as root user (or via sudo).</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Wrong Privileges</emphasis>: The build process expects the <literal>--privileged</literal> flag when running the container. Double-check that it is present.</para>
+</listitem>
+</itemizedlist>
+<itemizedlist>
+<title>Logs</title>
+<listitem>
+<para><emphasis role="strong">Build container logs</emphasis>: Check the logs of the build container. The logs are generated in the directory that was used to store the artifacts. Check docker logs or podman logs for the necessary information as well.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Temporary build directories</emphasis>: Kiwi creates temporary directories during the build process. Check these for intermediate logs or artifacts if the main output is insufficient.</para>
+</listitem>
+</itemizedlist>
+<orderedlist numeration="arabic">
+<title>Troubleshooting steps</title>
+<listitem>
+<para><emphasis role="strong">Review <literal>build-image</literal> output</emphasis>: The error message in the console output is usually very indicative.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Check build environment</emphasis>: Ensure all prerequisites for Kiwi itself (for example, docker/podman, SElinux, sufficient disk space) are met on the machine running Kiwi.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Inspect build container logs</emphasis>: Review the logs of the failed container for more detailed errors (see above).</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Verify definition file</emphasis>: If you are using  a custom Kiwi image definition file, double-check the file for any typos or syntax.</para>
+</listitem>
+</orderedlist>
+<note>
+<para>Check the <link xl:href="https://documentation.suse.com/appliance/kiwi-9/html/kiwi/troubleshooting.html">Kiwi Troubleshooting Guide</link>.</para>
+</note>
+</chapter>
+<chapter xml:id="troubleshooting-edge-image-builder">
+<title>Troubleshooting Edge Image Builder (EIB)</title>
+<para>EIB is used to create custom SUSE Edge images.</para>
+<itemizedlist>
+<title>Common Issues</title>
+<listitem>
+<para><emphasis role="strong">Wrong SCC code</emphasis>: Ensure the SCC code used in the EIB definition file matches the SL Micro version and architecture.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Missing dependencies</emphasis>: Ensure there are no missing packages or tools within the build environment.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Incorrect image size</emphasis>: For raw images, the <literal>diskSize</literal> parameter is required and it depends heavily on the images, RPMs, and other artifacts being included in the image.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Permissions</emphasis>: If storing a script on the custom/files directory, ensure it has executable permissions as those files are just available at combustion time but no changes are performed by EIB.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Operating system group dependencies</emphasis>: When creating an image with custom users and groups, the groups being set as “<literal>primaryGroup</literal>” should be explicitly created.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Operating system user’s sshkeys requires a home folder</emphasis>: When creating an image with users with sshkeys, the home folder needs to be created as well with <literal>createHomeDir=true</literal>.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Combustion issues</emphasis>: EIB relies on combustion for the customization of the OS and deployment of all the other SUSE Edge components. This also includes custom scripts being placed in the custom/scripts folder. Note that the combustion process is being executed at <literal>initrd</literal> time, so the system is not completely booted when the scripts are executed.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Podman machine size</emphasis>: As explained in the EIB Tips and Tricks section (<xref linkend="tips-and-tricks"/>), verify the podman machine has enough CPU/memory to run the EIB container on non-Linux operating systems.</para>
+</listitem>
+</itemizedlist>
+<itemizedlist>
+<title>Logs</title>
+<listitem>
+<para><emphasis role="strong">EIB output</emphasis>: The console output of the <literal>eib build</literal> command is crucial.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Build container logs</emphasis>: Check the logs of the build container. The logs are generated in the directory that was used to store the artifacts. Check <literal>docker logs</literal> or <literal>podman logs</literal> for  the necessary information as well.</para>
+<note>
+<para>For more information, see <link xl:href="https://github.com/suse-edge/edge-image-builder/blob/main/docs/debugging.md">Debugging</link>.</para>
+</note>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Temporary build directories</emphasis>: EIB creates temporary directories during the build process. Check these for intermediate logs or artifacts if the main output is insufficient.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Combustion logs</emphasis>: If the image being built with EIB does not boot for any reason, a root shell is available. Connect to the host console (either physically, via BMC, etc.) and check combustion logs with <literal>journalctl -u combustion</literal> and in general all the operating system logs with <literal>journalctl</literal> to find the root cause of the failure.</para>
+</listitem>
+</itemizedlist>
+<orderedlist numeration="arabic">
+<title>Troubleshooting steps</title>
+<listitem>
+<para><emphasis role="strong">Review <literal>eib-build</literal> output</emphasis>: The error message in the console output is usually very indicative.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Check build environment</emphasis>: Ensure all prerequisites for EIB itself (for example, docker/podman, sufficient disk space) are met on the machine running EIB.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Inspect build container logs</emphasis>: Review the logs of the failed container for more detailed errors (see above).</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Verify <literal>eib</literal> configuration"</emphasis>: Double-check the <literal>eib</literal> configuration file for any typos or incorrect paths to source files or build scripts.</para>
+<itemizedlist>
+<listitem>
+<para><emphasis role="strong">Test components individually</emphasis>: If your EIB build involves custom scripts or stages, run them independently to isolate failures.</para>
+</listitem>
+</itemizedlist>
+</listitem>
+</orderedlist>
+<note>
+<para>Check <link xl:href="https://github.com/suse-edge/edge-image-builder/blob/main/docs/debugging.md">Edge Image Builder Debugging</link>.</para>
+</note>
+</chapter>
+<chapter xml:id="troubleshooting-edge-networking">
+<title>Troubleshooting Edge Networking (NMC)</title>
+<para>NMC is injected on SL Micro EIB images to configure the network of the Edge hosts at boot time via combustion. It is also being executed on the Metal3 workflow as part of the inspection process. Issues can happen when the host is being booted for the first time or on the Metal3 inspection process.</para>
+<itemizedlist>
+<title>Common Issues</title>
+<listitem>
+<para><emphasis role="strong">Host not being able to boot properly the first time</emphasis>: Malformed network definition files can lead to the combustion phase to fail and then the host drops a root shell.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Files are not properly generated</emphasis>: Ensure the network files matches <link xl:href="https://nmstate.io/examples.html">NMState</link> format.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Network interfaces are not correctly configured</emphasis>: Ensure the MAC addresses match the interfaces being used on the host.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Mismatch between interface names</emphasis>: The <literal>net.ifnames=1</literal> kernel argument enables <link xl:href="https://documentation.suse.com/smart/network/html/network-interface-predictable-naming/index.html">Predictable Naming Scheme for Network Interfaces</link> so there is no <literal>eth0</literal> anymore but other naming schema such as <literal>enp2s0</literal>.</para>
+</listitem>
+</itemizedlist>
+<itemizedlist>
+<title>Logs</title>
+<listitem>
+<para><emphasis role="strong">Combustion logs</emphasis>: As nmc is being used at combustion time, check combustion logs with <literal>journalctl -u combustion</literal> on the host being provisioned.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">NetworkManager logs</emphasis>: On the Metal<superscript>3</superscript> deployment workflow, nmc is part of the IPA execution and it is being executed as a dependency of the NetworkManager service using systemd’s ExecStartPre functionality. Check NetworkManager logs on the IPA host as <literal>journalctl -u NetworkManager</literal> (see the Troubleshooting Directed-network provisioning (<xref linkend="troubleshooting-directed-network-provisioning"/>) section to understand how to access the host when booted with IPA).</para>
+</listitem>
+</itemizedlist>
+<orderedlist numeration="arabic">
+<title>Troubleshooting steps</title>
+<listitem>
+<para><emphasis role="strong">Verify the yaml syntax</emphasis>: nmc configuration files are yaml files, check the proper syntax with <literal>yamllint</literal> or similar tools.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Run nmc manually</emphasis>: As nmc is part of the EIB container, to debug any issues, a local podman command can be used.</para>
+<orderedlist numeration="loweralpha">
+<listitem>
+<para>Create a temporary folder to store the nmc files.</para>
+<screen language="shell" linenumbering="unnumbered">mkdir -p ${HOME}/tmp/foo</screen>
+</listitem>
+<listitem>
+<para>Save the nmc files on that location.</para>
+<screen language="shell" linenumbering="unnumbered">❯ tree --noreport ${HOME}/tmp/foo
+/Users/johndoe/tmp/foo
+├── host1.example.com.yaml
+└── host2.example.com.yaml</screen>
+</listitem>
+<listitem>
+<para>Run the EIB container with nmc as the entrypoint and the generate command to perform the same tasks nmc would do at combustion time:</para>
+<screen language="shell" linenumbering="unnumbered">podman run -it --rm -v ${HOME}/tmp/foo:/tmp/foo:Z --entrypoint=/usr/bin/nmc registry.suse.com/edge/3.3/edge-image-builder:1.2.0 generate --config-dir /tmp/foo --output-dir /tmp/foo/
+
+[2025-06-04T11:58:37Z INFO  nmc::generate_conf] Generating config from "/tmp/foo/host2.example.com.yaml"...
+[2025-06-04T11:58:37Z INFO  nmc::generate_conf] Generating config from "/tmp/foo/host1.example.com.yaml"...
+[2025-06-04T11:58:37Z INFO  nmc] Successfully generated and stored network config</screen>
+</listitem>
+<listitem>
+<para>Observe the logs and files being generated on the temporary folder.</para>
+</listitem>
+</orderedlist>
+</listitem>
+</orderedlist>
+</chapter>
+<chapter xml:id="troubleshooting-phone-home-scenarios">
+<title>Troubleshooting Phone-Home scenarios</title>
+<para>Phone-home scenarios involve using Elemental to connect back to the Management cluster and EIB to create an OS image including the elemental-registration bits. Issues can happen when the host is being booted for the first time, during the EIB build process or trying to register to the Management cluster.</para>
+<itemizedlist>
+<title>Common Issues</title>
+<listitem>
+<para><emphasis role="strong">System fails to register</emphasis>: Node not being registered in the UI. Ensure the host is booted properly and, is able to communicate back to Rancher, clock is in sync and the Elemental services are ok.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">System fails to be provisioned</emphasis>: Node is registered but it fails to be provisioned. Ensure the host is able to communicate back to Rancher, clock is in sync and the Elemental services are ok.</para>
+</listitem>
+</itemizedlist>
+<itemizedlist>
+<title>Logs</title>
+<listitem>
+<para><emphasis role="strong">System logs</emphasis>: <literal>journalctl</literal></para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Elemental-system-agent  logs</emphasis>: <literal>journalctl -u elemental-system-agent</literal></para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">K3s/RKE2 logs</emphasis>: <literal>journalctl -u k3s or journalctl -u rke2-server</literal> (or <literal>rke2-agent</literal>)</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Elemental operator pod</emphasis>: <literal>kubectl logs -n cattle-elemental-system -l app=elemental-operator</literal></para>
+</listitem>
+</itemizedlist>
+<orderedlist numeration="arabic">
+<title>Troubleshooting steps</title>
+<listitem>
+<para><emphasis role="strong">Review logs</emphasis>: Check Elemental operator pod logs to see if there are any issues. Check the host logs if the node is booted.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Check MachineRegistration and TPM</emphasis>: By default, TPM is used for <link xl:href="https://elemental.docs.rancher.com/authentication/">authentication</link> but there are alternatives for hosts without TPM.</para>
+</listitem>
+</orderedlist>
+</chapter>
+<chapter xml:id="troubleshooting-directed-network-provisioning">
+<title>Troubleshooting Directed-network provisioning</title>
+<para>Directed-network provisioning scenarios involve using Metal<superscript>3</superscript> and CAPI elements to provision the Downstream cluster. It also includes EIB to create an OS image. Issues can happen when the host is being booted for the first time or during the inspection or provisioning processes.</para>
+<itemizedlist>
+<title>Common Issues</title>
+<listitem>
+<para><emphasis role="strong">Old firmware</emphasis>: Verify all the different firmware on the physical hosts being used are up to date. This includes the BMC firmware as some times Metal<superscript>3</superscript> <link xl:href="https://book.metal3.io/bmo/supported_hardware#redfish-and-its-variants">requires specific/updated ones</link>.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Provisioning failed with SSL errors</emphasis>: If the webserver serving the images uses https, Metal<superscript>3</superscript> needs to be configured to inject and trust the certificate on the IPA image. See Kubernetes folder (<xref linkend="mgmt-cluster-kubernetes-folder"/>) on how to include a <literal>ca-additional.crt</literal> file to the Metal<superscript>3</superscript> chart.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Certificates issues when booting the hosts with IPA</emphasis>: Some server vendors verify the SSL connection when attaching virtual-media ISO images to the BMC, which can cause a problem because the generated certificates for the Metal3 deployment are self-signed. It can happen that the host is being booted but it drops to an UEFI shell. See Disabling TLS for virtualmedia ISO attachment (<xref linkend="disabling-tls-for-virtualmedia-iso-attachment"/>) on how to fix it.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Wrong name or label reference</emphasis>: If the cluster references a node by the wrong name or label, the cluster results as deployed but the BMH remains as “Available”. Double-check the references on the involved objects for the BMHs.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">BMC communication issues</emphasis>: Ensure the Metal<superscript>3</superscript> pods running on the management cluster can reach the BMC of the hosts being provisioned (usually the BMC network is very restricted).</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Incorrect bare metal host state</emphasis>: The BMH object goes to different states (inspecting, preparing, provisioned, etc.) during its lifetime <link xl:href="https://book.metal3.io/bmo/state_machine">Lifetime of State machine</link>. If detected an incorrect state, check the <literal>status</literal> field of the BMH object as it contains more information as <literal>kubectl get bmh &lt;name&gt; -o jsonpath=’{.status}’| jq</literal>.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Host not being deprovisioned</emphasis>: In the event of a host being intended to be deprovisioned fails, the removal can be attempted after adding the “detached” annotation to the BMH object as:  <literal>kubectl annotate bmh/&lt;BMH&gt; baremetalhost.metal3.io/detached=””</literal>.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Image errors</emphasis>: Verify the image being built with EIB for the downstream cluster is available, has a proper checksum and it is not too large to decompress or too large for disk.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Disk size mismatch</emphasis>: By default, the disk would not expand to fill the whole disk. As explained in the Growfs script (<xref linkend="growfs-script"/>) section, a growfs script needs to be included in the image being built with EIB for the downstream cluster hosts.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Cleaning process stuck</emphasis>: The cleaning process is retried several times. If due to a problem with the host cleaning is no longer possible, disable cleaning first by setting the <literal>automatedCleanMode</literal> field to <literal>disabled</literal> on the BMH object.</para>
+<warning>
+<para>It is not recommended to manually remove the finalizer when the cleaning process is taking longer than desired or is failing. Doing so, removes the host record from Kubernetes but leave it in Ironic. The currently running action continues in the background, and an attempt to add the host again may fail because of the conflict.</para>
+</warning>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Metal3/Rancher Turtles/CAPI pods issues</emphasis>: The deployment flow for all the required components is:</para>
+<itemizedlist>
+<listitem>
+<para>The Rancher Turtles controller deploys the CAPI operator controller.</para>
+</listitem>
+<listitem>
+<para>The CAPI operator controller then deploys the provider controllers (CAPI core, CAPM3 and RKE2 controlplane/bootstrap).</para>
+</listitem>
+</itemizedlist>
+</listitem>
+</itemizedlist>
+<para>Verify all the pods are running correctly and check the logs otherwise.</para>
+<itemizedlist>
+<title>Logs</title>
+<listitem>
+<para><emphasis role="strong">Metal<superscript>3</superscript> logs</emphasis>:Check logs for the different pods.</para>
+<screen language="shell" linenumbering="unnumbered">kubectl logs -n metal3-system -l app.kubernetes.io/component=baremetal-operator
+kubectl logs -n metal3-system -l app.kubernetes.io/component=ironic</screen>
+<note>
+<para>The metal3-ironic pod contains at least 4 different containers (<literal>ironic-httpd</literal>,` ironic-log-watch`, <literal>ironic</literal> &amp; <literal>ironic-ipa-downloader</literal> (init)) on the same pod. Use the <literal>-c</literal>  flag when using <literal>kubectl logs</literal> to verify the logs of each of the containers.</para>
+</note>
+<note>
+<para>The <literal>ironic-log-watch</literal> container exposes console logs from the hosts after inspection/provisioning, provided network connectivity enables sending these logs back to the management cluster. This can be useful in cases where there are provisioning errors but you do not have direct access to the BMC console logs.</para>
+</note>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Rancher Turtles logs</emphasis>: Check logs for the different pods.</para>
+<screen language="shell" linenumbering="unnumbered">kubectl logs -n rancher-turtles-system -l control-plane=controller-manager
+kubectl logs -n rancher-turtles-system -l app.kubernetes.io/name=cluster-api-operator
+kubectl logs -n rke2-bootstrap-system -l cluster.x-k8s.io/provider=bootstrap-rke2
+kubectl logs -n rke2-control-plane-system -l cluster.x-k8s.io/provider=control-plane-rke2
+kubectl logs -n capi-system -l cluster.x-k8s.io/provider=cluster-api
+kubectl logs -n capm3-system -l cluster.x-k8s.io/provider=infrastructure-metal3</screen>
+</listitem>
+<listitem>
+<para><emphasis role="strong">BMC logs</emphasis>: Usually BMCs have a UI where most of the interaction can be done. There is usually a “logs” section that can be observed for potential issues (not being able to reach the image, hardware failures, etc.).</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Console logs</emphasis>: Connect to the BMC console (via the BMC webui, serial, etc.) and check for errors on the logs being written.</para>
+</listitem>
+</itemizedlist>
+<orderedlist numeration="arabic">
+<title>Troubleshooting steps</title>
+<listitem>
+<para><emphasis role="strong">Check <literal>BareMetalHost</literal> status</emphasis>:</para>
+<itemizedlist>
+<listitem>
+<para><literal>kubectl get bmh -A</literal> shows the current state. Look for <literal>provisioning</literal>, <literal>ready</literal>, <literal>error</literal>, <literal>registering</literal>.</para>
+</listitem>
+<listitem>
+<para><literal>kubectl describe bmh -n &lt;namespace&gt; &lt;bmh_name&gt;</literal> provides detailed events and conditions explaining why a BMH might be stuck.</para>
+</listitem>
+</itemizedlist>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Test RedFish connectivity</emphasis>:</para>
+<itemizedlist>
+<listitem>
+<para>Use <literal>curl</literal> from the Metal<superscript>3</superscript> control plane to test connectivity to the BMCs via redfish.</para>
+</listitem>
+<listitem>
+<para>Ensure correct BMC credentials are provided in the <literal>BareMetalHost-Secret</literal> definition.</para>
+</listitem>
+</itemizedlist>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Verify turtles/CAPI/metal3 pod status</emphasis>: Ensure the containers on the management cluster are up and running: <literal>kubectl get pods -n metal3-system</literal> and <literal>kubectl get pods -n rancher-turtles-system</literal> (also see <literal>capi-system</literal>, <literal>capm3-system</literal>, <literal>rke2-bootstrap-system</literal> and <literal>rke2-control-plane-system</literal>).</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Verify the ironic endpoint is reachable from the host being provisioned</emphasis>: The host being provisioned needs to be able to reach out the Ironic endpoint to report back to Metal<superscript>3</superscript>. Check the IP with <literal>kubectl get svc -n metal3-system metal3-metal3-ironic</literal> and try to reach it via <literal>curl/nc</literal>.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Verify the IPA image is reachable from the BMC</emphasis>: IPA is being served by the Ironic endpoint and it needs to be reachable from the BMC as it is being used as a virtual CD.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Verify the OS image is reachable from the host being provisioned</emphasis>: The image being used to provision the host needs to be reachable from the host itself (when running IPA) as it will be downloaded temporarily and written to the disk.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Examine Metal<superscript>3</superscript> component logs</emphasis>: See above.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Retrigger BMH Insepction</emphasis>:  If an inspection failed or the hardware of an available host changed, a new inspection process can be triggered by annotating the BMH object with <literal>inspect.metal3.io: ""</literal>. See the <link xl:href="https://book.metal3.io/bmo/inspect_annotation">Metal<superscript>3</superscript> Controlling inspection</link> guide for more information.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Bare metal IPA console</emphasis>: To troubleshoot IPA issues a couple of alternatives exist:</para>
+<itemizedlist>
+<listitem>
+<para>Enable “autologin”. This enables the root user to be logged automatically when connecting to the IPA console.</para>
+<warning>
+<para>This is only for debug purposes as it gives full access to the host.</para>
+</warning>
+<para>To enable autologin, the Metal3 helm <literal>global.ironicKernelParams</literal> value should look like: <literal>console=ttyS0 suse.autologin=ttyS0</literal> (depending on the console, <literal>ttyS0</literal> can be changed). Then a redeployment of the Metal<superscript>3</superscript> chart should be performed. (Note <literal>ttyS0</literal> is an example, this should match the actual terminal e.g may be <literal>tty1</literal> in many cases on bare metal, this can be verified by looking at the console output from the IPA ramdisk on boot where <literal>/etc/issue</literal> prints the console name).</para>
+<para>Another way to do it is by changing the <literal>IRONIC_KERNEL_PARAMS</literal> parameter on the <literal>ironic-bmo</literal> configmap on the <literal>metal3-system</literal> namespace. This can be easier as it can be done via <literal>kubectl</literal> edit but it will be overwritten when updating the chart. Then the Metal<superscript>3</superscript> pod needs to be restarted with <literal>kubectl delete pod -n metal3-system -l app.kubernetes.io/component=ironic</literal>.</para>
+</listitem>
+<listitem>
+<para>Inject an ssh key for the root user on the IPA.</para>
+<warning>
+<para>This is only for debug purposes as it gives full access to the host.</para>
+</warning>
+<para>To inject the ssh key for the root user, the Metal<superscript>3</superscript> helm <literal>debug.ironicRamdiskSshKey</literal> value should be used. Then a redeployment of the Metal<superscript>3</superscript> chart should be performed.</para>
+<para>Another way to do it is by changing the <literal>IRONIC_RAMDISK_SSH_KEY</literal> parameter on the <literal>ironic-bmo configmap</literal> on the <literal>metal3-system</literal> namespace. This can be easier as it can be done via <literal>kubectl</literal> edit but it will be overwritten when updating the chart. Then the Metal<superscript>3</superscript> pod needs to be restarted with <literal>kubectl delete pod -n metal3-system -l app.kubernetes.io/component=ironic</literal></para>
+</listitem>
+</itemizedlist>
+</listitem>
+</orderedlist>
+<note>
+<para>Check the <link xl:href="https://cluster-api.sigs.k8s.io/user/troubleshooting">CAPI troubleshooting</link> and <link xl:href="https://book.metal3.io/troubleshooting">Metal<superscript>3</superscript> troubleshooting</link> guides.</para>
+</note>
+</chapter>
+<chapter xml:id="troubleshooting-other-components">
+<title>Troubleshooting Other components</title>
+<para>Other SUSE Edge components troubleshooting guides can be consulted on their official documentation:</para>
+<itemizedlist>
+<listitem>
+<para><link xl:href="https://documentation.suse.com/smart/micro-clouds/html/SLE-Micro-5.5-admin/index.html#id-1.10">SUSE Linux Micro Troubleshooting</link></para>
+</listitem>
+<listitem>
+<para><link xl:href="https://docs.rke2.io/known_issues">RKE2 Known Issues</link></para>
+</listitem>
+<listitem>
+<para><link xl:href="https://docs.k3s.io/known-issues">K3s Known Issues</link></para>
+</listitem>
+<listitem>
+<para><link xl:href="https://ranchermanager.docs.rancher.com/troubleshooting/general-troubleshooting">Rancher General Troubleshooting</link></para>
+</listitem>
+<listitem>
+<para><link xl:href="https://documentation.suse.com/multi-linux-manager/5.1/en/docs/administration/troubleshooting/tshoot-intro.html">SUSE Multi-Linux Manager Troubleshooting</link></para>
+</listitem>
+<listitem>
+<para><link xl:href="https://elemental.docs.rancher.com/troubleshooting-support/">Elemental Support</link></para>
+</listitem>
+<listitem>
+<para><link xl:href="https://turtles.docs.rancher.com/turtles/stable/en/troubleshooting/troubleshooting.html">Rancher Turtles Troubleshooting</link></para>
+</listitem>
+<listitem>
+<para><link xl:href="https://longhorn.io/docs/1.8.1/troubleshoot/troubleshooting/">Longhorn Troubleshooting</link></para>
+</listitem>
+<listitem>
+<para><link xl:href="https://open-docs.neuvector.com/next/troubleshooting/troubleshooting/">Neuvector Troubleshooting</link></para>
+</listitem>
+<listitem>
+<para><link xl:href="https://fleet.rancher.io/troubleshooting">Fleet Troubleshooting</link></para>
+</listitem>
+</itemizedlist>
+<para>You can also see <link xl:href="https://www.suse.com/support/kb/">SUSE Knowledgebase</link>.</para>
+</chapter>
+<chapter xml:id="collecting-diagnostics-for-support">
+<title>Collecting Diagnostics for Support</title>
+<para>When contacting SUSE Support, providing comprehensive diagnostic information is crucial.</para>
+<itemizedlist>
+<title>Essential Information to Collect</title>
+<listitem>
+<para><emphasis role="strong">Detailed problem description</emphasis>: What happened, when did it happen, what were you doing, what is the expected behavior, and what is the actual behavior?</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Steps to reproduce</emphasis>: Can you reliably reproduce the issue? If so, list the exact steps.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Component versions</emphasis>: SUSE Edge version, components versions (RKE2/K3, EIB, Metal<superscript>3</superscript>, Elemental,..).</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Relevant logs</emphasis>:</para>
+<itemizedlist>
+<listitem>
+<para><literal>journalctl</literal> output (filtered by service if possible, or full boot logs).</para>
+</listitem>
+<listitem>
+<para>Kubernetes pod logs (kubectl logs).</para>
+</listitem>
+<listitem>
+<para>Metal³/Elemental component logs.</para>
+</listitem>
+<listitem>
+<para>EIB build logs and other logs</para>
+</listitem>
+</itemizedlist>
+</listitem>
+<listitem>
+<para><emphasis role="strong">System information</emphasis>:</para>
+<itemizedlist>
+<listitem>
+<para><literal>uname -a</literal></para>
+</listitem>
+<listitem>
+<para><literal>df -h</literal></para>
+</listitem>
+<listitem>
+<para><literal>ip a</literal></para>
+</listitem>
+<listitem>
+<para><literal>/etc/os-release</literal></para>
+</listitem>
+</itemizedlist>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Configuration files</emphasis>: Relevant configuration files for Elemental, Metal<superscript>3</superscript>, EIB such as helm chart values, configmaps, etc.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Kubernetes information</emphasis>: Nodes, Services, Deployments, etc.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">Kubernetes objects affected</emphasis>: BMH, MachineRegistration, etc.</para>
+</listitem>
+</itemizedlist>
+<itemizedlist>
+<title>How to collect</title>
+<listitem>
+<para><emphasis role="strong">For logs</emphasis>: Redirect command output to files (for example, <literal>journalctl -u k3s &gt; k3s_logs.txt</literal>).</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">For Kubernetes resources</emphasis>: Use <literal>kubectl get &lt;resource&gt; -o yaml &gt; &lt;resource_name&gt;.yaml</literal> to get detailed YAML definitions.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">For system information</emphasis>: Collect output of the commands listed above.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">For SL Micro</emphasis>: Check the <link xl:href="https://documentation.suse.com/sle-micro/5.5/html/SLE-Micro-all/cha-adm-support-slemicro.html">SUSE Linux Micro Troubleshooting Guide</link> documentation on how to gather system information for support with <literal>supportconfig</literal>.</para>
+</listitem>
+<listitem>
+<para><emphasis role="strong">For RKE2/Rancher</emphasis>: Check the <link xl:href="https://www.suse.com/support/kb/doc/?id=000020191">The Rancher v2.x Linux log collector script</link> article to run The Rancher v2.x Linux log collector script.</para>
+</listitem>
+</itemizedlist>
+<formalpara>
+<title>Contact Support</title>
+<para>Please check the article available at <link xl:href="https://www.suse.com/support/kb/doc/?id=000019452">How-to effectively work with SUSE Technical Support</link> and the support handbook located at <link xl:href="https://www.suse.com/support/handbook/">SUSE Technical Support Handbook</link> for more details on how to contact SUSE support.</para>
+</formalpara>
+</chapter>
+</part>
 <part xml:id="id-appendix">
 <title>Appendix</title>
 <chapter xml:id="id-release-notes">
@@ -17039,11 +17638,322 @@ spec:
 <para>SUSE Edge z-stream releases are tightly integrated and thoroughly tested as a versioned stack. Upgrade of any individual components to a different versions to those listed above is likely to result in system downtime. While it’s possible to run Edge clusters in untested configurations, it is not recommended, and it may take longer to provide resolution through the support channels.</para>
 </note>
 </section>
+<section xml:id="release-notes-3-3-1">
+<title>Release 3.3.1</title>
+<para>Availability Date: 13th June 2025</para>
+<para>Summary: SUSE Edge 3.3.1 is first z-stream release in the SUSE Edge 3.3 release stream.</para>
+<section xml:id="id-new-features">
+<title>New Features</title>
+<itemizedlist>
+<listitem>
+<para>Updated to Kubernetes 1.32.4 and Rancher Prime 2.11.2 <link xl:href="https://github.com/rancher/rancher/releases/tag/v2.11.2">Release Notes</link></para>
+</listitem>
+<listitem>
+<para>Updated to SUSE Security (Neuvector) 5.4.4 <link xl:href="https://open-docs.neuvector.com/releasenotes/5x#544-may-2025">Release Notes</link></para>
+</listitem>
+<listitem>
+<para>Updated to Rancher Turtles 0.20.0 <link xl:href="https://turtles.docs.rancher.com/turtles/stable/en/changelogs/changelogs/v0.20.0.html">Release Notes</link></para>
+</listitem>
+</itemizedlist>
+</section>
+<section xml:id="id-bug-security-fixes">
+<title>Bug &amp; Security Fixes</title>
+<itemizedlist>
+<listitem>
+<para>In some cases when using a management cluster that has been upgraded from Edge 3.2 to 3.3.0, downstream rolling upgrades via CAPI could result in Machines stuck in Deleting state, this has been resolved via an update to the RKE2 CAPI provider <link xl:href="https://github.com/rancher/cluster-api-provider-rke2/issues/661">Upstream RKE2 provider issue 661</link></para>
+</listitem>
+<listitem>
+<para>When configuring networking via nm-configurator, certain configurations which identify interfaces by MAC in 3.3.0 did not work, this has been resolved by updating NMC to 0.3.3 with corresponding updates to the EIB and Metal<superscript>3</superscript> IPA downloader container images  <link xl:href="https://github.com/suse-edge/nm-configurator/issues/163">Upstream NM Configurator Issue</link></para>
+</listitem>
+<listitem>
+<para>For long running Metal<superscript>3</superscript> management clusters in 3.3.0, it was possible for certificate expiry to cause the baremetal-operator connection to ironic to fail, requiring a workaround of a manual pod restart, this has been resolved via updates to the Metal<superscript>3</superscript> chart <link xl:href="https://github.com/suse-edge/charts/issues/178">SUSE Edge charts issue</link></para>
+</listitem>
+<listitem>
+<para>Previously Rancher UI was not not able to list SUSE Edge charts from OCI registry in the Application catalog. This has been resolved with the update to Rancher 2.11.2 <link xl:href="https://github.com/rancher/rancher/issues/48746">Rancher Issue</link></para>
+</listitem>
+</itemizedlist>
+</section>
+<section xml:id="id-known-issues-8">
+<title>Known Issues</title>
+<warning>
+<para>If deploying new clusters, please follow <xref linkend="guides-kiwi-builder-images"/> to build fresh images first as this is now the first step required to create clusters for both AMD64/Intel 64 and AArch64 architectures as well as management and downstream clusters.</para>
+</warning>
+<itemizedlist>
+<listitem>
+<para>When using <literal>toolbox</literal> in SUSE Linux Micro 6.1, the default container image does not contain some tools which were included in the previous 5.5 version.  The workaround is to configure toolbox to use the previous <literal>suse/sle-micro/5.5/toolbox</literal> container image, see <literal>toolbox --help</literal> for options to configure the image.</para>
+</listitem>
+<listitem>
+<para>In some cases rolling upgrades via CAPI can result in Machines stuck in Deleting state, this will be resolved via a future update <link xl:href="https://github.com/rancher/cluster-api-provider-rke2/issues/655">Upstream RKE2 provider issue 655</link></para>
+</listitem>
+<listitem>
+<para>Due to fixes related to <link xl:href="https://nvd.nist.gov/vuln/detail/CVE-2025-1974">CVE-2025-1974</link> as mentioned in 3.3.0, SUSE Linux Micro 6.1 <emphasis role="strong">must</emphasis> be updated to include kernel <literal>&gt;=6.4.0-26-default</literal> or <literal>&gt;=6.4.0-30-rt</literal> (real-time kernel) due to required SELinux kernel patches. If not applied, the ingress-nginx pod will remain in a <literal>CrashLoopBackOff</literal> state. To apply the kernel update run <literal>transactional-update</literal> on the host itself (to update all packages), or <literal>transactional-update pkg update kernel-default</literal> (or kernel-rt) to update just the kernel, then reboot the host. If deploying new clusters, please follow <xref linkend="guides-kiwi-builder-images"/> to build fresh images containing the latest kernel.</para>
+</listitem>
+<listitem>
+<para>A bug with Kubernetes Job Controller has been identified that on certain conditions it can cause the RKE2/K3s nodes to stay in <literal>NotReady</literal> state (see the <link xl:href="https://github.com/rancher/rke2/issues/8357">#8357 RKE2 issue</link>). The errors can look like:</para>
+</listitem>
+</itemizedlist>
+<screen language="bash" linenumbering="unnumbered">E0605 23:11:18.489721   »···1 job_controller.go:631] "Unhandled Error" err="syncing job: tracking status: adding uncounted pods to status: Operation cannot be fulfilled on jobs.batch \"helm-install-rke2-ingress-nginx\": StorageError: invalid object, Code: 4, Key: /registry/jobs/kube-system/helm-install-rke2-ingress-nginx, ResourceVersion: 0, AdditionalErrorMsg: Precondition failed: UID in precondition: 0aa6a781-7757-4c61-881a-cb1a4e47802c, UID in object meta: 6a320146-16b8-4f83-88c5-fc8b5a59a581" logger="UnhandledError"</screen>
+<para>As a workaround, the <literal>kube-controller-manager</literal> pod can be restarted with <literal>crictl</literal> as:</para>
+<screen language="bash" linenumbering="unnumbered">export CONTAINER_RUNTIME_ENDPOINT=unix:///run/k3s/containerd/containerd.sock
+export KUBEMANAGER_POD=$(/var/lib/rancher/rke2/bin/crictl ps --label io.kubernetes.container.name=kube-controller-manager --quiet)
+/var/lib/rancher/rke2/bin/crictl stop ${KUBEMANAGER_POD} &amp;&amp; \
+/var/lib/rancher/rke2/bin/crictl rm ${KUBEMANAGER_POD}</screen>
+<itemizedlist>
+<listitem>
+<para>On RKE2/K3s 1.31 and 1.32 versions, the directory <literal>/etc/cni</literal> being used to store CNI configurations may not trigger a notification of the files being written there to <literal>containerd</literal> due to certain conditions related to <literal>overlayfs</literal> (see the <link xl:href="https://github.com/rancher/rke2/issues/8356">#8356 RKE2 issue</link>). This in turn results in the deployment of RKE2/K3s to get stuck waiting for the CNI to start, and the RKE2/K3s nodes to stay in <literal>NotReady</literal> state. This can be seen at node level with <literal>kubectl describe node &lt;affected_node&gt;</literal>:</para>
+</listitem>
+</itemizedlist>
+<screen language="bash" linenumbering="unnumbered">&lt;200b&gt;&lt;200b&gt;Conditions:
+  Type         »Status  LastHeartbeatTime             »·LastTransitionTime            »·Reason                   »··Message
+  ----         »------  -----------------             »·------------------            »·------                   »··-------
+  Ready        »False   Thu, 05 Jun 2025 17:41:28 +0000   Thu, 05 Jun 2025 14:38:16 +0000   KubeletNotReady          »··container runtime network not ready: NetworkReady=false reason:NetworkPluginNotReady message:Network plugin returns error: cni plugin not initialized</screen>
+<para>As a workaround, a tmpfs volume can be mounted at the <literal>/etc/cni</literal> directory before RKE2 starts. It avoids the usage of overlayfs which results in containerd missing notifications and the configs should get rewritten every time the node is restarted and the pods initcontainers run again. If using EIB, this can be a <literal>04-tmpfs-cni.sh</literal> script in the <literal>custom/scripts</literal> directory (as explained here[<link xl:href="https://github.com/suse-edge/edge-image-builder/blob/release-1.2/docs/building-images.md#custom">https://github.com/suse-edge/edge-image-builder/blob/release-1.2/docs/building-images.md#custom</link>]) that looks like:</para>
+<screen language="bash" linenumbering="unnumbered">#!/bin/bash
+mkdir -p /etc/cni
+mount -t tmpfs -o mode=0700,size=5M tmpfs /etc/cni
+echo "tmpfs /etc/cni tmpfs defaults,size=5M,mode=0700 0 0" &gt;&gt; /etc/fstab</screen>
+</section>
+<section xml:id="id-component-versions">
+<title>Component Versions</title>
+<para>The following table describes the individual components that make up the 3.3.1 release, including the version, the Helm chart version (if applicable), and from where the released artifact can be pulled in the binary format. Please follow the associated documentation for usage and deployment examples.</para>
+<informaltable frame="all" rowsep="1" colsep="1">
+<tgroup cols="4">
+<colspec colname="col_1" colwidth="25*"/>
+<colspec colname="col_2" colwidth="25*"/>
+<colspec colname="col_3" colwidth="25*"/>
+<colspec colname="col_4" colwidth="25*"/>
+<tbody>
+<row>
+<entry align="left" valign="top"><para>Name</para></entry>
+<entry align="left" valign="top"><para>Version</para></entry>
+<entry align="left" valign="top"><para>Helm Chart Version</para></entry>
+<entry align="left" valign="top"><para>Artifact Location (URL/Image)</para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para>SUSE Linux Micro</para></entry>
+<entry align="left" valign="top"><para>6.1 (latest)</para></entry>
+<entry align="left" valign="top"><para>N/A</para></entry>
+<entry align="left" valign="top"><para><link xl:href="https://www.suse.com/download/sle-micro/">SUSE Linux Micro Download Page</link><?asciidoc-br?>
+SL-Micro.x86_64-6.1-Base-SelfInstall-GM.install.iso (sha256 70b9be28f2d92bc3b228412e4fc2b1d5026e691874b728e530b8063522158854)<?asciidoc-br?>
+SL-Micro.x86_64-6.1-Base-RT-SelfInstall-GM.install.iso (sha256 9ce83e4545d4b36c7c6a44f7841dc3d9c6926fe32dbff694832e0fbd7c496e9d)<?asciidoc-br?>
+SL-Micro.x86_64-6.1-Base-GM.raw.xz (sha256 36e3efa55822113840dd76fdf6914e933a7b7e88a1dce5cb20c424ccf2fb4430)<?asciidoc-br?>
+SL-Micro.x86_64-6.1-Base-RT-GM.raw.xz (sha256 2ee66735da3e1da107b4878e73ae68f5fb7309f5ec02b5dfdb94e254fda8415e)<?asciidoc-br?></para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para>SUSE Multi-Linux Manager</para></entry>
+<entry align="left" valign="top"><para>5.0.3</para></entry>
+<entry align="left" valign="top"><para>N/A</para></entry>
+<entry align="left" valign="top"><para><link xl:href="https://www.suse.com/download/suse-manager/">SUSE Multi-Linux Manager Download Page</link></para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para><emphasis role="strong">K3s</emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">1.32.4</emphasis></para></entry>
+<entry align="left" valign="top"><para>N/A</para></entry>
+<entry align="left" valign="top"><para><link xl:href="https://github.com/k3s-io/k3s/releases/tag/v1.32.4%2Bk3s1">Upstream K3s Release</link></para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para><emphasis role="strong">RKE2</emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">1.32.4</emphasis></para></entry>
+<entry align="left" valign="top"><para>N/A</para></entry>
+<entry align="left" valign="top"><para><link xl:href="https://github.com/rancher/rke2/releases/tag/v1.32.4%2Brke2r1">Upstream RKE2 Release</link></para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para><emphasis role="strong">SUSE Rancher Prime</emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">2.11.2</emphasis></para></entry>
+<entry align="left" valign="top"><para>2.11.2</para></entry>
+<entry align="left" valign="top"><para><link xl:href="https://charts.rancher.com/server-charts/prime/index.yaml">Rancher Prime Helm Repository</link><?asciidoc-br?>
+<link xl:href="https://github.com/rancher/rancher/releases/download/v2.11.1/rancher-images.txt">Rancher 2.11.1 Container Images</link></para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para>SUSE Storage</para></entry>
+<entry align="left" valign="top"><para>1.8.1</para></entry>
+<entry align="left" valign="top"><para>106.2.0+up1.8.1</para></entry>
+<entry align="left" valign="top"><para><link xl:href="https://charts.rancher.io/index.yaml">Rancher Charts Helm Repository</link><?asciidoc-br?>
+registry.suse.com/rancher/mirrored-longhornio-csi-attacher:v4.8.1<?asciidoc-br?>
+registry.suse.com/rancher/mirrored-longhornio-csi-provisioner:v5.2.0<?asciidoc-br?>
+registry.suse.com/rancher/mirrored-longhornio-csi-resizer:v1.13.2<?asciidoc-br?>
+registry.suse.com/rancher/mirrored-longhornio-csi-snapshotter:v8.2.0<?asciidoc-br?>
+registry.suse.com/rancher/mirrored-longhornio-csi-node-driver-registrar:v2.13.0<?asciidoc-br?>
+registry.suse.com/rancher/mirrored-longhornio-livenessprobe:v2.15.0<?asciidoc-br?>
+registry.suse.com/rancher/mirrored-longhornio-backing-image-manager:v1.8.1<?asciidoc-br?>
+registry.suse.com/rancher/mirrored-longhornio-longhorn-engine:v1.8.1<?asciidoc-br?>
+registry.suse.com/rancher/mirrored-longhornio-longhorn-instance-manager:v1.8.1<?asciidoc-br?>
+registry.suse.com/rancher/mirrored-longhornio-longhorn-manager:v1.8.1<?asciidoc-br?>
+registry.suse.com/rancher/mirrored-longhornio-longhorn-share-manager:v1.8.1<?asciidoc-br?>
+registry.suse.com/rancher/mirrored-longhornio-longhorn-ui:v1.8.1<?asciidoc-br?>
+registry.suse.com/rancher/mirrored-longhornio-support-bundle-kit:v0.0.52<?asciidoc-br?>
+registry.suse.com/rancher/mirrored-longhornio-longhorn-cli:v1.8.1<?asciidoc-br?></para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para><emphasis role="strong">SUSE Security</emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">5.4.4</emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">106.0.1+up2.8.6</emphasis></para></entry>
+<entry align="left" valign="top"><para><link xl:href="https://charts.rancher.io/index.yaml">Rancher Charts Helm Repository</link><?asciidoc-br?>
+<emphasis role="strong">registry.suse.com/rancher/neuvector-controller:5.4.4</emphasis><?asciidoc-br?>
+<emphasis role="strong">registry.suse.com/rancher/neuvector-enforcer:5.4.4</emphasis><?asciidoc-br?>
+<emphasis role="strong">registry.suse.com/rancher/neuvector-manager:5.4.4</emphasis><?asciidoc-br?>
+<emphasis role="strong">registry.suse.com/rancher/neuvector-compliance-config:1.0.5</emphasis><?asciidoc-br?>
+registry.suse.com/rancher/neuvector-registry-adapter:0.1.6<?asciidoc-br?>
+registry.suse.com/rancher/neuvector-scanner:6<?asciidoc-br?>
+<emphasis role="strong">registry.suse.com/rancher/neuvector-updater:0.0.3</emphasis></para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para><emphasis role="strong">Rancher Turtles (CAPI)</emphasis></para></entry>
+<entry align="left" valign="top"><para>0.20.0</para></entry>
+<entry align="left" valign="top"><para>303.0.4+up0.20.0</para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">registry.suse.com/edge/charts/rancher-turtles:303.0.3_up0.20.0</emphasis><?asciidoc-br?>
+<emphasis role="strong">registry.rancher.com/rancher/rancher/turtles:v0.20.0</emphasis><?asciidoc-br?>
+registry.rancher.com/rancher/cluster-api-operator:v0.17.0<?asciidoc-br?>
+registry.rancher.com/rancher/cluster-api-metal3-controller:v1.9.3<?asciidoc-br?>
+registry.rancher.com/rancher/cluster-api-metal3-ipam-controller:v1.9.4<?asciidoc-br?>
+registry.suse.com/rancher/cluster-api-controller:v1.9.5<?asciidoc-br?>
+<emphasis role="strong">registry.suse.com/rancher/cluster-api-provider-rke2-bootstrap:v0.16.1</emphasis><?asciidoc-br?>
+<emphasis role="strong">registry.suse.com/rancher/cluster-api-provider-rke2-controlplane:v0.16.1</emphasis></para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para><emphasis role="strong">Rancher Turtles Airgap Resources</emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">0.20.0</emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">303.0.4+up0.20.0</emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">registry.suse.com/edge/charts/rancher-turtles-airgap-resources:303.0.3_up0.20.0</emphasis></para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para><emphasis role="strong">Metal<superscript>3</superscript></emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">0.11.5</emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">303.0.7+up0.11.5</emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">registry.suse.com/edge/charts/metal3:303.0.7_up0.11.5</emphasis><?asciidoc-br?>
+<emphasis role="strong">registry.suse.com/edge/3.3/baremetal-operator:0.9.1.1</emphasis><?asciidoc-br?>
+registry.suse.com/edge/3.3/ironic:26.1.2.4<?asciidoc-br?>
+<emphasis role="strong">registry.suse.com/edge/3.3/ironic-ipa-downloader:3.0.7</emphasis><?asciidoc-br?>
+registry.suse.com/edge/mariadb:10.6.15.1</para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para>MetalLB</para></entry>
+<entry align="left" valign="top"><para>0.14.9</para></entry>
+<entry align="left" valign="top"><para>303.0.0+up0.14.9</para></entry>
+<entry align="left" valign="top"><para>registry.suse.com/edge/charts/metallb:303.0.0_up0.14.9<?asciidoc-br?>
+registry.suse.com/edge/3.3/metallb-controller:v0.14.8<?asciidoc-br?>
+registry.suse.com/edge/3.3/metallb-speaker:v0.14.8<?asciidoc-br?>
+registry.suse.com/edge/3.3/frr:8.4<?asciidoc-br?>
+registry.suse.com/edge/3.3/frr-k8s:v0.0.14</para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para>Elemental</para></entry>
+<entry align="left" valign="top"><para>1.6.8</para></entry>
+<entry align="left" valign="top"><para>1.6.8</para></entry>
+<entry align="left" valign="top"><para>registry.suse.com/rancher/elemental-operator-chart:1.6.8<?asciidoc-br?>
+registry.suse.com/rancher/elemental-operator-crds-chart:1.6.8<?asciidoc-br?>
+registry.suse.com/rancher/elemental-operator:1.6.8</para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para>Elemental Dashboard Extension</para></entry>
+<entry align="left" valign="top"><para>3.0.1</para></entry>
+<entry align="left" valign="top"><para>3.0.1</para></entry>
+<entry align="left" valign="top"><para><link xl:href="https://github.com/rancher/ui-plugin-charts/tree/4.0.0/charts/elemental/3.0.1">Elemental Extension Helm Chart</link></para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para><emphasis role="strong">Edge Image Builder</emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">1.2.1</emphasis></para></entry>
+<entry align="left" valign="top"><para>N/A</para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">registry.suse.com/edge/3.3/edge-image-builder:1.2.1</emphasis></para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para><emphasis role="strong">NM Configurator</emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">0.3.3</emphasis></para></entry>
+<entry align="left" valign="top"><para>N/A</para></entry>
+<entry align="left" valign="top"><para><link xl:href="https://github.com/suse-edge/nm-configurator/releases/tag/v0.3.3">NMConfigurator Upstream Release</link></para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para>KubeVirt</para></entry>
+<entry align="left" valign="top"><para>1.4.0</para></entry>
+<entry align="left" valign="top"><para>303.0.0+up0.5.0</para></entry>
+<entry align="left" valign="top"><para>registry.suse.com/edge/charts/kubevirt:303.0.0_up0.5.0<?asciidoc-br?>
+registry.suse.com/suse/sles/15.6/virt-operator:1.4.0<?asciidoc-br?>
+registry.suse.com/suse/sles/15.6/virt-api:1.4.0<?asciidoc-br?>
+registry.suse.com/suse/sles/15.6/virt-controller:1.4.0<?asciidoc-br?>
+registry.suse.com/suse/sles/15.6/virt-exportproxy:1.4.0<?asciidoc-br?>
+registry.suse.com/suse/sles/15.6/virt-exportserver:1.4.0<?asciidoc-br?>
+registry.suse.com/suse/sles/15.6/virt-handler:1.4.0<?asciidoc-br?>
+registry.suse.com/suse/sles/15.6/virt-launcher:1.4.0</para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para>KubeVirt Dashboard Extension</para></entry>
+<entry align="left" valign="top"><para>1.3.2</para></entry>
+<entry align="left" valign="top"><para>303.0.2+up1.3.2</para></entry>
+<entry align="left" valign="top"><para>registry.suse.com/edge/charts/kubevirt-dashboard-extension:303.0.2_up1.3.2</para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para>Containerized Data Importer</para></entry>
+<entry align="left" valign="top"><para>1.61.0</para></entry>
+<entry align="left" valign="top"><para>303.0.0+up0.5.0</para></entry>
+<entry align="left" valign="top"><para>registry.suse.com/edge/charts/cdi:303.0.0_up0.5.0<?asciidoc-br?>
+registry.suse.com/suse/sles/15.6/cdi-operator:1.61.0<?asciidoc-br?>
+registry.suse.com/suse/sles/15.6/cdi-controller:1.61.0<?asciidoc-br?>
+registry.suse.com/suse/sles/15.6/cdi-importer:1.61.0<?asciidoc-br?>
+registry.suse.com/suse/sles/15.6/cdi-cloner:1.61.0<?asciidoc-br?>
+registry.suse.com/suse/sles/15.6/cdi-apiserver:1.61.0<?asciidoc-br?>
+registry.suse.com/suse/sles/15.6/cdi-uploadserver:1.61.0<?asciidoc-br?>
+registry.suse.com/suse/sles/15.6/cdi-uploadproxy:1.61.0</para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para>Endpoint Copier Operator</para></entry>
+<entry align="left" valign="top"><para>0.2.0</para></entry>
+<entry align="left" valign="top"><para>303.0.0+up0.2.1</para></entry>
+<entry align="left" valign="top"><para>registry.suse.com/edge/charts/endpoint-copier-operator:303.0.0_up0.2.1<?asciidoc-br?>
+registry.suse.com/edge/3.3/endpoint-copier-operator:0.2.0</para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para>Akri (Tech Preview)</para></entry>
+<entry align="left" valign="top"><para>0.12.20</para></entry>
+<entry align="left" valign="top"><para>303.0.0+up0.12.20</para></entry>
+<entry align="left" valign="top"><para>registry.suse.com/edge/charts/akri:303.0.0_up0.12.20<?asciidoc-br?>
+registry.suse.com/edge/charts/akri-dashboard-extension:303.0.0_up1.3.1<?asciidoc-br?>
+registry.suse.com/edge/3.3/akri-agent:v0.12.20<?asciidoc-br?>
+registry.suse.com/edge/3.3/akri-controller:v0.12.20<?asciidoc-br?>
+registry.suse.com/edge/3.3/akri-debug-echo-discovery-handler:v0.12.20<?asciidoc-br?>
+registry.suse.com/edge/3.3/akri-onvif-discovery-handler:v0.12.20<?asciidoc-br?>
+registry.suse.com/edge/3.3/akri-opcua-discovery-handler:v0.12.20<?asciidoc-br?>
+registry.suse.com/edge/3.3/akri-udev-discovery-handler:v0.12.20<?asciidoc-br?>
+registry.suse.com/edge/3.3/akri-webhook-configuration:v0.12.20</para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para>SR-IOV Network Operator</para></entry>
+<entry align="left" valign="top"><para>1.5.0</para></entry>
+<entry align="left" valign="top"><para>303.0.2+up1.5.0</para></entry>
+<entry align="left" valign="top"><para>registry.suse.com/edge/charts/sriov-network-operator:303.0.2_up1.5.0<?asciidoc-br?>
+registry.suse.com/edge/charts/sriov-crd:303.0.2_up1.5.0</para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para>System Upgrade Controller</para></entry>
+<entry align="left" valign="top"><para>0.15.2</para></entry>
+<entry align="left" valign="top"><para>106.0.0</para></entry>
+<entry align="left" valign="top"><para><link xl:href="https://charts.rancher.io/index.yaml">Rancher Charts Helm Repository</link><?asciidoc-br?>
+registry.suse.com/rancher/system-upgrade-controller:v0.15.2</para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para><emphasis role="strong">Upgrade Controller</emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">0.1.1</emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">303.0.1+up0.1.1</emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">registry.suse.com/edge/charts/upgrade-controller:303.0.1_up0.1.1</emphasis><?asciidoc-br?>
+registry.suse.com/edge/3.3/upgrade-controller:0.1.1<?asciidoc-br?>
+<emphasis role="strong">registry.suse.com/edge/3.3/kubectl:1.32.4</emphasis><?asciidoc-br?>
+<emphasis role="strong">registry.suse.com/edge/3.3/release-manifest:3.3.1</emphasis></para></entry>
+</row>
+<row>
+<entry align="left" valign="top"><para>Kiwi Builder</para></entry>
+<entry align="left" valign="top"><para>10.2.12.0</para></entry>
+<entry align="left" valign="top"><para>N/A</para></entry>
+<entry align="left" valign="top"><para>registry.suse.com/edge/3.3/kiwi-builder:10.2.12.0</para></entry>
+</row>
+</tbody>
+</tgroup>
+</informaltable>
+</section>
+</section>
 <section xml:id="release-notes-3-3-0">
 <title>Release 3.3.0</title>
 <para>Availability Date: 20th May 2025</para>
 <para>Summary: SUSE Edge 3.3.0 is the first release in the SUSE Edge 3.3 release stream.</para>
-<section xml:id="id-new-features">
+<section xml:id="id-new-features-2">
 <title>New Features</title>
 <itemizedlist>
 <listitem>
@@ -17069,7 +17979,7 @@ spec:
 </listitem>
 </itemizedlist>
 </section>
-<section xml:id="id-bug-security-fixes">
+<section xml:id="id-bug-security-fixes-2">
 <title>Bug &amp; Security Fixes</title>
 <itemizedlist>
 <listitem>
@@ -17107,6 +18017,9 @@ spec:
 </section>
 <section xml:id="id-known-issues-9">
 <title>Known Issues</title>
+<warning>
+<para>If deploying new clusters, please follow <xref linkend="guides-kiwi-builder-images"/> to build fresh images first as this is now the first step required to create clusters for both AMD64/Intel 64 and AArch64 architectures as well as management and downstream clusters.</para>
+</warning>
 <itemizedlist>
 <listitem>
 <para>When using <literal>toolbox</literal> in SUSE Linux Micro 6.1, the default container image does not contain some tools which were included in the previous 5.5 version.  The workaround is to configure toolbox to use the previous <literal>suse/sle-micro/5.5/toolbox</literal> container image, see <literal>toolbox --help</literal> for options to configure the image.</para>
@@ -17126,11 +18039,34 @@ spec:
 <listitem>
 <para>For long running Metal<superscript>3</superscript> management clusters, it is possible for certificate expiry to cause the baremetal-operator connection to ironic to fail, requiring a workaround of a manual pod restart <link xl:href="https://github.com/suse-edge/charts/issues/178">SUSE Edge charts issue</link></para>
 </listitem>
+<listitem>
+<para>A bug with Kubernetes Job Controller has been identified that on certain conditions it can cause the RKE2/K3s nodes to stay in <literal>NotReady</literal> state (see the <link xl:href="https://github.com/rancher/rke2/issues/8357">#8357 RKE2 issue</link>). The errors can look like:</para>
+</listitem>
 </itemizedlist>
+<screen language="bash" linenumbering="unnumbered">E0605 23:11:18.489721   	1 job_controller.go:631] "Unhandled Error" err="syncing job: tracking status: adding uncounted pods to status: Operation cannot be fulfilled on jobs.batch \"helm-install-rke2-ingress-nginx\": StorageError: invalid object, Code: 4, Key: /registry/jobs/kube-system/helm-install-rke2-ingress-nginx, ResourceVersion: 0, AdditionalErrorMsg: Precondition failed: UID in precondition: 0aa6a781-7757-4c61-881a-cb1a4e47802c, UID in object meta: 6a320146-16b8-4f83-88c5-fc8b5a59a581" logger="UnhandledError"</screen>
+<para>As a workaround, the <literal>kube-controller-manager</literal> pod can be restarted with <literal>crictl</literal> as:</para>
+<screen language="bash" linenumbering="unnumbered">export CONTAINER_RUNTIME_ENDPOINT=unix:///run/k3s/containerd/containerd.sock
+export KUBEMANAGER_POD=$(/var/lib/rancher/rke2/bin/crictl ps --label io.kubernetes.container.name=kube-controller-manager --quiet)
+/var/lib/rancher/rke2/bin/crictl stop ${KUBEMANAGER_POD} &amp;&amp; \
+/var/lib/rancher/rke2/bin/crictl rm ${KUBEMANAGER_POD}</screen>
+<itemizedlist>
+<listitem>
+<para>On RKE2/K3s 1.31 and 1.32 versions, the directory <literal>/etc/cni</literal> being used to store CNI configurations may not trigger a notification of the files being written there to <literal>containerd</literal> due to certain conditions related to <literal>overlayfs</literal> (see the <link xl:href="https://github.com/rancher/rke2/issues/8356">#8356 RKE2 issue</link>). This in turn results in the deployment of RKE2/K3s to get stuck waiting for the CNI to start, and the RKE2/K3s nodes to stay in <literal>NotReady</literal> state. This can be seen at node level with <literal>kubectl describe node &lt;affected_node&gt;</literal>:</para>
+</listitem>
+</itemizedlist>
+<screen language="bash" linenumbering="unnumbered">​​Conditions:
+  Type         	Status  LastHeartbeatTime             	LastTransitionTime            	Reason                   	Message
+  ----         	------  -----------------             	------------------            	------                   	-------
+  Ready        	False   Thu, 05 Jun 2025 17:41:28 +0000   Thu, 05 Jun 2025 14:38:16 +0000   KubeletNotReady          	container runtime network not ready: NetworkReady=false reason:NetworkPluginNotReady message:Network plugin returns error: cni plugin not initialized</screen>
+<para>As a workaround, a tmpfs volume can be mounted at the <literal>/etc/cni</literal> directory before RKE2 starts. It avoids the usage of overlayfs which results in containerd missing notifications and the configs should get rewritten every time the node is restarted and the pods initcontainers run again. If using EIB, this can be a <literal>04-tmpfs-cni.sh</literal> script in the <literal>custom/scripts</literal> directory (as explained here[<link xl:href="https://github.com/suse-edge/edge-image-builder/blob/release-1.2/docs/building-images.md#custom">https://github.com/suse-edge/edge-image-builder/blob/release-1.2/docs/building-images.md#custom</link>]) that looks like:</para>
+<screen language="bash" linenumbering="unnumbered">#!/bin/bash
+mkdir -p /etc/cni
+mount -t tmpfs -o mode=0700,size=5M tmpfs /etc/cni
+echo "tmpfs /etc/cni tmpfs defaults,size=5M,mode=0700 0 0" &gt;&gt; /etc/fstab</screen>
 </section>
-<section xml:id="id-component-versions">
+<section xml:id="id-component-versions-2">
 <title>Component Versions</title>
-<para>The following table describes the individual components that make up the 3.3 release, including the version, the Helm chart version (if applicable), and from where the released artifact can be pulled in the binary format. Please follow the associated documentation for usage and deployment examples.</para>
+<para>The following table describes the individual components that make up the 3.3.0 release, including the version, the Helm chart version (if applicable), and from where the released artifact can be pulled in the binary format. Please follow the associated documentation for usage and deployment examples.</para>
 <informaltable frame="all" rowsep="1" colsep="1">
 <tgroup cols="4">
 <colspec colname="col_1" colwidth="25*"/>
@@ -17204,13 +18140,13 @@ registry.suse.com/rancher/mirrored-longhornio-longhorn-cli:v1.7.2<?asciidoc-br?>
 <entry align="left" valign="top"><para>5.4.3</para></entry>
 <entry align="left" valign="top"><para>106.0.0+up2.8.5</para></entry>
 <entry align="left" valign="top"><para><link xl:href="https://charts.rancher.io/index.yaml">Rancher Charts Helm Repository</link><?asciidoc-br?>
-registry.suse.com/rancher/mirrored-neuvector-controller:5.4.3<?asciidoc-br?>
-registry.suse.com/rancher/mirrored-neuvector-enforcer:5.4.3<?asciidoc-br?>
-registry.suse.com/rancher/mirrored-neuvector-manager:5.4.3<?asciidoc-br?>
+registry.suse.com/rancher/neuvector-controller:5.4.3<?asciidoc-br?>
+registry.suse.com/rancher/neuvector-enforcer:5.4.3<?asciidoc-br?>
+registry.suse.com/rancher/neuvector-manager:5.4.3<?asciidoc-br?>
 registry.suse.com/rancher/neuvector-compliance-config:1.0.4<?asciidoc-br?>
-registry.suse.com/rancher mirrored-neuvector-registry-adapter:0.1.6<?asciidoc-br?>
-registry.suse.com/rancher/mirrored-neuvector-scanner:6<?asciidoc-br?>
-registry.suse.com/rancher/mirrored-neuvector-updater:0.0.2</para></entry>
+registry.suse.com/rancher/neuvector-registry-adapter:0.1.6<?asciidoc-br?>
+registry.suse.com/rancher/neuvector-scanner:6<?asciidoc-br?>
+registry.suse.com/rancher/neuvector-updater:0.0.2</para></entry>
 </row>
 <row>
 <entry align="left" valign="top"><para>Rancher Turtles (CAPI)</para></entry>
@@ -17351,7 +18287,7 @@ registry.suse.com/rancher/system-upgrade-controller:v0.15.2</para></entry>
 <entry align="left" valign="top"><para>registry.suse.com/edge/charts/upgrade-controller:303.0.0_up0.1.1<?asciidoc-br?>
 registry.suse.com/edge/3.3/upgrade-controller:0.1.1<?asciidoc-br?>
 registry.suse.com/edge/3.3/kubectl:1.30.3<?asciidoc-br?>
-registry.suse.com/edge/3.3/release-manifest:3.2.0</para></entry>
+registry.suse.com/edge/3.3/release-manifest:3.3.0</para></entry>
 </row>
 <row>
 <entry align="left" valign="top"><para>Kiwi Builder</para></entry>
@@ -17366,7 +18302,7 @@ registry.suse.com/edge/3.3/release-manifest:3.2.0</para></entry>
 </section>
 <section xml:id="tech-previews">
 <title>Technology Previews</title>
-<para>Unless otherwise stated, these apply to the 3.2.0 release and all subsequent z-stream versions.</para>
+<para>Unless otherwise stated, these apply to the 3.3.0 release and all subsequent z-stream versions.</para>
 <itemizedlist>
 <listitem>
 <para>Akri is a Technology Preview offering and is not subject to the standard scope of support.</para>
@@ -17399,15 +18335,15 @@ Lppkouw849PWBt9kDMvzelUYLpINYpHRi2+/eyhHNlufeyJ7e7d6N9VcvjR/6qWG
 64iSkcF2DTW61CN5TrCe0k0CAwEAAQ==
 -----END PUBLIC KEY-----</screen>
 <para>Verify the container image hash, for example using <literal>crane</literal>:</para>
-<screen language="bash" linenumbering="unnumbered">&gt; crane digest registry.suse.com/edge/3.2/baremetal-operator:0.8.0
-sha256:d85c1bcd286dec81a3806a8fb8b66c0e0741797f23174f5f6f41281b1e27c52f</screen>
+<screen language="bash" linenumbering="unnumbered">&gt; crane digest registry.suse.com/edge/3.3/baremetal-operator:0.9.1 --platform linux/amd64
+sha256:02c5590cd51b1a1ea02f9908f2184ef4fbc856eb0197e804a7d57566d9278ddd</screen>
 <note>
 <para>For multi-arch images it is also necessary to specify a platform when obtaining the digest, e.g <literal>--platform linux/amd64</literal> or <literal>--platform linux/arm64</literal>. Failure to do this will result in an error in the following step (<literal>Error: no matching attestations</literal>).</para>
 </note>
 <para>Verify with <literal>cosign</literal>:</para>
-<screen language="bash" linenumbering="unnumbered">&gt; cosign verify-attestation --type spdxjson --key key.pem registry.suse.com/edge/3.2/baremetal-operator@sha256:d85c1bcd286dec81a3806a8fb8b66c0e0741797f23174f5f6f41281b1e27c52f &gt; /dev/null
+<screen language="bash" linenumbering="unnumbered">&gt; cosign verify-attestation --type spdxjson --key key.pem registry.suse.com/edge/3.3/baremetal-operator@sha256:02c5590cd51b1a1ea02f9908f2184ef4fbc856eb0197e804a7d57566d9278ddd &gt; /dev/null
 #
-Verification for registry.suse.com/edge/3.2/baremetal-operator@sha256:d85c1bcd286dec81a3806a8fb8b66c0e0741797f23174f5f6f41281b1e27c52f --
+Verification for registry.suse.com/edge/3.3/baremetal-operator@sha256:02c5590cd51b1a1ea02f9908f2184ef4fbc856eb0197e804a7d57566d9278ddd --
 The following checks were performed on each of these signatures:
   - The cosign claims were validated
   - The claims were present in the transparency log
@@ -17434,7 +18370,7 @@ The following checks were performed on each of these signatures:
 <entry align="left" valign="top"><para>Urgent and selected high-priority bug fixes will be released during the full support window, and all other patches (non-urgent, enhancements, new capabilities) will be released via the regular release schedule.</para></entry>
 </row>
 <row>
-<entry align="left" valign="top"><para><emphasis role="strong">Maintenance Support (18 months)</emphasis></para></entry>
+<entry align="left" valign="top"><para><emphasis role="strong">Maintenance Support (12 months)</emphasis></para></entry>
 <entry align="left" valign="top"><para>During this period, only critical fixes will be released via patches. Other bug fixes may be released at SUSE’s discretion but should not be expected.</para></entry>
 </row>
 <row>
