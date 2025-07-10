@@ -711,7 +711,106 @@ spec:
       - key: local-hostname
         object: machine
       - key: local_hostname
-        object: machine</pre></div><p>Once the file is created by joining the previous blocks, the following command has to be executed in the management cluster to start provisioning the new three bare-metal hosts:</p><div class="verbatim-wrap"><pre class="screen">$ kubectl apply -f capi-provisioning-example.yaml</pre></div></section><section class="sect1" id="advanced-network-configuration" data-id-title="Advanced Network Configuration"><div class="titlepage"><div><div><div class="title-container"><h2 class="title"><span class="title-number-name"><span class="title-number">42.6 </span><span class="title-name">Advanced Network Configuration</span></span> <a title="Permalink" class="permalink" href="atip-automated-provisioning.html#advanced-network-configuration">#</a></h2><div class="icons"><a target="_blank" class="icon-reportbug" title="Report an issue"> </a></div></div></div></div></div><p>The directed network provisioning workflow allows for specific network configurations in downstream clusters, such as static IPs, bonding, VLANs, IPv6, etc.</p><p>The following sections describe the additional steps required to enable provisioning downstream clusters using advanced network configuration.</p><p><span class="strong"><strong>Requirements</strong></span></p><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p>The image generated using <code class="literal">EIB</code> has to include the network folder and the script following this section (<a class="xref" href="atip-automated-provisioning.html#add-network-eib" title="42.2.2.6. Additional script for Advanced Network Configuration">Section 42.2.2.6, “Additional script for Advanced Network Configuration”</a>).</p></li></ul></div><p><span class="strong"><strong>Configuration</strong></span></p><p>Before proceeding refer to one of the following sections for guidance on the steps required to enroll and provision the host(s):</p><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p>Downstream cluster provisioning with Directed network provisioning (single-node) (<a class="xref" href="atip-automated-provisioning.html#single-node" title="42.4. Downstream cluster provisioning with Directed network provisioning (single-node)">Section 42.4, “Downstream cluster provisioning with Directed network provisioning (single-node)”</a>)</p></li><li class="listitem"><p>Downstream cluster provisioning with Directed network provisioning (multi-node) (<a class="xref" href="atip-automated-provisioning.html#multi-node" title="42.5. Downstream cluster provisioning with Directed network provisioning (multi-node)">Section 42.5, “Downstream cluster provisioning with Directed network provisioning (multi-node)”</a>)</p></li></ul></div><p>Any advanced network configuration must be applied at enrollment time through the <code class="literal">BareMetalHost</code> host definition and an associated Secret containing an <code class="literal">nmstate</code> formatted <code class="literal">networkData</code> block. The following example file defines a secret containing the required <code class="literal">networkData</code> that requests a static <code class="literal">IP</code> and <code class="literal">VLAN</code> for the downstream cluster host:</p><div class="verbatim-wrap highlight yaml"><pre class="screen">apiVersion: v1
+        object: machine</pre></div><p>The following yaml files are an example configuration for the worker nodes.</p><p>A <code class="literal">MachineDeployment</code>:</p><div class="verbatim-wrap highlight yaml"><pre class="screen">apiVersion: cluster.x-k8s.io/v1beta1
+kind: MachineDeployment
+metadata:
+  labels:
+    cluster.x-k8s.io/cluster-name: multinode-cluster
+    nodepool: nodepool-0
+  name: multinode-cluster-workers
+  namespace: default
+spec:
+  clusterName: multinode-cluster
+  replicas: 3
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: multinode-cluster
+      nodepool: nodepool-0
+  template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/cluster-name: multinode-cluster
+        nodepool: nodepool-0
+    spec:
+      bootstrap:
+        configRef:
+          apiVersion: bootstrap.cluster.x-k8s.io/v1beta1
+          kind: RKE2ConfigTemplate
+          name: multinode-cluster-workers
+      clusterName: multinode-cluster
+      infrastructureRef:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+        kind: Metal3MachineTemplate
+        name: multinode-cluster-workers
+      nodeDrainTimeout: 0s
+      version: ${RKE2_VERSION}</pre></div><p>The RKE2ConfigTemplate` object specifies the configuration template to be used for multinode cluster worker nodes.</p><div class="verbatim-wrap highlight yaml"><pre class="screen">apiVersion: bootstrap.cluster.x-k8s.io/v1beta1
+kind: RKE2ConfigTemplate
+metadata:
+  name: multinode-cluster-workers
+  namespace: default
+spec:
+  template:
+    spec:
+      agentConfig:
+        format: ignition
+        kubelet:
+          extraArgs:
+            - provider-id=metal3://BAREMETALHOST_UUID
+        nodeName: "Node-multinode-cluster-worker"
+        additionalUserData:
+          config: |
+            variant: fcos
+            version: 1.4.0
+            systemd:
+              units:
+                - name: rke2-preinstall.service
+                  enabled: true
+                  contents: |
+                    [Unit]
+                    Description=rke2-preinstall
+                    Wants=network-online.target
+                    Before=rke2-install.service
+                    ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                    [Service]
+                    Type=oneshot
+                    User=root
+                    ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                    ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                    ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" &gt;&gt; /etc/rancher/rke2/config.yaml"
+                    ExecStartPost=/bin/sh -c "umount /mnt"
+                    [Install]
+                    WantedBy=multi-user.target</pre></div><p>The <code class="literal">Metal3MachineTemplate</code> object contain references to <code class="literal">dataTemplate</code>, <code class="literal">hostSelector</code>, and <code class="literal">image</code> for the worker nodes:</p><div class="verbatim-wrap highlight yaml"><pre class="screen">apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: multinode-cluster-workers
+  namespace: default
+spec:
+  template:
+    spec:
+      dataTemplate:
+        name: multinode-cluster-workers-template
+      hostSelector:
+        matchLabels:
+          cluster-role: worker
+      image:
+        checksum: http://imagecache.local:8080/eibimage-slmicro-rt-telco.raw.sha256
+        checksumType: sha256
+        format: raw
+        url: http://imagecache.local:8080/eibimage-slmicro-rt-telco.raw</pre></div><p>The <code class="literal">Metal3DataTemplate</code> object specifies the <code class="literal">metaData</code> for the downstream cluster for the worker nodes:</p><div class="verbatim-wrap highlight yaml"><pre class="screen">apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3DataTemplate
+metadata:
+  name: multinode-cluster-workers-template
+  namespace: default
+spec:
+  clusterName: multinode-cluster
+  metaData:
+    objectNames:
+      - key: name
+        object: machine
+      - key: local-hostname
+        object: machine
+      - key: local_hostname
+        object: machine</pre></div><p>Once the file is created by joining the previous blocks, run the following command in the management cluster to start provisioning the new three bare-metal hosts:</p><div class="verbatim-wrap"><pre class="screen">$ kubectl apply -f capi-provisioning-example.yaml</pre></div></section><section class="sect1" id="advanced-network-configuration" data-id-title="Advanced Network Configuration"><div class="titlepage"><div><div><div class="title-container"><h2 class="title"><span class="title-number-name"><span class="title-number">42.6 </span><span class="title-name">Advanced Network Configuration</span></span> <a title="Permalink" class="permalink" href="atip-automated-provisioning.html#advanced-network-configuration">#</a></h2><div class="icons"><a target="_blank" class="icon-reportbug" title="Report an issue"> </a></div></div></div></div></div><p>The directed network provisioning workflow allows for specific network configurations in downstream clusters, such as static IPs, bonding, VLANs, IPv6, etc.</p><p>The following sections describe the additional steps required to enable provisioning downstream clusters using advanced network configuration.</p><p><span class="strong"><strong>Requirements</strong></span></p><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p>The image generated using <code class="literal">EIB</code> has to include the network folder and the script following this section (<a class="xref" href="atip-automated-provisioning.html#add-network-eib" title="42.2.2.6. Additional script for Advanced Network Configuration">Section 42.2.2.6, “Additional script for Advanced Network Configuration”</a>).</p></li></ul></div><p><span class="strong"><strong>Configuration</strong></span></p><p>Before proceeding refer to one of the following sections for guidance on the steps required to enroll and provision the host(s):</p><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p>Downstream cluster provisioning with Directed network provisioning (single-node) (<a class="xref" href="atip-automated-provisioning.html#single-node" title="42.4. Downstream cluster provisioning with Directed network provisioning (single-node)">Section 42.4, “Downstream cluster provisioning with Directed network provisioning (single-node)”</a>)</p></li><li class="listitem"><p>Downstream cluster provisioning with Directed network provisioning (multi-node) (<a class="xref" href="atip-automated-provisioning.html#multi-node" title="42.5. Downstream cluster provisioning with Directed network provisioning (multi-node)">Section 42.5, “Downstream cluster provisioning with Directed network provisioning (multi-node)”</a>)</p></li></ul></div><p>Any advanced network configuration must be applied at enrollment time through the <code class="literal">BareMetalHost</code> host definition and an associated Secret containing an <code class="literal">nmstate</code> formatted <code class="literal">networkData</code> block. The following example file defines a secret containing the required <code class="literal">networkData</code> that requests a static <code class="literal">IP</code> and <code class="literal">VLAN</code> for the downstream cluster host:</p><div class="verbatim-wrap highlight yaml"><pre class="screen">apiVersion: v1
 kind: Secret
 metadata:
   name: controlplane-0-networkdata
