@@ -234,7 +234,8 @@ The script is available at https://raw.githubusercontent.com/suse-edge/atip/refs
 
 ==== Cilium
 `Cilium` is the default CNI plug-in for SUSE Edge for Telco.
-To enable Cilium on RKE2 cluster as the default plug-in, the following configurations are required in the `/etc/rancher/rke2/config.yaml` file:
+To enable Cilium on RKE2 cluster as the default plug-in, the following
+configuration is required in the `/etc/rancher/rke2/config.yaml` file:
 
 [,yaml]
 ----
@@ -253,10 +254,309 @@ cni:
 - cilium
 ----
 
+==== Calico
+`Calico` is another CNI plug-in for SUSE Edge for Telco.
+To enable Calico on RKE2 cluster as the default plug-in, the following
+configuration is required in the `/etc/rancher/rke2/config.yaml` file:
+
+[,yaml]
+----
+cni:
+- calico
+----
+
+This can also be specified with command-line arguments, that is, `--cni=calico` into the server line in `/etc/systemd/system/rke2-server` file.
+
+To use the `SR-IOV` network operator described in the xref:option2-sriov-helm[next section], use `Multus` with another CNI plug-in, like `Cilium` or `Calico`, as a secondary plug-in.
+
+[,yaml]
+----
+cni:
+- multus
+- calico
+----
+
 [NOTE]
 ====
-For more information about CNI plug-ins, visit https://docs.rke2.io/install/network_options[Network Options].
+For more information about CNI plug-ins, see https://docs.rke2.io/install/network_options[Network Options].
 ====
+
+==== Bond CNI
+In general terms, bonding provides a method for aggregating multiple network
+interfaces into a single logical "bonded" interface. This is typically used to
+increase service availability by introducing redundant networking paths, but can
+also be used to increase bandwidth with certain bond modes.  
+The following CNI plug-ins are supported for the Bond CNI plugin in combination with multus:
+
+* MACVLAN
+* Host Device
+* SR-IOV
+
+===== Bond CNI with MACVLAN
+To use the Bond CNI plugin with MACVLAN two free interfaces are needed in the
+container. The following example uses 'enp8s0' and 'enp9s0'. Start by creating network
+attachment definitions for them: 
+
+*NetworkAttachmentDefinition enp8s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp8s0-conf
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "macvlan",
+          "capabilities": { "ips": true },
+          "master": "enp8s0",
+          "mode": "bridge",
+          "ipam": {}
+        }, {
+          "capabilities": { "mac": true },
+          "type": "tuning"
+        }
+      ]
+    }'
+----
+
+*NetworkAttachmentDefinition enp9s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp9s0-conf
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "macvlan",
+          "capabilities": { "ips": true },
+          "master": "enp9s0",
+          "mode": "bridge",
+          "ipam": {}
+        }, {
+          "capabilities": { "mac": true },
+          "type": "tuning"
+        }
+      ]
+    }'
+----
+
+After this, add a network attachment definition for the bond itself.
+
+*NetworkAttachmentDefinition bond*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: bond-net1
+spec:
+  config: '{
+  "type": "bond",
+  "cniVersion": "0.3.1",
+  "name": "bond-net1",
+  "mode": "active-backup",
+  "failOverMac": 1,
+  "linksInContainer": true,
+  "miimon": "100",
+  "mtu": 1500,
+  "links": [
+     {"name": "net1"},
+     {"name": "net2"}
+  ],
+  "ipam": {
+    "type": "static",
+    "addresses": [
+      {
+        "address": "192.168.200.100/24",
+        "gateway": "192.168.200.1"
+      }
+    ],
+    "subnet": "192.168.200.0/24",
+    "routes": [{
+      "dst": "0.0.0.0/0"
+    }]
+  }
+}'
+----
+
+The IP address assignment here is static and defines the address of the bond as
+'192.168.200.100' on a /24 network, with a gateway residing on the network's first
+available address. In the bond's network attachment we also define the type of
+bond we want. In this case it is active-backup.  
+
+To use this bond, the pod needs to know about all interfaces. An example pod
+definition might look like this:  
+
+[,shell,subs="attributes"]
+----
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod
+  annotations:
+        k8s.v1.cni.cncf.io/networks: '[
+{"name": "enp8s0-conf",
+"interface": "net1"
+},
+{"name": "enp9s0-conf",
+"interface": "net2"
+},
+{"name": "bond-net1",
+"interface": "bond0"
+}]'
+spec:
+  restartPolicy: Never
+  containers:
+  - name: bond-test
+    image: alpine:latest
+    command:
+      - /bin/sh
+      - "-c"
+      - "sleep 60m"
+    imagePullPolicy: IfNotPresent
+----
+
+Note how the annotation refers to all networks and how it defines the mapping
+between the interfaces 'enp8s0 -> net1', and 'enp9s0->net2'. 
+
+===== Bond CNI with Host Device
+To use the Bond CNI plugin with host device, two free interfaces are needed on
+the host. These interfaces are then mapped through to the container. The
+following example uses 'enp8s0' and 'enp9s0'. Start by creating network
+attachment definitions for them: 
+
+*NetworkAttachmentDefinition enp8s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp8s0-hostdev
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "host-device",
+          "name": "host0",
+          "device": "enp8s0",
+          "ipam": {}
+        }]
+    }'
+----
+
+*NetworkAttachmentDefinition enp9s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp9s0-hostdev
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "host-device",
+          "name": "host0",
+          "device": "enp9s0",
+          "ipam": {}
+        }]
+    }'
+----
+
+After this, add network attachment definition for the bond itself. This is
+similar to the MACVLAN use case.  
+
+*NetworkAttachmentDefinition bond*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: bond-net1
+spec:
+  config: '{
+  "type": "bond",
+  "cniVersion": "0.3.1",
+  "name": "bond-net1",
+  "mode": "active-backup",
+  "failOverMac": 1,
+  "linksInContainer": true,
+  "miimon": "100",
+  "mtu": 1500,
+  "links": [
+     {"name": "net1"},
+     {"name": "net2"}
+  ],
+  "ipam": {
+    "type": "static",
+    "addresses": [
+      {
+        "address": "192.168.200.100/24",
+        "gateway": "192.168.200.1"
+      }
+    ],
+    "subnet": "192.168.200.0/24",
+    "routes": [{
+      "dst": "0.0.0.0/0"
+    }]
+  }
+}'
+----
+
+The IP address assignment here is static and defines the address of the bond as
+'192.168.200.100' on a /24 network, with a gateway residing on the network's
+first available address. In the bond's network attachment, define the type of
+bond. In this case it is active-backup.  
+
+To use this bond, the pod needs to know about all interfaces. An example pod
+definition for bond with host devices might look like this:  
+
+[,shell,subs="attributes"]
+----
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod
+  annotations:
+        k8s.v1.cni.cncf.io/networks: '[
+{"name": "enp8s0-hostdev",
+"interface": "net1"
+},
+{"name": "enp9s0-hostdev",
+"interface": "net2"
+},
+{"name": "bond-net1",
+"interface": "bond0"
+}]'
+spec:
+  restartPolicy: Never
+  containers:
+  - name: bond-test
+    image: alpine:latest
+    command:
+      - /bin/sh
+      - "-c"
+      - "sleep 60m"
+    imagePullPolicy: IfNotPresent
+----
+
+===== Bond CNI with SR-IOV
+Using the Bond CNI with SR-IOV is fairly straight forward. For more details on how to set up SR-IOV, see <<sriov>>. As described there, you have to create `SriovNetworkNodePolicies` that defines `resourceNames`, as well as number of virtual functions and such. The `resourceNames` are being used by the `SriovNetwork` which is used as interfaces in the pod definition. The bond definition is exactly the same as for the MACVLAN and host device cases.
 
 [#sriov]
 === SR-IOV
