@@ -1,19 +1,103 @@
 = *Metal^3^*
 
 .Ironic:
-Due to a link:../components/metal3.adoci#L31[known issue], if you are trying to configure predictable names for the target OS netwrok devices and you end up in errors, seeing that the discovered device names have different naming pattern, then you have a couple of options:
+Due to a link:../components/metal3.adoci#L31[known issue], if you are trying to configure predictable names for the target OS network devices and you end up in errors, seeing that the discovered device names have different naming pattern, then you have a couple of options:
 
-1. Go with the discovered device naming pattern (change your configuration for predictable names to the pattern the hardware supports)
-2. Use UUIDs as identifiers.
+- Go with the discovered device naming pattern (change your configuration for predictable names to the pattern the hardware supports)
+- Use UUIDs as identifiers.
 
 How to get the UUIDs you need:
 
-- In your OpenSUSE or SLES machine install nmc:
-`zyper in nm-configurator`
+1. In your OpenSUSE or SLES machine install nmc:
+`zypper in nm-configurator`
 
-- and then run directly:
+2. then run directly:
 `nmc generate --config-dir /path/to/your/config --output-dir /where/you/want/it`
 now in the output files you should have the UUIDs that you can use in your configuration.
 
-Alternatively, if you don't use OpenSUSE or SLES, you can use the nmc through the Edge Image Builder container image:
+3. Alternatively, if you don't use OpenSUSE or SLES, you can use the nmc through the Edge Image Builder container image:
 `podman run -it --rm -v $(pwd):/path/to/your/config:Z --entrypoint=/usr/bin/nmc registry.suse.com/edge/3.3/edge-image-builder:1.2.1 generate --config-dir /path/to/your/config --output-dir /where/you/want/it`
+
+
+It is recommended to create two different secrets with the network configuration, one to be used with the IPA using the device names as IPA will discover and use it as `preprovisioningNetworkDataName` on the `BareMetalHost` definition and another secret with the device names as SL Micro will discover and use it as `networkData.name` on the `BareMetalHost` definition:
+
+*_Example of creating two secrets, one to be used by IPA and another to be used by the target operating system_*
+
+* Target OS (SL Micro)  secret:
+
+----
+apiVersion: v1
+kind: Secret                                                                                                                                                               metadata:
+  name: controlplane-0-networkdata-os
+type: Opaque
+stringData:
+  networkData: |
+    interfaces:
+    - name: enp1s0
+      type: ethernet
+      state: up
+      mac-address: "00:f3:65:8a:a3:b0"
+      ipv4:
+        address:
+        - ip:  192.168.125.200
+          prefix-length: 24
+        enabled: true
+        dhcp: false                                                                                                                                                            dns-resolver:
+      config:
+        server:
+        - 192.168.125.1
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-address: 192.168.125.1
+        next-hop-interface: enp1s0
+----
+
+* ironic (IPA) secret:
+
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: controlplane-0-networkdata-ipa
+type: Opaque
+stringData:
+  networkData: |
+    interfaces:
+    - name: enp1s0np0
+      type: ethernet
+      state: up
+      mac-address: "00:f3:65:8a:a3:b0"
+      ipv4:
+        address:
+        - ip:  192.168.125.200
+          prefix-length: 24
+        enabled: true
+        dhcp: false
+    dns-resolver:
+      config:
+        server:
+        - 192.168.125.1
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-address: 192.168.125.1
+        next-hop-interface: enp1s0np0
+----
+
+* Apply on bare metal host:
+
+----
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: controlplane-0
+  labels:
+    cluster-role: control-plane
+spec:
+  preprovisioningNetworkDataName: controlplane-0-networkdata-ipa
+  networkData:
+    name: controlplane-0-networkdata-os
+...
+
+----
