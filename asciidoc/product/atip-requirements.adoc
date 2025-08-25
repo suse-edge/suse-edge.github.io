@@ -60,6 +60,219 @@ The network architecture is based on the following components:
 To use the directed network provisioning workflow, the management cluster must have network connectivity to the downstream cluster server Baseboard Management Controller (BMC) so that host preparation and provisioning can be automated.
 ====
 
+=== Port requirements
+
+To operate properly, a SUSE Telco Cloud deployment requires a number of ports to be reachable on the management and the downstream Kubernetes cluster nodes.
+
+[NOTE]
+====
+The exact list depends on the deployed optional components and the selected deployment options (e.g., CNI plug-in).
+====
+
+==== Management Nodes
+
+The following table lists the opened ports in nodes running the management cluster:
+
+[NOTE]
+====
+For CNI plug-in related ports, see <<cni-specific-port-requirements,CNI specific port requirements>>.
+====
+
+|===
+| Protocol | Port | Source | Description
+| TCP
+| 22
+| Any source that requires SSH access
+| SSH access to management cluster nodes
+
+| TCP
+| 80
+| Load balancer/proxy that does external TLS termination
+| Rancher UI/API when external TLS termination is used
+
+| TCP
+| 443
+| Any source that requires TLS access to Rancher UI/API
+| Rancher agent, Rancher UI/API
+
+| TCP
+| 2379
+| RKE2 (management cluster) server nodes
+| `etcd` client port
+
+| TCP
+| 2380
+| RKE2 (management cluster) server nodes
+| `etcd` peer port
+
+| TCP
+| 6180
+| Any BMC^(1)^ previously instructed by `Metal^3^/ironic` to pull an IPA^(2)^ ramdisk image from this exposed port (non-TLS)
+| `Ironic` httpd non-TLS web server serving IPA^(2)^ ISO images for virtual media based boot  +
+ +
+ In case this port is enabled, the functionally equivalent but TLS-enabled one (see below) is not opened
+
+| TCP
+| 6185
+| Any BMC^(1)^ previously instructed by `Metal^3^/ironic` to pull an IPA^(2)^ ramdisk image from this exposed port (TLS)
+| `Ironic` httpd TLS-enabled web server serving IPA^(2)^ ISO images for virtual media based boot +
+ +
+ In case this port is enabled, the functionally equivalent but TLS-disabled one (see above) is not opened
+
+| TCP
+| 6385
+| Any `Metal^3^/ironic` IPA^(1)^ ramdisk image deployed & running in an "enrolled" `BareMetalHost` instance
+| Ironic API
+
+| TCP
+| 6443
+| Any management cluster node; any external (to the management cluster) Kubernetes client
+| Kubernetes API
+
+| TCP
+| 6545
+| Any management cluster node
+| Pull artifacts from OCI-compliant registry (Hauler)
+
+| TCP
+| 9345
+| RKE2 server and agent nodes (management cluster)
+| RKE2 supervisor API for Node registration (opened port in all RKE2 server nodes)
+
+| TCP
+| 10250
+| Any management cluster node
+| `kubelet` metrics
+
+| TCP/UDP/SCTP
+| 30000-32767
+| Any external (to the management cluster) source accessing a service exposed on the primary network through a `spec.type: NodePort` or `spec.type: LoadBalancer` https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types[Service API object] 
+| Available `NodePort` port range
+|===
+^(1)^ BMC: Baseboard Management Controller +
+^(2)^ IPA: Ironic Python Agent 
+
+==== Downstream Nodes
+
+In SUSE Telco Cloud, before any (downstream) server becomes part of a running downstream Kubernetes cluster (or runs itself a single-node downstream Kubernetes cluster), it is required to go through some of the https://github.com/metal3-io/baremetal-operator/blob/main/docs/baremetalhost-states.md[BaremetalHost Provisioning states].
+
+* The Baseboard Management Controller (BMC) for a just declared downstream server must be accessible through the out-of-band network. BMC is instructed (from the ironic service running on the management cluster) on the initial steps to take: 
+. Pull and load the indicated IPA ramdisk image in the BMC offered `virtual media`. 
+. Power-on the server.
+
+Following ports are expected to be exposed from the BMC (they could differ depending on the exact hardware):
+
+|===
+| Protocol | Port | Source | Description
+| TCP
+| 80
+| Ironic conductor (from management cluster)
+| Redfish API access (HTTP)
+
+| TCP
+| 443
+| Ironic conductor (from management cluster)
+| Redfish API access (HTTPS)
+|===
+
+* Once the IPA ramdisk image loaded on the BMC `virtual media` is used to bootup the downstream server image, the hardware inspection phase begins. The following table lists the ports exposed by a running IPA ramdisk image:
+
+|===
+| Protocol | Port | Source | Description
+| TCP
+| 22
+| Any source that requires SSH access to IPA ramdisk image
+| SSH access to a being inspected downstream cluster node
+
+| TCP
+| 9999
+| Ironic conductor (from management cluster)
+| Ironic commands towards the running ramdisk image
+|===
+
+* Once the baremetal host is properly provisioned and has joined a downstream Kubernetes cluster, it exposes the following ports:
+
+[NOTE]
+====
+For CNI plug-in related ports, see <<cni-specific-port-requirements,CNI specific port requirements>>.
+====
+
+|===
+| Protocol | Port | Source | Description
+| TCP
+| 22
+| Any source that requires SSH access
+| SSH access to downstream cluster nodes
+
+| TCP
+| 80
+| Load balancer/proxy that does external TLS termination
+| Rancher UI/API when external TLS termination is used
+
+| TCP
+| 443
+| Any source that requires TLS access to Rancher UI/API
+| Rancher agent, Rancher UI/API
+
+| TCP
+| 2379
+| RKE2 (downstream cluster) server nodes
+| `etcd` client port
+
+| TCP
+| 2380
+| RKE2 (downstream cluster) server nodes
+| `etcd` peer port
+
+| TCP
+| 6443
+| Any downstream cluster node; any external (to the downstream cluster) Kubernetes client.
+| Kubernetes API
+
+| TCP
+| 9345
+| RKE2 server and agent nodes (downstream cluster)
+| RKE2 supervisor API for Node registration (opened port in all RKE2 server nodes)
+
+| TCP
+| 10250
+| Any downstream cluster node
+| `kubelet` metrics
+
+| TCP
+| 10255
+| Any downstream cluster node
+| `kubelet` read-only access
+
+| TCP/UDP/SCTP
+| 30000-32767
+| Any external (to the downstream cluster) source accessing a service exposed on the primary network through a `spec.type: NodePort` or `spec.type: LoadBalancer` https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types[Service API object]
+| Available `NodePort` port range
+|===
+
+[#cni-specific-port-requirements]
+==== CNI specific port requirements
+
+Each supported CNI variant comes with its own set of port requirements. For more details, refer https://docs.rke2.io/install/requirements#cni-specific-inbound-network-rules[CNI Specific Inbound Network Rules] in RKE2 documentation.
+
+When `cilium` is set as default/primary CNI plug-in, following TCP port is additionally exposed when the cilium-operator workload is configured to expose metrics outside the Kubernetes cluster on which it is deployed. This ensures that an external `Prometheus` server instance running outside that Kubernetes cluster can still collect these metrics.
+
+[NOTE]
+====
+This is the default option when deploying `cilium` via the rke2-cilium Helm chart.
+====
+
+
+|===
+| Protocol | Port | Source | Description
+| TCP
+| 9963
+| External (to the Kubernetes cluster) metrics collector
+| cilium-operator metrics exposure
+|===
+
+
+
 === Services (DHCP, DNS, etc.)
 
 Some external services like `DHCP`, `DNS`, etc. could be required depending on the kind of environment where they are deployed:
