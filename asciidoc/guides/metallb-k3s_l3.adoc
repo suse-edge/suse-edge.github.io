@@ -1,0 +1,246 @@
+[#guides-metallb-k3s-l3]
+= MetalLB on K3s (using Layer 3 Mode)
+:revdate: 2025-09-08
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+MetalLB is a load-balancer implementation for bare-metal Kubernetes clusters, using standard routing protocols.
+
+In this guide, we demonstrate how to deploy MetalLB in layer 3 (L3) BGP mode.
+
+== Why use MetalLB
+
+MetalLB is a compelling choice for load balancing in bare-metal Kubernetes clusters for several reasons:
+
+. Native Integration with Kubernetes: MetalLB seamlessly integrates with Kubernetes, making it easy to deploy and manage using familiar Kubernetes tools and practices.
+. Bare-Metal Compatibility: Unlike cloud-based load balancers, MetalLB is designed specifically for on-premises deployments where traditional load balancers might not be available or feasible.
+. Supports Multiple Protocols: MetalLB supports both Layer 2 and Layer 3 BGP (Border Gateway Protocol) modes, providing flexibility for different network architectures and requirements.
+. High Availability: By distributing load-balancing responsibilities across multiple nodes, MetalLB ensures high availability and reliability for your services.
+. Scalability: MetalLB can handle large-scale deployments, scaling alongside your Kubernetes cluster to meet increasing demand.
+
+In layer 2 mode, one node assumes the responsibility of advertising a service to the local network. From the network’s perspective, it simply looks like that machine has multiple IP addresses assigned to its network interface.
+
+The major advantage of the layer 2 mode is its universality: it works on any Ethernet network, with no special hardware required, not even fancy routers.
+
+== MetalLB on K3s (using L3)
+
+In this quick start, L3 mode is used.
+This means that we need to have neighboring router(s) with BGP capabilities within
+the network range.
+
+== Prerequisites
+
+* A K3s cluster where MetalLB is going to be deployed.
+* Router(s) on the network that support the BGP protocol.
+* A free IP address within the network range for the service. In this example
+  `192.168.10.100`
+
+[IMPORTANT]
+====
+You must make sure this IP address is unassigned.
+In a DHCP environment this address must not be part of the DHCP pool to avoid dual assignments. 
+====
+
+== Configuration to Advertise Service IP Addresses
+Out of the box BGP advertises a Service IP address to all the peers that are
+configured. These peers, which are usually routers, will receive a route for
+each Service IP address with a 32 bit network mask. In this examlple we will use
+an FRR based router and is on the same network as our cluster. We will then use
+MetalLB's BGP capability to advertise a service to that FRR based router.
+
+== Deployment
+
+We will be using the MetalLB Helm chart published as part of the SUSE Edge solution:
+
+[,bash,subs="attributes"]
+----
+helm install \
+  metallb oci://registry.suse.com/edge/charts/metallb \
+  --namespace metallb-system \
+  --create-namespace
+
+while ! kubectl wait --for condition=ready -n metallb-system $(kubectl get\
+ pods -n metallb-system -l app.kubernetes.io/component=controller -o name)\
+ --timeout=10s; do
+ sleep 2
+done
+----
+
+== Configuration
+
+. At this point, the installation is complete. Create an `IPAddressPool`:
+
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: bgp-pool
+  namespace: metallb-system
+  labels:
+    app: httpd
+spec:
+  addresses:
+  - 192.168.10.100/32
+  autoAssign: true
+  avoidBuggyIPs: false
+  serviceAllocation:
+    namespaces:
+    - metallb-system
+    priority: 100
+    serviceSelectors:
+    - matchExpressions:
+      - key: serviceType
+        operator: In
+        values:
+        - httpd
+EOF
+----
+
+[start=2]
+. Configure a `BGPPeer`. 
+
+[NOTE]
+====
+The FRR router has ASN 1000 while our `BGPPeer` will have 1001. We can also see that the FRR Router has an IP
+address that is 192.168.3.140.
+====
+
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta2
+kind: BGPPeer
+metadata:
+  namespace: metallb-system
+  name: mypeertest
+spec:
+  peerAddress: 192.168.3.140
+  peerASN: 1000
+  myASN: 1001
+  routerID: 4.4.4.4
+EOF
+----
+
+[start=3]
+. Create the BGPAdvertisement (L3):
+
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: BGPAdvertisement
+metadata:
+  name: bgpadvertisement-test
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - bgp-pool
+EOF
+----
+
+== Usage
+
+. Create an example application with a service. In this case, IP address from the `IPAddressPool` is `192.168.10.100` for that service.
+
+[,bash]
+----
+cat <<- EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: httpd-deployment
+  namespace: metallb-system
+  labels:
+    app: httpd
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      pod-label: httpd
+  template:
+    metadata:
+      labels:
+        pod-label: httpd
+    spec:
+      containers:
+      - name: httpdcontainer
+        image: image: docker.io/library/httpd:2.4
+        ports:
+          - containerPort: 80
+            protocol: TCP
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: http-service
+  namespace: metallb-system
+  labels:
+    serviceType: httpd
+spec:
+  selector:
+    pod-label: httpd
+  type: LoadBalancer
+  ports:
+  - protocol: TCP
+    port: 8080
+    name: 8080-tcp
+    targetPort: 80
+EOF
+----
+
+
+[start=2]
+. To verify, log onto the FRR Router to can see the routes created from the BGP advertisement.
+
+[,console]
+----
+42178089cba5# show ip bgp all
+
+For address family: IPv4 Unicast
+BGP table version is 3, local router ID is 2.2.2.2, vrf id 0
+Default local pref 100, local AS 1000
+Status codes:  s suppressed, d damped, h history, * valid, > best, = multipath,
+               i internal, r RIB-failure, S Stale, R Removed
+Nexthop codes: @NNN nexthop's vrf id, < announce-nh-self
+Origin codes:  i - IGP, e - EGP, ? - incomplete
+RPKI validation codes: V valid, I invalid, N Not found
+
+   Network          Next Hop            Metric LocPrf Weight Path
+* i172.16.0.0/24    1.1.1.1                  0    100      0 i
+*>                  0.0.0.0                  0         32768 i
+* i172.17.0.0/24    3.3.3.3                  0    100      0 i
+*>                  0.0.0.0                  0         32768 i
+*= 192.168.10.100/32
+                    192.168.3.162                          0 1001 i
+*=                  192.168.3.163                          0 1001 i
+*>                  192.168.3.161                          0 1001 i
+
+Displayed  3 routes and 7 total paths
+kubectl get svc -n hello-kubernetes
+NAME               TYPE           CLUSTER-IP     EXTERNAL-IP      PORT(S)        AGE
+hello-kubernetes   LoadBalancer   10.43.127.75   192.168.122.11   80:31461/TCP   8s
+----
+
+[start=3]
+. If this router is the default gateway for your network, you can run the `curl` command from a box on that network to verify that they can reach the httpd sample app
+
+[,console]
+----
+# curl http://192.168.10.100:8080
+<html><body><h1>It works!</h1></body></html>
+#
+----
+
