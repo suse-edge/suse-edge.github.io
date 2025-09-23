@@ -47,7 +47,34 @@ TBC
 
 == Known Issues
 
- TBC
+* When onboarding remote hosts using Elemental, a race condition between `dbus.service` and `elemental-system-agent.service` might occur, resulting in `rancher-system-agent.service` on remote host to fail starting with errors similar to the one below. (see the https://github.com/suse-edge/edge-image-builder/issues/784[#784 Edge Image Builder issue] for details.)
+
+[,bash]
+----
+Sep 19 19:38:07 elementalvm elemental-system-agent[3671]: time="2025-09-19T19:38:07Z" level=info msg="[6b20fe64c854da2639804884b34129bb8f718eb59578111da58d9de1509c24db_1:stderr]: Failed to restart rancher-system-agent.service: Message recipient disconnected from message bus without replying"
+----
+
+As a workaround, a systemd override file can be created as below
+
+[,bash]
+----
+[Unit]
+Wants=dbus.service network-online.target
+After=dbus.service network-online.target time-sync.target
+
+[Service]
+ExecStartPre=/bin/bash -c 'echo "Waiting for dbus to become active..." | systemd-cat -p info -t elemental-system-agent; sleep 15; timeout 300 bash -c "while ! systemctl is-active --quiet dbus.service; do sleep 15; done"'
+----
+
+and a custom script named `30a-copy-elemental-system-agent-override.sh` can be used to place the override to `/etc/systemd/system/elemental-system-agent.service.d` prior to EIB's https://github.com/suse-edge/edge-image-builder/blob/main/pkg/combustion/templates/31-elemental-register.sh.tpl[31-elemental-register.sh] script runs during the combustion phase.
+
+[,bash]
+----
+#!/bin/bash
+
+/bin/mkdir -p /etc/systemd/system/elemental-system-agent.service.d
+/bin/cp -f elemental-system-agent-override.conf /etc/systemd/system/elemental-system-agent.service.d/override.conf
+----
 
 == Component Versions
 
