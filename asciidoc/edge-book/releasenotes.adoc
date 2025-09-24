@@ -47,6 +47,33 @@ TBC
 
 == Known Issues
 
+[WARNING]
+====
+If deploying new clusters, please follow <<guides-kiwi-builder-images>> to build fresh images first as this is now the first step required to create clusters for both {x86-64} and {aarch64} architectures as well as management and downstream clusters.
+====
+
+* When deploying via Edge Image Builder, `HelmChartConfigs` manifests may fail if they are put in the `kubernetes/manifests` configuration directory. Instead it is reccomended to place any `HelmChartConfigs` in `/var/lib/rancher/{rke2/k3s}/server/manifests/` using the EIB os-files interface, see <<mgmt-cluster-directory-structure>> for example.  Failure to do this may cause nodes to stay in `NotReady` state on initial startup, as discussed in https://github.com/rancher/rke2/issues/8357[#8357 RKE2 issue]
+
+* On RKE2/K3s 1.31 and 1.32 versions, the directory `/etc/cni` being used to store CNI configurations may not trigger a notification of the files being written there to `containerd` due to certain conditions related to `overlayfs` (see the https://github.com/rancher/rke2/issues/8356[#8356 RKE2 issue]). This in turn results in the deployment of RKE2/K3s to get stuck waiting for the CNI to start, and the RKE2/K3s nodes to stay in `NotReady` state. This can be seen at node level with `kubectl describe node <affected_node>`:
+
+[,bash]
+----
+Conditions:
+  Type   Status  LastHeartbeatTime                LastTransitionTime               Reason           Message
+  ----   ------  -----------------                ------------------               ------           -------
+  Ready  False   Thu, 05 Jun 2025 17:41:28 +0000  Thu, 05 Jun 2025 14:38:16 +0000  KubeletNotReady  container runtime network not ready: NetworkReady=false reason:NetworkPluginNotReady message:Network plugin returns error: cni plugin not initialized
+----
+
+As a workaround, a tmpfs volume can be mounted at the `/etc/cni` directory before RKE2 starts. It avoids the usage of overlayfs which results in containerd missing notifications and the configs should get rewritten every time the node is restarted and the pods initcontainers run again. If using EIB, this can be a `04-tmpfs-cni.sh` script in the `custom/scripts` directory (as explained here[https://github.com/suse-edge/edge-image-builder/blob/release-1.2/docs/building-images.md#custom]) that looks like:
+
+[,bash]
+----
+#!/bin/bash
+mkdir -p /etc/cni
+mount -t tmpfs -o mode=0700,size=5M tmpfs /etc/cni
+echo "tmpfs /etc/cni tmpfs defaults,size=5M,mode=0700 0 0" >> /etc/fstab
+----
+
 * When onboarding remote hosts using Elemental, a race condition between `dbus.service` and `elemental-system-agent.service` might occur, resulting in `rancher-system-agent.service` on remote host to fail starting with errors similar to the one below. (see the https://github.com/suse-edge/edge-image-builder/issues/784[#784 Edge Image Builder issue] for details.)
 
 [,bash]
