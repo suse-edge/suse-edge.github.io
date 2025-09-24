@@ -14,8 +14,8 @@ ifdef::env-github[]
 endif::[]
 
 This guide demonstrates using a MetalLB service to expose the RKE2/K3s API externally on an HA cluster with three control-plane nodes.
-To achieve this, a Kubernetes Service of type `LoadBalancer` and Endpoints will be manually created. The Endpoints keep the IPs of all control plane nodes available in the cluster.
-For the Endpoint to be continuously synchronized with the events occurring in the cluster (adding/removing a node or a node goes offline), the <<components-eco,Endpoint Copier Operator>> will be deployed. The operator monitors the events happening in the default `kubernetes` Endpoint and updates the managed one automatically to keep them in sync.
+To achieve this, a Kubernetes Service of type `LoadBalancer` will be manually created. Then an `EndpointSlices` object will be automatically created which keeps the IPs of all control plane nodes available in the cluster.
+For the EndpointSlices to be continuously synchronized with the events occurring in the cluster (adding/removing a node or a node goes offline), the <<components-eco,Endpoint Copier Operator>> will be deployed. The operator monitors the events happening in the default `kubernetes` EndpointSlices and updates the managed one automatically to keep them in sync.
 Since the managed Service is of type `LoadBalancer`, MetalLB assigns it a static `ExternalIP`. This `ExternalIP` will be used to communicate with the API Server.
 
 == Prerequisites
@@ -138,9 +138,11 @@ systemctl restart ${KUBE_DISTRIBUTION}
 
 To deploy `MetalLB`, the <<guides-metallb-k3s,MetalLB on K3s>> guide can be used.
 
-*NOTE:* Ensure that the IP addresses of the `ip-pool` IPAddressPool do not overlap with the IP addresses previously selected for the `LoadBalancer` service.
+*NOTE:* Ensure that the `VIP_SERVICE_IP` IP address does not overlap with the existing `IPAddressPools` in the cluster.
 
-Create a separate `IpAddressPool` that will be used only for the managed Service.
+Create a separate `IpAddressPool` and `L2Advertisement` that will be used only for the managed Service.
+
+*NOTE:* The IPAddressPool below will be assigned to a Service of type `LoadBalancer` in the `default` Namespace. If multiple `LoadBalancer` services exist there, additional https://metallb.universe.tf/configuration/_advanced_ipaddresspool_configuration/#reduce-scope-of-address-allocation-to-specific-namespace-and-service[ServiceSelectors] may be configured to match this VIP service explicitly.
 
 [,yaml]
 ----
@@ -170,11 +172,10 @@ cat <<-EOF | kubectl apply -f -
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
-  name: ip-pool-l2-adv
+  name: kubernetes-vip-l2-adv
   namespace: metallb-system
 spec:
   ipAddressPools:
-  - ip-pool
   - kubernetes-vip-ip-pool
 EOF
 ----
@@ -191,7 +192,7 @@ endpoint-copier-operator oci://registry.suse.com/edge/charts/endpoint-copier-ope
 
 The command above will deploy the `endpoint-copier-operator` operator Deployment with two replicas. One will be the leader and the other will take over the leader role if needed.
 
-Now, the `kubernetes-vip` Service should be deployed, which will be reconciled by the operator and an Endpoint with the configured ports and IP will be created.
+Now, the `kubernetes-vip` Service should be deployed, which will be reconciled by the operator and an EndpointSlices with the configured ports and IP will be created.
 
 For RKE2:
 [,bash]
@@ -249,11 +250,11 @@ kubectl get service kubernetes-vip -n default \
  -o=jsonpath='{.status.loadBalancer.ingress[0].ip}'
 ----
 
-Ensure that the `kubernetes-vip` and `kubernetes` Endpoints resources in the `default` namespace point to the same IPs.
+Ensure that the `kubernetes-vip-*` and `kubernetes` EndpointSlices resources in the `default` namespace point to the same IPs.
 
 [,bash]
 ----
-kubectl get endpoints kubernetes kubernetes-vip
+kubectl get endpointslices | grep kubernetes
 ----
 
 If everything is correct, the last thing left is to use the `VIP_SERVICE_IP` in our `Kubeconfig`.
@@ -280,7 +281,7 @@ Second terminal:
 
 [,bash]
 ----
-watch kubectl get endpoints
+watch kubectl get endpointslices
 ----
 
 Now execute the commands below on the second and third nodes.
