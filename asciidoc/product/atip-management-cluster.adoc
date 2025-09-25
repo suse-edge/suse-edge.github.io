@@ -1224,3 +1224,152 @@ This creates the ISO output image file that, in our case, based on the image def
 
 The previous image contains all components explained above, and it can be used to provision the management cluster using a virtual machine or a bare-metal server (using the virtual-media feature).
 
+[#mgmt-cluster-dualstack]
+=== Dual-stack considerations and configuration
+
+The examples shown in the previous sections provide guidance and examples on how to set up a single-stack IPv4 management cluster. Such a management cluster is independent of the operational status of downstream clusters, which can be individually configured to operate in either IPv4/IPv6 single-stack or dual-stack configuration, once deployed. However, they way the management cluster is configured has a direct impact on the communication protocols that can be used during the provisioning phase, where both the in-band and out-of-band communications must happen according to which protocols are supported by the management cluster and downstream host. In case some or all of the BMCs and/or downstream cluster nodes are expected to use IPv6, a dual-stack setup for the management cluster is then required.
+
+[NOTE]
+====
+Single-stack IPv6 management clusters are not yet supported.
+====
+
+In order to achieve dual-stack functionality, Kubernetes must be provided with both IPv4 and IPv6 CIDRs for PODs and Services. However, other components also require specific tuning before building the management cluster image with EIB. The Metal^3^ provisioning services (Ironic) can be configured in different ways, depending on your infrastructure or requirements:
+
+- The Ironic services can be configured to listen on all the interfaces on the system rather than a single IP address, thus, as long as the management cluster host(s) has both IPv4 and IPv6 addresses assigned to the relevant interface, any of them can potentially be used during the provisioning. Note that at this time only one of these addresses can be selected for the URL generation (for consumption by other services, e.g. the Baremetal Operator, BMCs, etc.); as a consequence, to enable IPv6 communications with the BMCs, the Baremetal Operator can be instructed to expose and pass on an IPv6 URL when dealing BMH definitions including an IPv6 address. In other words, when a BMC is identified as IPv6 capable, the provisioning will be performed via IPv6 only, and via IPv4 in all the other cases.
+
+- A single hostname, resolving to both IPv4 and IPv6, can be used by Metal^3^ to let Ironic use those addresses for binding and URL creation. This approach allows for an easy configuration and flexible behavior (both IPv4 and IPv6 remain viable at each provisioning step), but requires an infrastructure with preexisting DNS servers, IP allocations and records already in place.
+
+In both cases, Kubernetes will need to know what CIDRs to use for both IPv4 and IPv6, so you can add the following lines to your `kubernetes/config/server.yaml` in the EIB directory, making sure to list IPv4 first:
+
+[,yaml]
+----
+service-cidr: 10.96.0.0/12,fd12:4567:789c::/112
+cluster-cidr: 193.168.0.0/18,fd12:4567:789b::/48
+----
+
+Some containers leverage the host networking, so modify the network configuration for the host(s), under the `network` directory, to enable IPv6 connectivity:
+
+[,yaml]
+----
+routes:
+  config:
+  - destination: 0.0.0.0/0
+    next-hop-address: ${MGMT_GATEWAY_V4}
+    next-hop-interface: eth0
+  - destination: ::/0
+    next-hop-address: ${MGMT_GATEWAY_V6}
+    next-hop-interface: eth0 
+dns-resolver:
+  config:
+    server:
+    - ${MGMT_DNS}
+    - 8.8.8.8
+    - 2001:4860:4860::8888
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mac-address: ${MGMT_MAC}
+  ipv4:
+    address:
+    - ip: ${MGMT_CLUSTER_IP_V4}
+      prefix-length: 24
+    dhcp: false
+    enabled: true
+  ipv6:
+    address:
+    - ip: ${MGMT_CLUSTER_IP_V6}
+      prefix-length: 128
+    dhcp: false
+    autoconf: false
+    enabled: true
+----
+
+Replace the placeholders with the gateway IP addresses, additional DNS server (if needed), the MAC address of the network interface and the the IP addressed of the management cluster. If address autoconfiguration is preferred instead, refer to the following excerpt and just set the `$\{MGMT_MAC\}` variable:
+
+[,yaml]
+----
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mac-address: ${MGMT_MAC}
+  ipv4:
+    enabled: true
+    dhcp: true
+  ipv6:
+    enabled: false
+    dhcp: true
+    autoconf: true
+----
+
+We can now define the remaining files for a single node configuration, starting from the first option, by creating `kubernetes/helm/values/metal3.yaml` as:
+
+[,yaml]
+----
+global:
+  ironicIP: ${MGMT_CLUSTER_IP_V4}
+  enable_vmedia_tls: false
+  additionalTrustedCAs: false
+metal3-ironic:
+  global:
+    predictableNicNames: true
+  listenOnAll: true
+  persistence:
+    ironic:
+      size: "5Gi"
+  service:
+    type: NodePort
+metal3-baremetal-operator:
+  baremetaloperator:
+    externalHttpIPv6: ${MGMT_CLUSTER_IP_V6}
+----
+
+and `kubernetes/helm/values/rancher.yaml` as:
+
+[,yaml]
+----
+hostname: rancher-${MGMT_CLUSTER_IP_V4}.sslip.io
+bootstrapPassword: "foobar"
+replicas: 1
+global:
+  cattle:
+    systemDefaultRegistry: "registry.rancher.com"
+----
+
+where `$\{MGMT_CLUSTER_IP_V4\}` and `$\{MGMT_CLUSTER_IP_V6\}` are the IP addresses previously assigned to the host.
+
+Alternatively, to use the hostname in place of the IP addresses, modify `kubernetes/helm/values/metal3.yaml` to:
+
+[,yaml]
+----
+global:
+  provisioningHostname: `${MGMT_CLUSTER_HOSTNAME}`
+  enable_vmedia_tls: false
+  additionalTrustedCAs: false
+metal3-ironic:
+  global:
+    predictableNicNames: true
+  persistence:
+    ironic:
+      size: "5Gi"
+  service:
+    type: NodePort
+----
+
+and `kubernetes/helm/values/rancher.yaml` to:
+
+[,yaml]
+----
+hostname: rancher-${MGMT_CLUSTER_HOSTNAME}.sslip.io
+bootstrapPassword: "foobar"
+replicas: 1
+global:
+  cattle:
+    systemDefaultRegistry: "registry.rancher.com"
+----
+
+where `$\{MGMT_CLUSTER_HOSTNAME\}` should be a Fully Qualified Domain Name resolving to your host IP addresses.
+
+For more information visit https://github.com/suse-edge/atip/tree/main/telco-examples/mgmt-cluster/dual-stack[SUSE Edge GitHub repository under the "dual-stack" folder], where an example directory structure can be found.
