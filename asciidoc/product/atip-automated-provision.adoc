@@ -704,33 +704,6 @@ spec:
     pods:
       cidrBlocks:
         - 192.168.0.0/18
-    services:
-      cidrBlocks:
-        - 10.96.0.0/12
-  controlPlaneRef:
-    apiVersion: controlplane.cluster.x-k8s.io/v1beta1
-    kind: RKE2ControlPlane
-    name: single-node-cluster
-  infrastructureRef:
-    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
-    kind: Metal3Cluster
-    name: single-node-cluster
-----
-
-For a deployment with dual-stack Pods and Services, the following definition can be used instead:
-
-[,yaml]
-----
-apiVersion: cluster.x-k8s.io/v1beta1
-kind: Cluster
-metadata:
-  name: single-node-cluster
-  namespace: default
-spec:
-  clusterNetwork:
-    pods:
-      cidrBlocks:
-        - 192.168.0.0/18
         - fd00:bad:cafe::/48
     services:
       cidrBlocks:
@@ -746,12 +719,13 @@ spec:
     name: single-node-cluster
 ----
 
-[IMPORTANT]
+[NOTE]
 ====
-IPv6 and dual-stack deployments are in tech preview status and are not officially supported.
+* Both single-stack and dual-stack deployments are possible, remove the IPv6 CIDRs from the above definition for an IPv4 only cluster.
+* Single-stack IPv6 deployments are in tech preview status and not yet officially supported.
 ====
 
-The `Metal3Cluster` object specifies the control-plane endpoint (replacing the `$\{DOWNSTREAM_CONTROL_PLANE_IP\}`) to be configured and the `noCloudProvider` because a bare-metal node is used.
+The `Metal3Cluster` object specifies the control-plane endpoint (replacing the `$\{DOWNSTREAM_CONTROL_PLANE_IPV4\}`) to be configured and the `noCloudProvider` because a bare-metal node is used.
 
 [,yaml]
 ----
@@ -762,7 +736,7 @@ metadata:
   namespace: default
 spec:
   controlPlaneEndpoint:
-    host: ${DOWNSTREAM_CONTROL_PLANE_IP}
+    host: ${DOWNSTREAM_CONTROL_PLANE_IPV4}
     port: 6443
   noCloudProvider: true
 ----
@@ -967,13 +941,14 @@ Where:
 - `$\{BMC_NODE1_USERNAME\}` — The username for the BMC of the first bare-metal host.
 - `$\{BMC_NODE1_PASSWORD\}` — The password for the BMC of the first bare-metal host.
 - `$\{BMC_NODE1_MAC\}` — The MAC address of the first bare-metal host to be used.
-- `$\{BMC_NODE1_ADDRESS\}` — The URL for the first bare-metal host BMC (for example, `redfish-virtualmedia://192.168.200.75/redfish/v1/Systems/1/`). To learn more about the different options available depending on your hardware provider, check the following https://github.com/metal3-io/baremetal-operator/blob/main/docs/api.md[link].
+- `$\{BMC_NODE1_ADDRESS\}` — The URL for the first bare-metal host BMC (for example, `redfish-virtualmedia://192.168.200.75/redfish/v1/Systems/1/`). The host part of the URL can be an IP address (v4 or v6) or a domain name, where the existing infrastructure allows. To learn more about the different options available depending on your hardware provider, check the following https://github.com/metal3-io/baremetal-operator/blob/main/docs/api.md[link].
 
 [NOTE]
 ====
 * If no network configuration for the host has been specified, either at image build time or through the `BareMetalHost` definition, an autoconfiguration mechanism (DHCP, DHCPv6, SLAAC) will be used. For more details or complex configurations, check the xref:advanced-network-configuration[].
-* Multi-node dual-stack or IPv6 only clusters are not yet supported.
+* Single-stack IPv6 clusters are in tech preview status and not yet officially supported.
 * Architecture must be either `x86_64` or `aarch64`, depending on the architecture of the bare-metal host to be enrolled.
+* All modern servers come with a dual-stack capable BMC, however IPv6 support (and possibly the option of using hostnames for the VirtualMedia capability) should be verified before use in production in a dual-stack environment.
 ====
 
 Once the file is created, the following command must be executed in the management cluster to start enrolling the bare-metal hosts in the management cluster:
@@ -1005,7 +980,7 @@ To do that, the following file (`capi-provisioning-example.yaml`) must be create
 [NOTE]
 ====
 - Only values between `$\{...\}` must be replaced with the real values.
-- The `VIP` address is a reserved IP address that is not assigned to any node and is used to configure the load balancer.
+- The `VIP` address is a reserved IP address that is not assigned to any node and is used to configure the load balancer. In a dual-stack cluster, both an IPv4 and IPv6 can be specified, but in the following examples priority will be given to the IPv4 address.
 ====
 
 Below is the cluster definition, where the cluster network can be configured using the `pods` and the `services` blocks. Also, it contains the references to the control plane and the infrastructure (using the `Metal^3^` provider) objects to be used.
@@ -1022,9 +997,11 @@ spec:
     pods:
       cidrBlocks:
         - 192.168.0.0/18
+        - fd00:1234:4321::/48
     services:
       cidrBlocks:
         - 10.96.0.0/12
+        - fd00:5678:8765:4321::/112
   controlPlaneRef:
     apiVersion: controlplane.cluster.x-k8s.io/v1beta1
     kind: RKE2ControlPlane
@@ -1035,7 +1012,12 @@ spec:
     name: multinode-cluster
 ----
 
-The `Metal3Cluster` object specifies the control-plane endpoint that uses the `VIP` address already reserved (replacing the `$\{EDGE_VIP_ADDRESS\}`) to be configured and the `noCloudProvider` because the three bare-metal nodes are used.
+[NOTE]
+====
+Both single-stack and dual-stack deployments are possible, remove the IPv6 CIDRs and IPv6 VIP addresses (in the subsequent sections) for an IPv4 only cluster
+====
+
+The `Metal3Cluster` object specifies the control-plane endpoint that uses the `VIP` address already reserved (replacing the `$\{EDGE_VIP_ADDRESS_IPV4\}`) to be configured and the `noCloudProvider` because the three bare-metal nodes are used.
 [,yaml]
 ----
 apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
@@ -1045,7 +1027,7 @@ metadata:
   namespace: default
 spec:
   controlPlaneEndpoint:
-    host: ${EDGE_VIP_ADDRESS}
+    host: ${EDGE_VIP_ADDRESS_IPV4}
     port: 6443
   noCloudProvider: true
 ----
@@ -1054,11 +1036,11 @@ The `RKE2ControlPlane` object specifies the control-plane configuration to be us
 
 * The number of replicas to be used (in this case, three).
 * The advertisement mode to be used by the Load Balancer (`address` uses the L2 implementation), as well as the address to be used (replacing the `$\{EDGE_VIP_ADDRESS\}` with the `VIP` address).
-* The `serverConfig` with the `CNI` plug-in to be used (in this case, `Cilium`), and the `tlsSan` to be used to configure the `VIP` address.
+* The `serverConfig` with the `CNI` plug-in to be used (in this case, `Cilium`), and the additional `VIP` address(es) and name(s) to be listed under `tlsSan`.
 * The agentConfig block contains the `Ignition` format to be used and the `additionalUserData` to be used to configure the `RKE2` node with information like:
     ** The systemd service named `rke2-preinstall.service` to replace automatically the `BAREMETALHOST_UUID` and `node-name` during the provisioning process using the Ironic information.
     ** The `storage` block which contains the Helm charts to be used to install the `MetalLB` and the `endpoint-copier-operator`.
-    ** The `metalLB` custom resource file with the `IPaddressPool` and the `L2Advertisement` to be used (replacing `$\{EDGE_VIP_ADDRESS\}` with the `VIP` address).
+    ** The `metalLB` custom resource file with the `IPaddressPool` and the `L2Advertisement` to be used (replacing `$\{EDGE_VIP_ADDRESS_IPV4\}` with the `VIP` address).
     ** The `endpoint-svc.yaml` file to be used to configure the `kubernetes-vip` service to be used by the `MetalLB` to manage the `VIP` address.
 * The last block of information contains the Kubernetes version to be used. The `$\{RKE2_VERSION\}` is the version of `RKE2` to be used replacing this value (for example, `{version-kubernetes-rke2}`).
 
@@ -1085,8 +1067,10 @@ spec:
   serverConfig:
     cni: cilium
     tlsSan:
-      - $\{EDGE_VIP_ADDRESS}
-      - https://$\{EDGE_VIP_ADDRESS}.sslip.io
+      - $\{EDGE_VIP_ADDRESS_IPV4}
+      - $\{EDGE_VIP_ADDRESS_IPV6}
+      - https://$\{EDGE_VIP_ADDRESS_IPV4}.sslip.io
+      - https://$\{EDGE_VIP_ADDRESS_IPV6}.sslip.io
   agentConfig:
     format: ignition
     additionalUserData:
@@ -1173,7 +1157,8 @@ spec:
                     namespace: metallb-system
                   spec:
                     addresses:
-                      - $\{EDGE_VIP_ADDRESS}/32
+                      - $\{EDGE_VIP_ADDRESS_IPV4}/32
+                      - $\{EDGE_VIP_ADDRESS_IPV6}/128
                     serviceAllocation:
                       priority: 100
                       namespaces:
@@ -1202,6 +1187,7 @@ spec:
                     labels:
                       serviceType: kubernetes-vip
                   spec:
+                    ipFamilyPolicy: PreferDualStack
                     ports:
                     - name: rke2-api
                       port: 9345
@@ -1527,14 +1513,10 @@ As for the previous example, replace the following variables with actual values,
 - `$\{CONTROLPLANE_INTERFACE\}` - the name of the interface to assign the addresses to and to use for egress traffic matching the default route, for both IPv4 and IPv6
 - `$\{DNS_SERVER_V4\}` and/or `$\{DNS_SERVER_V6\}` - the IP address(es) of the DNS server(s) to use, which can be specified as single or multiple entries. Both IPv4 and/or IPv6 addresses are supported
 
-[IMPORTANT]
-====
-IPv6 and dual-stack deployments are in tech preview status and are not officially supported.
-====
-
 [NOTE]
 ====
-You can refer to https://github.com/suse-edge/atip/tree/main/telco-examples/edge-clusters[SUSE Telco Cloud examples repo] for more complex examples, including IPv6 only and dual-stack configurations.
+* You can refer to https://github.com/suse-edge/atip/tree/main/telco-examples/edge-clusters[SUSE Telco Cloud examples repo] for more complex examples, including IPv6 only and dual-stack configurations.
+* Single-stack IPv6 deployments are in tech preview status and not yet officially supported.
 ====
 
 Lastly, regardless of the network configuration details, ensure that the secret is referenced by appending `preprovisioningNetworkDataName` to the `BaremetalHost` object to successfully enroll the host in the management cluster.
