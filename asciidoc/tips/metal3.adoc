@@ -1,6 +1,24 @@
+[#tips-metal3]
 = *Metal^3^*
+:revdate: 2025-10-07
+:page-revdate: {revdate}
+:experimental:
 
-.Ironic:
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+:imagesdir: ../images/
+
+== Ironic
+
+=== Predictable network names
+
 Due to a link:../components/metal3.adoci#L31[known issue], if you are trying to configure predictable names for the target OS network devices and you end up in errors, seeing that the discovered device names have different naming pattern, then you have a couple of options:
 
 _Option 1:_ Use two network configuration secrets, one for the inspection/provisioning phase and another for the deployed OS.
@@ -102,3 +120,88 @@ now in the output files you should have the UUIDs that you can use in your confi
 3. Alternatively, if you don't use OpenSUSE or SLES, you can use the nmc through the Edge Image Builder container image:
 `podman run -it --rm -v $(pwd):/path/to/your/config:Z --entrypoint=/usr/bin/nmc registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} generate --confi
 g-dir /path/to/your/config --output-dir /where/you/want/it`
+
+== `BareMetalHost` selection and Cluster association
+
+Once a Metalˆ3ˆ cluster object and its corresponding associated objects are created, a process to choose which `BareMetalHost` will be part of
+the cluster is performed.
+This process connects a `BareMetalHost` with a specific `Metal3MachineTemplate` using standard
+https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/[Kubernetes labels] and selectors.
+
+As an example, each `BareMetalHost` is labeled to identify its properties and intended cluster
+(e.g., its cluster-role, the cluster name, location, etc.):
+
+----
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode1
+  labels:
+    cluster-role: control-plane
+    cluster: foobar
+    location: madrid
+    datacenter: xyz
+<snip>
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode2
+  labels:
+    cluster-role: worker
+    cluster: foobar
+    location: madrid
+    datacenter: xyz
+<snip>
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode3
+  labels:
+    cluster-role: worker
+    cluster: foobar2
+    location: madrid
+    datacenter: xyz
+<snip>
+...
+----
+
+Then, the `Metal3MachineTemplate` object uses the https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector[`spec.hostSelector`] field to match the desired `BareMetalHost`.
+
+Both https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector-matchLabels[`matchLabels`] (for exact key-value matching) and https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector-matchExpressions[`matchExpressions`] (for more complex rules) can be used:
+
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: foobar-cluster-controlplane
+  namespace: mynamespace
+spec:
+  template:
+    spec:
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+          cluster: foobar
+<snip>
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: foobar-cluster-worker
+  namespace: mynamespace
+spec:
+  template:
+    spec:
+      hostSelector:
+        matchExpressions:
+          - { key: cluster-role, operator: In, values: [worker] }
+          - { key: cluster, operator: In, values: [foobar] }
+<snip>
+----
+
+[NOTE]
+====
+Kubernetes namespaces can be also used to better organize the different objects.
+====
