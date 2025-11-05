@@ -177,21 +177,29 @@ spec:
   sessionAffinity: None
   type: LoadBalancer
 EOF</pre></div><p>Verify that the <code class="literal">kubernetes-vip</code> Service has the correct IP address:</p><div class="verbatim-wrap highlight bash"><pre class="screen">kubectl get service kubernetes-vip -n default \
- -o=jsonpath='{.status.loadBalancer.ingress[0].ip}'</pre></div><p>Ensure that the <code class="literal">kubernetes-vip-*</code> and <code class="literal">kubernetes</code> EndpointSlices resources in the <code class="literal">default</code> namespace point to the same IPs.</p><div class="verbatim-wrap highlight bash"><pre class="screen">kubectl get endpointslices | grep kubernetes</pre></div><p>If everything is correct, the last thing left is to use the <code class="literal">VIP_SERVICE_IP</code> in our <code class="literal">Kubeconfig</code>.</p><div class="verbatim-wrap highlight bash"><pre class="screen">sed -i '' "s/${NODE_IP}/${VIP_SERVICE_IP}/g" ~/.kube/config</pre></div><p>From now on, all the <code class="literal">kubectl</code> will go through the <code class="literal">kubernetes-vip</code> service.</p></section><section class="sect1" id="id-adding-control-plane-nodes" data-id-title="Adding control-plane nodes"><div class="titlepage"><div><div><div class="title-container"><h2 class="title"><span class="title-number-name"><span class="title-number">26.6 </span><span class="title-name">Adding control-plane nodes</span></span> <a title="Permalink" class="permalink" href="guides-metallb-kubernetes.html#id-adding-control-plane-nodes">#</a></h2><div class="icons"><a target="_blank" class="icon-reportbug" title="Report an issue"> </a></div></div></div></div></div><p>To monitor the entire process, two more terminal tabs can be opened.</p><p>First terminal:</p><div class="verbatim-wrap highlight bash"><pre class="screen">watch kubectl get nodes</pre></div><p>Second terminal:</p><div class="verbatim-wrap highlight bash"><pre class="screen">watch kubectl get endpointslices</pre></div><p>Now execute the commands below on the second and third nodes.</p><p>For RKE2:</p><div class="verbatim-wrap highlight bash"><pre class="screen"># Export the VIP_SERVICE_IP in the VM
-# Replace with the actual IP
-export VIP_SERVICE_IP=&lt;ip&gt;
-
-curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE="server" sh -
-systemctl enable rke2-server.service
-
+ -o=jsonpath='{.status.loadBalancer.ingress[0].ip}'</pre></div><p>Ensure that the <code class="literal">kubernetes-vip-*</code> and <code class="literal">kubernetes</code> EndpointSlices resources in the <code class="literal">default</code> namespace point to the same IPs.</p><div class="verbatim-wrap highlight bash"><pre class="screen">kubectl get endpointslices | grep kubernetes</pre></div><p>If everything is correct, the last thing left is to use the <code class="literal">VIP_SERVICE_IP</code> in our <code class="literal">Kubeconfig</code>.</p><div class="verbatim-wrap highlight bash"><pre class="screen">sed -i '' "s/${NODE_IP}/${VIP_SERVICE_IP}/g" ~/.kube/config</pre></div><p>From now on, all the <code class="literal">kubectl</code> will go through the <code class="literal">kubernetes-vip</code> service.</p></section><section class="sect1" id="id-adding-control-plane-nodes" data-id-title="Adding control-plane nodes"><div class="titlepage"><div><div><div class="title-container"><h2 class="title"><span class="title-number-name"><span class="title-number">26.6 </span><span class="title-name">Adding control-plane nodes</span></span> <a title="Permalink" class="permalink" href="guides-metallb-kubernetes.html#id-adding-control-plane-nodes">#</a></h2><div class="icons"><a target="_blank" class="icon-reportbug" title="Report an issue"> </a></div></div></div></div></div><p>To monitor the entire process, two more terminal tabs can be opened.</p><p>First terminal:</p><div class="verbatim-wrap highlight bash"><pre class="screen">watch kubectl get nodes</pre></div><p>Second terminal:</p><div class="verbatim-wrap highlight bash"><pre class="screen">watch kubectl get endpointslices</pre></div><p>Now execute the commands below on the second and third nodes.</p><p>For RKE2:</p><div class="verbatim-wrap highlight bash"><pre class="screen"># As a root user, create the /etc/rancher/rke2/config.yaml config file with the following content:
 
 mkdir -p /etc/rancher/rke2/
-cat &lt;&lt;EOF &gt; /etc/rancher/rke2/config.yaml
+cat &lt;&lt; EOF &gt; /etc/rancher/rke2/config.yaml
+# An example of the config.yaml file for an agent node:
 server: https://${VIP_SERVICE_IP}:9345
+write-kubeconfig-mode: "0644"
+tls-san:
+  - "${VIP_SERVICE_IP}"
+  - "https://${VIP_SERVICE_IP}.sslip.io"
+# The one from above
 token: ${RKE2_TOKEN}
 EOF
 
-systemctl start rke2-server.service</pre></div><p>For K3s:</p><div class="verbatim-wrap highlight bash"><pre class="screen"># Export the VIP_SERVICE_IP in the VM
+# Install RKE2
+curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE="server" sh -
+
+# Enable the RKE2 service with the configuration specified in the config.yaml file
+
+systemctl enable --now rke2-server.service
+
+# Fetch the cluster token to be used later:
+RKE2_TOKEN=$(tr -d '\n' &lt; /var/lib/rancher/rke2/server/node-token)</pre></div><p>For K3s:</p><div class="verbatim-wrap highlight bash"><pre class="screen"># Export the VIP_SERVICE_IP in the VM
 # Replace with the actual IP
 export VIP_SERVICE_IP=&lt;ip&gt;
 export INSTALL_K3S_SKIP_START=false
