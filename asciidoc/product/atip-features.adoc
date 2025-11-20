@@ -21,7 +21,8 @@ The following topics are covered in this section:
 
 * <<kernel-image-for-real-time,Kernel image for real time>>: Kernel image to be used by the real-time kernel.
 * <<kernel-args,Kernel arguments for low latency and high performance>>: Kernel arguments to be used by the real-time kernel for maximum performance and low latency running telco workloads.
-* <<cpu-pinning,CPU Pinning>>: Isolating the CPUs via kernel arguments, TuneD profile, and Kubernetes configuration.
+* <<cpu-pinning-host,CPU Pinning on Host>>: Isolating the CPUs via kernel arguments and TuneD profile.
+* <<cpu-pinning-k8s,CPU Pinning on Kubernetes>>: Isolating the CPUs on Kubernetes via Kubelet configuration.
 * <<cni-configuration,CNI configuration>>: CNI configuration to be used by the Kubernetes cluster.
 * <<sriov,SR-IOV configuration>>: SR-IOV configuration to be used by the Kubernetes workloads.
 * <<dpdk,DPDK configuration>>: DPDK configuration to be used by the system.
@@ -72,7 +73,7 @@ The kernel arguments are important to be configured to enable the real-time kern
 * Remove `kthread_cpus` when using SUSE real-time kernel. This parameter controls on which CPUs kernel threads are created. It also controls which CPUs are allowed for PID 1 and for loading kernel modules (the kmod user-space helper). This parameter is not
 recognized and does not have any effect.
 
-* Isolate the CPU cores using `isolcpus`, `nohz_full`, `rcu_nocbs`, and `irqaffinity`. For a comprehensive list of CPU pinning techniques, refer to  <<cpu-pinning,CPU Pinning>> chapter.
+* Isolate the CPU cores using `isolcpus`, `nohz_full`, `rcu_nocbs`, and `irqaffinity`. For a comprehensive list of CPU pinning techniques, refer to  <<cpu-pinning-host,CPU Pinning on Host>> chapter.
 
 * Add `domain,nohz,managed_irq` flags to `isolcpus` kernel argument. Without any flags, `isolcpus` is equivalent to specifying only the `domain` flag. This isolates the specified CPUs from scheduling, including kernel tasks. The `nohz` flag stops the scheduler tick on the specified CPUs (if only one task is runnable on a CPU), and the `managed_irq` flag avoids routing managed external (device) interrupts at the specified CPUs. Note that the IRQ lines of NVMe devices are fully managed by the kernel and will be routed to the non-isolated (housekeeping) cores as a consequence. For example, the command line provided at the end of this section will result in only four queues (plus an admin/control queue) allocated on the system:
 
@@ -132,8 +133,8 @@ $ cat /proc/cmdline
 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=575291cf-74e8-42cf-8f2c-408a20dc00b8 skew_tick=1 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack amd_iommu=on iommu=pt irqaffinity=0-7 isolcpus=domain,nohz,managed_irq,8-127 nohz_full=8-127 rcu_nocbs=8-127 mce=off nohz=on net.ifnames=0 nowatchdog nmi_watchdog=0 nosoftlockup quiet rcu_nocb_poll rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll
 ----
 
-[#cpu-pinning]
-=== CPU Pinning
+[#cpu-pinning-host]
+=== CPU Pinning on Host
 
 CPU pinning, also known as processor affinity, is the technique of binding a process or thread to a specific CPU core, preventing the operating system's scheduler from moving it. By ensuring a process always runs on the same core, it benefits from faster access to data that remains in that core's cache memory. This practice is common in high-performance computing environments because it dramatically improves performance and reduces overhead.
 
@@ -235,9 +236,10 @@ There is another script that can be used to tune the CPU configuration, which ba
 
 The script is available at https://raw.githubusercontent.com/suse-edge/telco-cloud-examples/refs/heads/{release-tag-telco-cloud}/telco-examples/edge-clusters/dhcp-less/eib/custom/files/performance-settings.sh[SUSE Telco Cloud Examples repository].
 
-==== Kubernetes Configuration for CPU Pinning
+[#cpu-pinning-k8s]
+=== CPU Pinning on Kubernetes
 
-===== RKE2 Versions < v1.32
+==== RKE2 Versions < v1.32
 Enable CPU pinning in your RKE2 cluster by editing RKE2 config file. Add below kubelet arguments in `/etc/rancher/rke2/config.yaml` file. Make sure specifying the housekeeping CPU cores in `kubelet-reserved` and `system-reserved` arguments:
 
 [,yaml]
@@ -250,8 +252,9 @@ kubelet-arg:
 - "system-reserved=cpu=0,31,32,63"
 ----
 
-===== RKE2 Versions >= v1.32
+==== RKE2 Versions >= v1.32
 If your RKE2 version is v1.32 or higher, command-line arguments cannot be used to configure kubelet, following upstream Kubernetes practice. To set up CPU pinning, a kubelet config file needs to be created. Refer to https://documentation.suse.com/cloudnative/rke2/latest/en/install/configuration.html#_kubelet_configuration[RKE2 documentation].
+
 Create a new kubelet config file such as `01-cpu-pinning.conf` and place it in the `/var/lib/rancher/rke2/agent/etc/kubelet.conf.d/` directory:
 
 [,yaml]
@@ -358,7 +361,7 @@ cni:
 
 This can also be specified with command-line arguments, that is, `--cni=cilium` into the server line in `/etc/systemd/system/rke2-server` file.
 
-To use the `SR-IOV` network operator described in the xref:option2-sriov-helm[next section], use `Multus` with another CNI plug-in, like `Cilium` or `Calico`, as a secondary plug-in.
+To use the `SR-IOV` network described in <<option2-sriov-helm>> along with Cilium, deploy `multus` meta plugin. Make sure `multus` is listed before other CNIs.
 
 [,yaml]
 ----
@@ -380,7 +383,7 @@ cni:
 
 This can also be specified with command-line arguments, that is, `--cni=calico` into the server line in `/etc/systemd/system/rke2-server` file.
 
-To use the `SR-IOV` network operator described in the xref:option2-sriov-helm[next section], use `Multus` with another CNI plug-in, like `Cilium` or `Calico`, as a secondary plug-in.
+To use the `SR-IOV` network described in <<option2-sriov-helm>> along with Calico, deploy `multus` meta plugin. Make sure `multus` is listed before other CNIs.
 
 [,yaml]
 ----
@@ -679,18 +682,23 @@ Bond CNI with SR-IOV is only applicable to SRIOV Virtual Functions (VF) using th
 [#sriov]
 === SR-IOV
 
-SR-IOV allows a device, such as a network adapter, to separate access to its resources among various `PCIe` hardware functions.
-There are different ways to deploy `SR-IOV`, and here, we show two different options:
+SR-IOV (Single Root I/O Virtualization) allows a single physical device, such as a network adapter, to separate its resources across multiple `PCIe` hardware functions. This enables direct resource access fo various applications.
 
-* Option 1: using the `SR-IOV` CNI device plug-ins and a config map to configure it properly.
-* Option 2 (recommended): using the `SR-IOV` Helm chart from Rancher Prime to make this deployment easy.
+We provide two distinct methods for deploying `SR-IOV` in your cluster:
+
+* <<option1-sriov-deviceplugin>>: This method supports both network devices and vRAN accelerator.
+* <<option2-sriov-helm>>: This automated method provides simpler deployment. This method is only for network devices.
+
+In rare cases where you need both solutions - using the Network Operator for network devices and the Device Plugin for vRAN Accelerators - you must deploy them into separate Kubernetes namespaces. This separation is essential to prevent conflicts between two deployments.
 
 [#option1-sriov-deviceplugin]
-*Option 1 - Installation of SR-IOV CNI device plug-ins and a config map to configure it properly*
+==== Option 1: SR-IOV Network Device Plugin Daemonset and configMap
 
-* Prepare the config map for the device plug-in
+https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin[SR-IOV Network Device Plugin] discovers and advertises network resources, such as PCI physial functions (PFs), and their virtual functions (VFs), on a Kubernetes host.
 
-Get the information to fill the config map from the `lspci` command:
+* Prepare the config map for the device plugin
+
+We need to create a config map that defines SR-IOV resource pools. Run `lspci` command to retrieve the information:
 
 [,shell]
 ----
@@ -714,33 +722,39 @@ $ lspci | grep -i net
 51:11.3 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
 ----
 
-The config map consists of a `JSON` file that describes devices using filters to discover, and creates groups for the interfaces.
-The key is understanding filters and groups. The filters are used to discover the devices and the groups are used to create the interfaces.
+The SR-IOV Device Plugin uses a configMap containing a JSON file to define which hardware resources Kubernetes should expose. This configuration is based on two core concepts: `selectors` (for hardware discovery) and `resources` (for Kubernetes exposure).
 
-It could be possible to set filters:
+A `resource` is the named entity that pods consume (e.g. `rancher.io/intel_fec_5g`). Resources can be defined as one of two types:
 
-* vendorID: `8086` (Intel)
-* deviceID: `0d5c` (Accelerator card)
-* driver: `vfio-pci` (driver)
-* pfNames: `p2p1` (physical interface name)
+* `accelerator`: Used for vRAN accelerator cards (like ACC100/vRAN Boost).
+* `netdevice`: Used for standard network interfaces (NICs).
 
-It could be possible to also set filters to match more complex interface syntax, for example:
+You define the target devices using `selectors` to filter the hardware on the node:
 
-* pfNames: `["eth1#1,2,3,4,5,6"]` or `[eth1#1-6]` (physical interface name)
+* `vendors`: `8086` (Intel)
+* `devices`: `0d5d` (FEC card), `1889` (NIC)
+* `drivers`: `vfio-pci`
+* `pfNames`: `p2p1` (physical interface name)
 
-Related to the groups, we could create a group for the `FEC` card and another group for the `Intel` card, even creating a prefix depending on our use case:
+For network cards, you can also select a subset of Virtual Functions (VFs) from a Physical Function:
 
-* resourceName: `pci_sriov_net_bh_dpdk`
-* resourcePrefix: `Rancher.io`
+* `pfNames`: `["eth1#1,2,3,4,5,6"]` or `[eth1#1-6]`
 
-There are a lot of combinations to discover and create the resource group to allocate some `VFs` to the pods.
+To allow pods to request the devices, each resource must have a name, which is composed of a prefix and a name:
+
+* `resourceName`: `pci_sriov_net_bh_dpdk`
+* `resourcePrefix`: `rancher.io`
+
+Pods would then request the combined resource name: `rancher.io/pci_sriov_net_bh_dpdk` .
 
 [NOTE]
 ====
-For more information about the filters and groups, visit https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin[sr-iov network device plug-in].
+This document does not list all possible selectors. Different resource types use different sets of selectors. For comprehensive details, refer to the https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin[SR-IOV Network Device Plugin repository].
 ====
 
-After setting the filters and groups to match the interfaces depending on the hardware and the use case, the following config map shows an example to be used:
+The ConfigMap below is an example that creates three resources: one for the vRAN Accelerator card (FEC) and two for two different NIC ports.
+
+For FEC card, you must first retrieve the device ID and VFIO token. Follow the instructions in <<acceleration>> chapter for prerequisites.
 
 [,yaml]
 ----
@@ -754,15 +768,23 @@ data:
     {
         "resourceList": [
             {
+            	"resourcePrefix": "rancher.io",
                 "resourceName": "intel_fec_5g",
-                "devicetype": "accelerator",
+                "deviceType": "accelerator",
                 "selectors": {
                     "vendors": ["8086"],
                     "devices": ["0d5d"]
-                }
+                },
+        		"additionalInfo": {
+          			"*": {
+            			"VFIO_TOKEN": "00112233-4455-6677-8899-aabbccddeeff"
+          			}
+          		}
             },
             {
+            	"resourcePrefix": "rancher.io",
                 "resourceName": "intel_sriov_odu",
+                "deviceType": "netdevice",
                 "selectors": {
                     "vendors": ["8086"],
                     "devices": ["1889"],
@@ -771,7 +793,9 @@ data:
                 }
             },
             {
+            	"resourcePrefix": "rancher.io",
                 "resourceName": "intel_sriov_oru",
+                "deviceType": "netdevice",
                 "selectors": {
                     "vendors": ["8086"],
                     "devices": ["1889"],
@@ -783,9 +807,9 @@ data:
     }
 ----
 
-* Prepare the `daemonset` file to deploy the device plug-in.
+* Prepare the `daemonset` file to deploy the device plugin.
 
-The device plug-in supports several architectures (`arm`, `amd`, `ppc64le`), so the same file can be used for different architectures deploying several `daemonset` for each architecture.
+The device plugin supports several architectures (`arm`, `amd`, `ppc64le`), so the same file can be used for different architectures by deploying several `daemonset` for each architecture.
 
 [,yaml]
 ----
@@ -824,7 +848,7 @@ spec:
       serviceAccountName: sriov-device-plugin
       containers:
       - name: kube-sriovdp
-        image: rancher/hardened-sriov-network-device-plugin:v3.7.0-build20240816
+        image: registry.suse.com/rancher/hardened-sriov-network-device-plugin:v3.9.0-build20250425
         imagePullPolicy: IfNotPresent
         args:
         - --log-dir=sriovdp
@@ -867,7 +891,7 @@ spec:
               path: config.json
 ----
 
-* After applying the config map and the `daemonset`, the device plug-in will be deployed and the interfaces will be discovered and available for the pods.
+* After applying the configMap and the `daemonset`, the device plugin will be deployed and the interfaces will be discovered and available for the pods.
 +
 [,shell]
 ----
@@ -875,33 +899,36 @@ $ kubectl get pods -n kube-system | grep sriov
 kube-system  kube-sriov-device-plugin-amd64-twjfl  1/1  Running  0  2m
 ----
 +
-* Check the interfaces discovered and available in the nodes to be used by the pods:
+* Verify all nodes if interfaces were discovered and became available for the pods:
 +
 ----
-$ kubectl get $(kubectl get nodes -oname) -o jsonpath='{.status.allocatable}' | jq
+$ kubectl get nodes -o json | jq '.items[] | {name: .metadata.name, allocatable: .status.allocatable}'
 {
-  "cpu": "64",
-  "ephemeral-storage": "256196109726",
-  "hugepages-1Gi": "40Gi",
-  "hugepages-2Mi": "0",
-  "intel.com/intel_fec_5g": "16",
-  "intel.com/intel_sriov_odu": "4",
-  "intel.com/intel_sriov_oru": "4",
-  "memory": "221396384Ki",
-  "pods": "110"
+  "name": "node1.suse.edge.com",
+  "allocatable": {
+	  "cpu": "64",
+	  "ephemeral-storage": "256196109726",
+	  "hugepages-1Gi": "40Gi",
+	  "hugepages-2Mi": "0",
+	  "rancher.io/intel_fec_5g": "16",
+	  "rancher.io/intel_sriov_odu": "4",
+	  "rancher.io/intel_sriov_oru": "4",
+	  "memory": "221396384Ki",
+	  "pods": "110"
+  }
 }
 ----
 +
-* The `FEC` is `intel.com/intel_fec_5g` and the value is 16.
-* The `VF` is `intel.com/intel_sriov_odu` or `intel.com/intel_sriov_oru` if you deploy it with a device plug-in and the config map without Helm charts.
+* The resourceName for `FEC` accelerator is `rancher.io/intel_fec_5g` and 16 VFs are available for use.
+* The resourceName for NIC cards are `rancher.io/intel_sriov_odu` and `rancher.io/intel_sriov_oru`. Each resource provides 4 VFs.
 
 [IMPORTANT]
 ====
-If there are no interfaces here, it makes little sense to continue because the interface will not be available for pods. Review the config map and filters to solve the issue first.
+If no interfaces are detected as allocatable resources in the kubernetes nodes, it is essential to resolve this issue. One common cause is ill-formed configMap spec, so better review the configMap and its selectors.
 ====
 
 [#option2-sriov-helm]
-*Option 2 (recommended) - Installation using Rancher using Helm chart for SR-IOV CNI and device plug-ins*
+==== Option 2 (Recommended): SR-IOV Network Operator 
 
 * Get Helm if not present:
 
@@ -910,7 +937,7 @@ If there are no interfaces here, it makes little sense to continue because the i
 $ curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 ----
 
-* Install SR-IOV.
+* Install SR-IOV Network Operator on `sriov-network-operator` namespace:
 
 [,shell,subs="attributes"]
 ----
@@ -918,7 +945,7 @@ helm install sriov-crd oci://registry.suse.com/edge/charts/sriov-crd -n sriov-ne
 helm install sriov-network-operator oci://registry.suse.com/edge/charts/sriov-network-operator -n sriov-network-operator
 ----
 
-* Check the  deployed resources crd and pods:
+* Check the deployed CRDs and pods:
 
 [,shell]
 ----
@@ -926,7 +953,7 @@ $ kubectl get crd
 $ kubectl -n sriov-network-operator get pods
 ----
 
-* Check the label in the nodes.
+* Check if SR-IOV label is applied to the nodes.
 
 With all resources running, the label appears automatically in your node:
 
@@ -941,31 +968,28 @@ feature.node.kubernetes.io/network-sriov.capable: "true"
 
 [,shell]
 ----
-$ kubectl get daemonset -A
+$ kubectl get daemonset -n sriov-network-operator
 NAMESPACE             NAME                            DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR                                           AGE
-calico-system            calico-node                     1         1         1       1            1           kubernetes.io/os=linux                                  15h
 sriov-network-operator   sriov-network-config-daemon     1         1         1       1            1           feature.node.kubernetes.io/network-sriov.capable=true   45m
 sriov-network-operator   sriov-rancher-nfd-worker        1         1         1       1            1           <none>                                                  45m
-kube-system              rke2-ingress-nginx-controller   1         1         1       1            1           kubernetes.io/os=linux                                  15h
-kube-system              rke2-multus-ds                  1         1         1       1            1           kubernetes.io/arch=amd64,kubernetes.io/os=linux         15h
 ----
 
-In a few minutes (can take up to 10 min to be updated), the nodes are detected and configured with the `SR-IOV` capabilities:
+In a few minutes, the nodes will be detected and fully configured with `SR-IOV` capabilities. The update can sometimes take up to 10 minutes:
 
 [,shell]
 ----
-$ kubectl get sriovnetworknodestates.sriovnetwork.openshift.io -A
+$ kubectl get sriovnetworknodestates -A
 NAMESPACE             NAME     AGE
 sriov-network-operator   xr11-2   83s
 ----
 
-* Check the interfaces detected.
+* Check if the interfaces were detected.
 
 The interfaces discovered should be the PCI address of the network device. Check this information with the `lspci` command in the host.
 
 [,shell]
 ----
-$ kubectl get sriovnetworknodestates.sriovnetwork.openshift.io -n kube-system -oyaml
+$ kubectl get sriovnetworknodestates -n sriov-network-operator -oyaml
 apiVersion: v1
 items:
 - apiVersion: sriovnetwork.openshift.io/v1
@@ -1023,17 +1047,17 @@ If your interface is not detected here, ensure that it is present in the next co
 $ kubectl get cm supported-nic-ids -oyaml -n sriov-network-operator
 ----
 
-If your device is not there, edit the config map, adding the right values to be discovered (should be necessary to restart the `sriov-network-config-daemon` daemonset).
+If your device is not listed, edit the config map by adding the right values to be discovered. Then restart the `sriov-network-config-daemon` pods on each node for update to take effect.
 ====
 
-* Create the `NetworkNode Policy` to configure the `VFs`.
+* Create the `SriovNetworkNodePolicy` to configure the `VFs`
 
-Some `VFs` (`numVfs`) from the device (`rootDevices`) will be created, and it will be configured with the driver `deviceType` and the `MTU`:
+This policy creates the resource `intelnicsDpdk` for pod consumption. It also binds `vfio-pci` driver to the provided PCI device and creates 8 VFs with an MTU size of 1500:
 
 [NOTE]
 ====
 The `resourceName` field must not contain any special characters and must be unique across the cluster.
-The example uses the `deviceType: vfio-pci` because `dpdk` will be used in combination with `sr-iov`. If you don't use `dpdk`, the deviceType should be `deviceType: netdevice` (default value).
+The example uses the `deviceType: vfio-pci` because DPDK is used in combination with SR-IOV. If you don't use DPDK, configure `deviceType: netdevice` (default value).
 ====
 
 [,yaml]
@@ -1057,24 +1081,33 @@ spec:
     - 0000:51:00.0
 ----
 
-* Validate configurations:
+* Validate configurations on all nodes:
+
+With the predefined resourcePrefix `rancher.io`, a resource `rancher.io/intelnicsDpdk` with 8 VFs should be discovered.
 
 [,shell]
 ----
-$ kubectl get $(kubectl get nodes -oname) -o jsonpath='{.status.allocatable}' | jq
+$ kubectl get nodes -o jsonpath='{"items": [ { "name": @.metadata.name, "allocatable": @.status.allocatable } ]}' | jq
 {
-  "cpu": "64",
-  "ephemeral-storage": "256196109726",
-  "hugepages-1Gi": "60Gi",
-  "hugepages-2Mi": "0",
-  "intel.com/intel_fec_5g": "1",
-  "memory": "200424836Ki",
-  "pods": "110",
-  "rancher.io/intelnicsDpdk": "8"
+  "name": "node1.suse.edge.com",
+  "allocatable": {
+	  "cpu": "64",
+	  "ephemeral-storage": "256196109726",
+	  "hugepages-1Gi": "60Gi",
+	  "hugepages-2Mi": "0",
+	  "rancher.io/intel_fec_5g": "16",
+	  "memory": "200424836Ki",
+	  "pods": "110",
+	  "rancher.io/intelnicsDpdk": "8"
+  }
 }
 ----
 
-* Create the sr-iov network (optional, just in case a different network is needed):
+* (Optional) Create the `sriovnetwork`
+
+This step is optional and only required for custom network definitions. Specify the `resourceName` to bind to the previously created node policy.
+
+If the `networkNamespace` is set, the network is exposed to pods in that namespace. Otherwise, the network becomes available in the Network Operator's installation namespace.
 
 [,yaml]
 ----
@@ -1082,7 +1115,7 @@ apiVersion: sriovnetwork.openshift.io/v1
 kind: SriovNetwork
 metadata:
   name: network-dpdk
-  namespace: sriov-network-operator
+  namespace: sriov-network-operator		# where SRIOV Operator is installed
 spec:
   ipam: |
     {
@@ -1097,13 +1130,14 @@ spec:
     }
   vlan: 500
   resourceName: intelnicsDpdk
+  networkNamespace: default 		# where workloads are deployed
 ----
 
-* Check the network created:
+* If the update is successful, a NetworkAttachmentDefinition (NAD) is created in target cluster.
 
 [,shell]
 ----
-$ kubectl get network-attachment-definitions.k8s.cni.cncf.io -A -oyaml
+$ kubectl get net-attach-def -A -oyaml
 
 apiVersion: v1
 items:
@@ -1115,7 +1149,7 @@ items:
     creationTimestamp: "2023-06-08T11:22:27Z"
     generation: 1
     name: network-dpdk
-    namespace: sriov-network-operator
+    namespace: default
     resourceVersion: "13124"
     uid: df7c89f5-177c-4f30-ae72-7aef3294fb15
   spec:
@@ -1125,6 +1159,9 @@ kind: List
 metadata:
   resourceVersion: ""
 ----
+
+The workload pods could use the resourceName `rancher.io/intelnicsDpdk` to use the VFs of the network interface.
+
 
 [#dpdk]
 === DPDK
@@ -1320,13 +1357,13 @@ $ echo 16 > /sys/bus/pci/devices/0000:8a:00.0/sriov_numvfs
 
 [,shell]
 ----
-$ pf_bb_config ACC100 -c /opt/pf-bb-config/acc100_config_vf_5g.cfg -v 00112233-4455-6677-8899-aabbccddeeff
+$ pf_bb_config ACC200 -c /opt/pf-bb-config/acc200_config_vf_5g.cfg -v 00112233-4455-6677-8899-aabbccddeeff
 Tue Jun  6 10:49:20 2023:INFO:Queue Groups: 2 5GUL, 2 5GDL, 2 4GUL, 2 4GDL
 Tue Jun  6 10:49:20 2023:INFO:Configuration in VF mode
 Tue Jun  6 10:49:21 2023:INFO: ROM version MM 99AD92
 Tue Jun  6 10:49:21 2023:WARN:* Note: Not on DDR PRQ version  1302020 != 10092020
-Tue Jun  6 10:49:21 2023:INFO:PF ACC100 configuration complete
-Tue Jun  6 10:49:21 2023:INFO:ACC100 PF [0000:8a:00.0] configuration complete!
+Tue Jun  6 10:49:21 2023:INFO:PF ACC200 configuration complete
+Tue Jun  6 10:49:21 2023:INFO:ACC200 PF [0000:8a:00.0] configuration complete!
 ----
 
 * Verify the new VFs created from the FEC PF. Note that the VFs got `0d5d` device ID. This information is required in next step to expose these VFs as Kubernetes resource:
@@ -1345,7 +1382,9 @@ Other Baseband devices
 ----
 
 ==== Configure Kubernetes for FEC Acceleration
-The final step is exposing the VFs to Kubernetes with help of SR-IOV device plugin. Create a ConfigMap using the VFs' deviceID gathered from previous step, and install SR-IOV device plugin. Once Kubernetes nodes display the FEC VFs as `Allocatable` resources, the cluster is ready for the workloads to enjoy the FEC acceleration. Follow the steps of Option 1 in <<sriov>> chapter.
+The final step is exposing the VFs to Kubernetes with help of SR-IOV device plugin. Create a ConfigMap using the VFs' deviceID gathered from previous step, and install SR-IOV device plugin. Once Kubernetes nodes display the FEC VFs as `Allocatable` resources, the cluster is ready for the workloads to enjoy the FEC acceleration. 
+
+Follow the steps of Option 1 in <<sriov>> chapter. SRIOV Network Operator isn't applicable for FEC Accelerator, so Option 2 is not applicable.
 
 
 [#huge-pages]
