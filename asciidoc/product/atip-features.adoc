@@ -21,13 +21,12 @@ The following topics are covered in this section:
 
 * <<kernel-image-for-real-time,Kernel image for real time>>: Kernel image to be used by the real-time kernel.
 * <<kernel-args,Kernel arguments for low latency and high performance>>: Kernel arguments to be used by the real-time kernel for maximum performance and low latency running telco workloads.
-* <<cpu-tuned-configuration,CPU Pinning via Tuned and kernel args>>: Isolating the CPUs via kernel arguments and Tuned profile.
+* <<cpu-pinning,CPU Pinning>>: Isolating the CPUs via kernel arguments, TuneD profile, and Kubernetes configuration.
 * <<cni-configuration,CNI configuration>>: CNI configuration to be used by the Kubernetes cluster.
 * <<sriov,SR-IOV configuration>>: SR-IOV configuration to be used by the Kubernetes workloads.
 * <<dpdk,DPDK configuration>>: DPDK configuration to be used by the system.
-* <<acceleration,vRAN acceleration card>>: Acceleration card configuration to be used by the Kubernetes workloads.
+* <<acceleration,vRAN Acceleration>>: Offloading FEC algorithm computation to vRAN Acceleration card.
 * <<huge-pages,Huge pages>>: Huge pages configuration to be used by the Kubernetes workloads.
-* <<cpu-pinning-kubernetes,CPU pinning on Kubernetes>>: Configuring Kubernetes and the applications to leverage CPU pinning.
 * <<numa-aware-scheduling,NUMA-aware scheduling configuration>>: NUMA-aware scheduling configuration to be used by the Kubernetes workloads.
 * <<metal-lb-configuration,Metal LB configuration>>: Metal LB configuration to be used by the Kubernetes workloads.
 * <<private-registry,Private registry configuration>>: Private registry configuration to be used by the Kubernetes workloads.
@@ -73,7 +72,7 @@ The kernel arguments are important to be configured to enable the real-time kern
 * Remove `kthread_cpus` when using SUSE real-time kernel. This parameter controls on which CPUs kernel threads are created. It also controls which CPUs are allowed for PID 1 and for loading kernel modules (the kmod user-space helper). This parameter is not
 recognized and does not have any effect.
 
-* Isolate the CPU cores using `isolcpus`, `nohz_full`, `rcu_nocbs`, and `irqaffinity`. For a comprehensive list of CPU pinning techniques, refer to  <<cpu-tuned-configuration,CPU Pinning via Tuned and kernel args>> chapter.
+* Isolate the CPU cores using `isolcpus`, `nohz_full`, `rcu_nocbs`, and `irqaffinity`. For a comprehensive list of CPU pinning techniques, refer to  <<cpu-pinning,CPU Pinning>> chapter.
 
 * Add `domain,nohz,managed_irq` flags to `isolcpus` kernel argument. Without any flags, `isolcpus` is equivalent to specifying only the `domain` flag. This isolates the specified CPUs from scheduling, including kernel tasks. The `nohz` flag stops the scheduler tick on the specified CPUs (if only one task is runnable on a CPU), and the `managed_irq` flag avoids routing managed external (device) interrupts at the specified CPUs. Note that the IRQ lines of NVMe devices are fully managed by the kernel and will be routed to the non-isolated (housekeeping) cores as a consequence. For example, the command line provided at the end of this section will result in only four queues (plus an admin/control queue) allocated on the system:
 
@@ -133,9 +132,12 @@ $ cat /proc/cmdline
 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=575291cf-74e8-42cf-8f2c-408a20dc00b8 skew_tick=1 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack amd_iommu=on iommu=pt irqaffinity=0-7 isolcpus=domain,nohz,managed_irq,8-127 nohz_full=8-127 rcu_nocbs=8-127 mce=off nohz=on net.ifnames=0 nowatchdog nmi_watchdog=0 nosoftlockup quiet rcu_nocb_poll rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll
 ----
 
-[#cpu-tuned-configuration]
-=== CPU pinning via Tuned and kernel args
+[#cpu-pinning]
+=== CPU Pinning
 
+CPU pinning, also known as processor affinity, is the technique of binding a process or thread to a specific CPU core, preventing the operating system's scheduler from moving it. By ensuring a process always runs on the same core, it benefits from faster access to data that remains in that core's cache memory. This practice is common in high-performance computing environments because it dramatically improves performance and reduces overhead.
+
+==== Isolating CPUs via TuneD
 `tuned` is a system tuning tool that monitors system conditions to optimize performance using various predefined profiles. A key feature is its ability to isolate CPU cores for specific workloads, like real-time applications. This prevents the OS from utilizing these cores and potentially increasing latency.
 
 To enable and configure this feature, the first thing is to create a profile for the CPU cores we want to isolate. In this example, among 64 cores, we dedicate 60 cores (`1-30,33-62`) for the application and remaining 4 cores are used for housekeeping. Note that the design of isolated CPUs heavily depends on the real-time applications.
@@ -150,6 +152,7 @@ $ tuned-adm profile cpu-partitioning
 Tuned (re)started, changes applied.
 ----
 
+==== Isolating CPUs via kernel arguments
 Then we need to modify the GRUB option to isolate CPU cores and other important parameters for CPU usage.
 The following options are important to be customized with your current hardware specifications:
 
@@ -231,6 +234,114 @@ There is another script that can be used to tune the CPU configuration, which ba
 * Delay the vmstat updates to 300 seconds.
 
 The script is available at https://raw.githubusercontent.com/suse-edge/telco-cloud-examples/refs/heads/{release-tag-telco-cloud}/telco-examples/edge-clusters/dhcp-less/eib/custom/files/performance-settings.sh[SUSE Telco Cloud Examples repository].
+
+==== Kubernetes Configuration for CPU Pinning
+
+===== RKE2 Versions < v1.32
+Enable CPU pinning in your RKE2 cluster by editing RKE2 config file. Add below kubelet arguments in `/etc/rancher/rke2/config.yaml` file. Make sure specifying the housekeeping CPU cores in `kubelet-reserved` and `system-reserved` arguments:
+
+[,yaml]
+----
+kubelet-arg:
+- "cpu-manager-policy=static"
+- "cpu-manager-policy-options=full-pcpus-only=true"
+- "cpu-manager-reconcile-period=0s"
+- "kubelet-reserved=cpu=0,31,32,63"
+- "system-reserved=cpu=0,31,32,63"
+----
+
+===== RKE2 Versions >= v1.32
+If your RKE2 version is v1.32 or higher, command-line arguments cannot be used to configure kubelet, following upstream Kubernetes practice. To set up CPU pinning, a kubelet config file needs to be created. Refer to https://documentation.suse.com/cloudnative/rke2/latest/en/install/configuration.html#_kubelet_configuration[RKE2 documentation].
+Create a new kubelet config file such as `01-cpu-pinning.conf` and place it in the `/var/lib/rancher/rke2/agent/etc/kubelet.conf.d/` directory:
+
+[,yaml]
+----
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cpuManagerPolicy: static
+reservedSystemCPUs: 0,31,32,63
+topologyManagerPolicy: single-numa-node
+----
+
+For configuration changes to take effect, a restart of the appropriate RKE2 service (server or agent) is required. This action will briefly interrupt RKE2 service on the host. Run only one of the following commands, depending on the node type:
+
+[,shell]
+----
+# If the node is RKE2 agent
+systemctl restart rke2-agent
+# Else if the node is RKE2 server
+systemctl restart rke2-server
+----
+
+==== Deploy Workloads Leveraging Pinned CPUs
+
+There are three ways to use the feature using the `Static Policy` defined in kubelet depending on the requests and limits you define on your workload:
+
+1. `BestEffort` QoS Class: If you do not define any request or limit for `CPU`, the pod is scheduled on the first `CPU` available on the system.
++
+An example of using the `BestEffort` QoS Class could be:
++
+[,yaml]
+----
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+----
++
+2. `Burstable` QoS Class: If you define a request for CPU, which is not equal to the limits, or there is no CPU request.
++
+Examples of using the `Burstable` QoS Class could be:
++
+[,yaml]
+----
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    resources:
+      limits:
+        memory: "200Mi"
+      requests:
+        memory: "100Mi"
+----
++
+or
++
+[,yaml]
+----
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    resources:
+      limits:
+        memory: "200Mi"
+        cpu: "2"
+      requests:
+        memory: "100Mi"
+        cpu: "1"
+----
++
+3.  `Guaranteed` QoS Class: If you define a request for CPU, which is equal to the limits.
++
+An example of using the `Guaranteed` QoS Class could be:
++
+[,yaml]
+----
+spec:
+  containers:
+    - name: nginx
+      image: nginx
+      resources:
+        limits:
+          memory: "200Mi"
+          cpu: "2"
+        requests:
+          memory: "200Mi"
+          cpu: "2"
+----
+
 
 [#cni-configuration]
 === CNI Configuration
@@ -773,7 +884,7 @@ $ kubectl get $(kubectl get nodes -oname) -o jsonpath='{.status.allocatable}' | 
   "ephemeral-storage": "256196109726",
   "hugepages-1Gi": "40Gi",
   "hugepages-2Mi": "0",
-  "intel.com/intel_fec_5g": "1",
+  "intel.com/intel_fec_5g": "16",
   "intel.com/intel_sriov_odu": "4",
   "intel.com/intel_sriov_oru": "4",
   "memory": "221396384Ki",
@@ -781,7 +892,7 @@ $ kubectl get $(kubectl get nodes -oname) -o jsonpath='{.status.allocatable}' | 
 }
 ----
 +
-* The `FEC` is `intel.com/intel_fec_5g` and the value is 1.
+* The `FEC` is `intel.com/intel_fec_5g` and the value is 16.
 * The `VF` is `intel.com/intel_sriov_odu` or `intel.com/intel_sriov_oru` if you deploy it with a device plug-in and the config map without Helm charts.
 
 [IMPORTANT]
@@ -1069,7 +1180,7 @@ $ transactional-update grub.cfg
 $ reboot
 ----
 
-* Load `vfio-pci` kernel module and enable `SR-IOV` on the `NICs`:
+* Load `vfio-pci` kernel module and enable `SR-IOV` on the NICs. First argument indicates `vfio-pci` driver to support SR-IOV, and second argument prevents the PCI device from entering a low-power state when it's idle:
 
 [,shell]
 ----
@@ -1123,13 +1234,16 @@ Network devices using kernel driver
 
 
 [#acceleration]
-=== vRAN acceleration (`Intel ACC100/ACC200`)
+=== vRAN Acceleration (`Intel ACC100/ACC200`)
 
-As communications service providers move from 4 G to 5 G networks, many are adopting virtualized radio access network (`vRAN`) architectures for higher channel capacity and easier deployment of edge-based services and applications. vRAN solutions are ideally located to deliver low-latency services with the flexibility to increase or decrease capacity based on the volume of real-time traffic and demand on the network.
+As communications service providers move from 4G to 5G networks, many are adopting virtualized radio access network (vRAN) architectures for higher channel capacity and easier deployment of edge-based services and applications. vRAN solutions are ideally located to deliver low-latency services with the flexibility to increase or decrease capacity based on the volume of real-time traffic and demand on the network.
 
-One of the most compute-intensive 4 G and 5 G workloads is RAN layer 1 (`L1`) `FEC`, which resolves data transmission errors over unreliable or noisy communication channels. `FEC` technology detects and corrects a limited number of errors in 4 G or 5 G data, eliminating the need for retransmission. Since the `FEC` acceleration transaction does not contain cell state information, it can be easily virtualized, enabling pooling benefits and easy cell migration.
+One of the most compute-intensive 4G and 5G workloads is RAN layer 1 (L1) `FEC`, which resolves data transmission errors over unreliable or noisy communication channels. `FEC` technology detects and corrects a limited number of errors in 4G or 5G data, eliminating the need for retransmission. Since the `FEC` acceleration transaction does not contain cell state information, it can be easily virtualized, enabling pooling benefits and easy cell migration.
 
-* Kernel parameters
+Historically, Intel provided the ACC100 vRAN Accelerator card to rapidly execute Layer 1 FEC algorithms, freeing up host processing power for the main CPU. Intel has since integrated this technology directly into newer CPUs, starting with Sapphire Rapids, under the name `Intel vRAN Boost` (also known as ACC200). Intel vRAN Boost act as an offload accelerator on the CPU itself, eliminating the need for a separate hardware card. This section details configuration of SUSE Telco Cloud for workloads to leverage ACC100 or Intel vRAN Boost.
+
+
+==== Kernel parameters
 
 To enable the `vRAN` acceleration, we need to enable the following kernel parameters (if not present yet):
 
@@ -1167,14 +1281,16 @@ To verify that the parameters are applied after the reboot, check the command li
 $ cat /proc/cmdline
 ----
 
-* Load vfio-pci kernel modules to enable the `vRAN` acceleration:
+==== Configure SR-IOV on FEC Accelerators
+
+* Load `vfio-pci` kernel module to enable vRAN acceleration. First argument indicates `vfio-pci` module to support SR-IOV, and second argument prevents the PCI device from entering a low-power state when it's idle.
 
 [,shell]
 ----
 $ modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
 ----
 
-* Get interface information Acc100:
+* Retrieve the PCI device address of FEC accelerator:
 
 [,shell]
 ----
@@ -1182,7 +1298,7 @@ $ lspci | grep -i acc
 8a:00.0 Processing accelerators: Intel Corporation Device 0d5c
 ----
 
-* Bind the physical interface (`PF`) with `vfio-pci` driver:
+* Bind the physical interface (PF) with `vfio-pci` driver:
 
 [,shell]
 ----
@@ -1191,19 +1307,20 @@ $ dpdk-devbind.py -b vfio-pci 0000:8a:00.0
 
 * Create the virtual functions (`VFs`) from the physical interface (`PF`).
 
-Create 2 `VFs` from the `PF` and bind with `vfio-pci` following the next steps:
+Check the maximum VF capacity of the accelerator card. Next, configure the card to expose the desired number of VFs, not exceeding the maximum number. In this example, we configure the card for its full capacity of 16 VFs:
 
 [,shell]
 ----
-$ echo 2 > /sys/bus/pci/devices/0000:8a:00.0/sriov_numvfs
-$ dpdk-devbind.py -b vfio-pci 0000:8b:00.0
+$ cat /sys/bus/pci/devices/0000:8a:00.0/sriov_totalvfs
+16
+$ echo 16 > /sys/bus/pci/devices/0000:8a:00.0/sriov_numvfs
 ----
 
-* Configure acc100 with the proposed configuration file:
+* Configure the acclerator card and its virtual functions with a 5G profile. A unique VF token (UUID) must be provided. The workload would consume this VF token to utilize the card's FEC acceleration capabilities:
 
 [,shell]
 ----
-$ pf_bb_config ACC100 -c /opt/pf-bb-config/acc100_config_vf_5g.cfg
+$ pf_bb_config ACC100 -c /opt/pf-bb-config/acc100_config_vf_5g.cfg -v 00112233-4455-6677-8899-aabbccddeeff
 Tue Jun  6 10:49:20 2023:INFO:Queue Groups: 2 5GUL, 2 5GDL, 2 4GUL, 2 4GDL
 Tue Jun  6 10:49:20 2023:INFO:Configuration in VF mode
 Tue Jun  6 10:49:21 2023:INFO: ROM version MM 99AD92
@@ -1212,7 +1329,7 @@ Tue Jun  6 10:49:21 2023:INFO:PF ACC100 configuration complete
 Tue Jun  6 10:49:21 2023:INFO:ACC100 PF [0000:8a:00.0] configuration complete!
 ----
 
-* Check the new VFs created from the FEC PF:
+* Verify the new VFs created from the FEC PF. Note that the VFs got `0d5d` device ID. This information is required in next step to expose these VFs as Kubernetes resource:
 
 [,shell]
 ----
@@ -1226,6 +1343,10 @@ Other Baseband devices
 ======================
 0000:8b:00.1 'Device 0d5d' unused=
 ----
+
+==== Configure Kubernetes for FEC Acceleration
+The final step is exposing the VFs to Kubernetes with help of SR-IOV device plugin. Create a ConfigMap using the VFs' deviceID gathered from previous step, and install SR-IOV device plugin. Once Kubernetes nodes display the FEC VFs as `Allocatable` resources, the cluster is ready for the workloads to enjoy the FEC acceleration. Follow the steps of Option 1 in <<sriov>> chapter.
+
 
 [#huge-pages]
 === Huge pages
@@ -1319,94 +1440,6 @@ volumes:
 ...
 ----
 
-[#cpu-pinning-kubernetes]
-=== CPU pinning on Kubernetes
-
-==== Prerequisite
-Must have the `CPU` tuned to the performance profile covered in this <<cpu-tuned-configuration,section>>.
-
-==== Configure Kubernetes for CPU Pinning
-Configure kubelet arguments to implement CPU management in the `RKE2` cluster. Add the following configuration block such as below example to your `/etc/rancher/rke2/config.yaml` file. Make sure specifying the housekeeping CPU cores in `kubelet-reserved` and `system-reserved` arguments:
-
-[,yaml]
-----
-kubelet-arg:
-- "cpu-manager-policy=static"
-- "cpu-manager-policy-options=full-pcpus-only=true"
-- "cpu-manager-reconcile-period=0s"
-- "kubelet-reserved=cpu=0,31,32,63"
-- "system-reserved=cpu=0,31,32,63"
-----
-
-
-==== Leveraging Pinned CPUs for Workloads
-
-There are three ways to use that feature using the `Static Policy` defined in kubelet depending on the requests and limits you define on your workload:
-
-1. `BestEffort` QoS Class: If you do not define any request or limit for `CPU`, the pod is scheduled on the first `CPU` available on the system.
-+
-An example of using the `BestEffort` QoS Class could be:
-+
-[,yaml]
-----
-spec:
-  containers:
-  - name: nginx
-    image: nginx
-----
-+
-2. `Burstable` QoS Class: If you define a request for CPU, which is not equal to the limits, or there is no CPU request.
-+
-Examples of using the `Burstable` QoS Class could be:
-+
-[,yaml]
-----
-spec:
-  containers:
-  - name: nginx
-    image: nginx
-    resources:
-      limits:
-        memory: "200Mi"
-      requests:
-        memory: "100Mi"
-----
-+
-or
-+
-[,yaml]
-----
-spec:
-  containers:
-  - name: nginx
-    image: nginx
-    resources:
-      limits:
-        memory: "200Mi"
-        cpu: "2"
-      requests:
-        memory: "100Mi"
-        cpu: "1"
-----
-+
-3.  `Guaranteed` QoS Class: If you define a request for CPU, which is equal to the limits.
-+
-An example of using the `Guaranteed` QoS Class could be:
-+
-[,yaml]
-----
-spec:
-  containers:
-    - name: nginx
-      image: nginx
-      resources:
-        limits:
-          memory: "200Mi"
-          cpu: "2"
-        requests:
-          memory: "200Mi"
-          cpu: "2"
-----
 
 [#numa-aware-scheduling]
 === NUMA-aware scheduling
