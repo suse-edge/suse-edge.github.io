@@ -1,0 +1,344 @@
+[#component-kiosk]
+= Building Kiosks with SUSE Edge
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+
+Many times workloads running in edge environments need to have a way for users to interact with them through a graphical interface. To enable these workloads in SUSE Edge, we provide a set of containers and a helm chart to run your graphical applications within K3s or RKE2. 
+
+Running your kiosk (or other HID) applications this way allows for more explicit security boundaries along with allowing for a wider range of languages/frameworks when building your app.
+
+In this guide, we will demonstrate how to manage these workloads in a secure, scalable, and maintainable way. 
+
+== Architecture
+
+image::kiosk-architecture.png[]
+
+The Kubernetes Pod contains the three containers (X11, PulseAudio, and the workload itself)
+
+The workload communicates with both the X11 and PulseAudio containers through a unix socket that's created in EmptyDir to allow communication between containers. They also use an EmptyDir to share the Xauthority token.
+
+Both the PulseAudio and X11 containers use udev to communicate with the hardware. (That's a slight oversimplification...)
+
+== Prerequisites
+
+To run this, you will need a SUSE Edge cluster with latest version available and a display attached 
+
+NOTE: when running in a VM, make sure to use a virtual display instead of the "console" output
+
+== Deployment
+
+The preferred way to deploy the kiosk solution on Kubernetes is through the provided helm chart.
+
+Install the chart by running:
+
+[,bash] 
+----
+helm upgrade --install kiosk --namespace kiosk --create-namespace oci://registry.suse.com/suse/kiosk/kiosk-chart --version=1.0.0
+----
+
+To change the URL that's loaded:
+
+[,bash] 
+----
+helm upgrade --install kiosk --namespace kiosk --create-namespace oci://registry.suse.com/suse/kiosk/kiosk-chart --version=1.0.0 --set workload.url=http://<svcname>.svc.<namespace>.cluster.local
+----
+
+=== Deployment in K3s with the HelmChart Resource
+
+If you are using k3s, you can use this yaml to deploy the chart for you: 
+
+[,yaml]
+----
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: kiosk-chart
+  namespace: kube-system
+spec:
+  chart: oci://registry.suse.com/suse/kiosk/kiosk-chart
+  targetNamespace: kiosk
+  createNamespace: true
+  valuesContent:
+    workload:
+      url: "http://<svcname>.svc.<namespace>.cluster.local"
+----
+
+== Custom Workloads
+
+By default, the helm chart runs Firefox in kiosk mode and uses the `workload.url` value to specify what page to load. 
+
+If you want to replace Firefox with your own application, you need to build your application into an OCI container image then specify it through the `workload.image.repository` and `workload.image.tag` values. 
+
+The application container needs the appropriate libraries to be able to communicate with X11. As an example, here are the libraries required for Electron apps:
+
+- `libX11-xcb1`
+- `libgtk-3-0`
+- `mozilla-nss`
+- `xorg-x11-fonts`
+- `libpulse0`
+- `libavcodec58`
+- `libasound2`
+- `libgbm1`
+- `libxshmfence1`
+- `libdrm`
+- `libgdm1`
+
+
+== Flow of Display Control on System Boot
+
+When the server is starting up, here's the order of which components control what's being shown on the display.
+
+- UEFI (Firmware)
+
+The first thing you see is determined by the system's firmware. Different system manufacturers provide more or less control over this portion of the process.
+
+- Grub Bootloader
+
+Grub then takes over from the firmware and shows the boot menu. This step can be branded or skipped depending on needs as shown 
+
+- Linux Framebuffer device
+
+Once the system starts booting and execution is handed from the bootloader to the linux kernel, the system will start displaying logs or other basic graphics. The logs can be removed by adding `quiet` to the kernel arguments and we can write an image directly to the framebuffer.
+
+- X11 
+
+When X11 starts up, it will take over the display and show a desktop. When we don't run a taskbar or any applications, you will only see the background. By replacing the background, you can change what's displayed while the application is starting.
+
+This can be done with 
+
+- Application
+
+Lastly, the application itself will be composited on top of the background. For most kiosk applications, you will likely want to have this be fullscreen so the background becomes hidden.
+
+
+== Customizations
+
+=== Adjusting what's displayed during boot
+
+There are several parts of the boot process that can be branded based on your individual needs.
+
+The Grub2 menu can be bypassed or branded as show in [https://documentation.suse.com/sles/15-SP6/html/SLES-all/cha-grub2.html] 
+
+Adding `quiet` to your kernel bootargs will remove the text that is seen on boot of linux systems.
+
+Masking `console-getty.service` and `getty@tty1.service` will remove the login prompt. 
+
+Doing both of these will show a blank screen with a flashing cursor in the top-left corner. 
+
+How to show something on screen between the GRUB splash screen and X11 starting up is dependant on what hardware you are using. If your system has a framebuffer, you could use `plymouth` or just `cat` a raw framebuffer file to `/dev/fb0`. (Check out https://github.com/zqb-all/convertfb for a tool on converting images to the right format)
+
+=== Turning off key combinations
+
+To disallow closing the application or otherwise tampering with the kiosk, it can be useful to remap or turn off certain keys. This can be done using (xmodmap)[https://linux.die.net/man/1/xmodmap]
+
+The helm chart allows for customizing this file with values that looks like this: 
+
+[,yaml]
+```
+X11:
+  keyboardModMap: |
+    clear control
+    clear mod1
+    clear mod2 
+    clear mod3
+    clear mod4
+    clear mod5
+    keycode  66 =
+    keycode 108 =
+    keycode 133 =
+    keycode 134 =
+    keycode 150 =
+    keycode 204 =
+    keycode 205 =
+    keycode 206 =
+    keycode 207 =
+```
+
+=== Accessing services from the GUI workload
+
+Like any kubernetes workload, the kiosk workload can access resources that are available to the pod. This includes other services in the same kubernetes cluster through `<svc_name>.<ns>.<svc>.cluster.local` and can be controlled through the cluster's NetworkPolicies.
+
+Note: If you need to access services on the node that are outside of the cluster (such as Cockpit for local administration), you need to either know your node's ip address or provide a loopback address that's not already assigned. For example, you could add the non-routable address of `172.16.0.1` to each of your nodes' `lo` device.
+
+The helm chart allows for adding additional hostname resolution in case your workload needs to refer to static ip addresses:
+
+[,yaml]
+```
+hostAliases:
+- hostnames:
+  - "cockpit.local"
+  ip: "172.16.0.1"
+```
+
+=== Connecting to a service that uses self signed certs
+
+If your UI needs to load from locations that are secured with self-signed certificates, this is complicated by Chromium (and related stacks such as Electron) using it's own trust store for certificates so you need to load a new one in separately.
+
+To do this, you can build a generic secret with an nssdb files with a script that looks like this:
+
+[,yaml]
+```
+#!/bin/bash
+export NSSDB=/tmp/cert/nssdb
+
+
+# Create new self-signed cert
+openssl req -x509 -sha256 -days 36500 -keyout mycert.key -out mycert.crt -nodes -subj "/C=US/ST=CA/O=OC/OU=Org/CN=myhost.local" -addext "subjectAltName = DNS:myhost.local"
+
+# Create P12 cert from self-signed
+openssl pkcs12 -export -out mycert.p12 -inkey mycert.key -in mycert.crt -passout pass: -name mycert
+
+# Create NSSDB files 
+mkdir -p $NSSDB
+certutil -d sql:$NSSDB -N --empty-password 
+
+# Import P12 cert to NSSDB and add permissions
+pk12util -d sql:$NSSDB -i mycert.p12 -W ""
+certutil -d sql:$NSSDB -M -n "mycert" -t "TCu,,"
+
+# Create secret from files on disk
+kubectl create secret generic nssdb -n kiosk --from-file=$NSSDB
+```
+
+Then add the following to your helm values:
+
+[,yaml]
+```
+workload: 
+  nssdbSecretName: nssdb
+```
+
+=== Forcing a specific resolution
+
+Most displays will negotiate the best resolution possible but sometimes you may want to force a specific resolution. To achieve this, you can overwrite the script that does the display setup with the xinitrcOverride helm value:
+
+[,yaml]
+```
+X11:
+  xinitrcOverride: |
+    #!/bin/bash
+    xset -dpms
+    xset s off
+    xset s noblank
+    DISPLAY=:0
+
+    # Don't edit this part
+    [ ! -d "/home/user/xauthority" ] && mkdir -p "/home/user/xauthority"
+    touch /home/user/xauthority/.xauth
+    xauth -i -f /home/user/xauthority/.xauth generate $DISPLAY . trusted timeout 0
+    chown -R user:users /home/user/xauthority
+
+    # Get output name (assumes a single display)
+    OUTPUT=`xrandr |grep "\ connected" | cut -d " " -f1`
+
+    # Set resolution
+    xrandr --output $OUTPUT --mode 1920x1080
+
+    ( [ -f ~/.Xmodmap ] ) && xmodmap ~/.Xmodmap
+
+    exec icewm-session-lite
+```
+
+=== Changing /dev/shm size
+
+By default, the chart mounts in an in-memory tmpfs to be used by the application. The limit for this volume is set to 256Mi but can be adjusted with the following helm values:
+
+[,yaml]
+```
+workload:
+  shm:
+    sizeLimit: <the limit you want>
+```
+
+If you don't want or need this volume for your application, you can disable it with:
+
+[,yaml]
+```
+workload:
+  shm:
+    enabled: false
+```
+
+
+=== Running additional sidecars in the same pod
+
+If you have additional workloads that need to get run as sidecars for your GUI application, you can do that by adding them to the `additionalContainers` section in the values file. If the container needs access to the display, you can achieve that with `accessDisplay: true`. 
+
+
+An example of where this can be useful is when doing development work on a GUI application. It may be needed to run inside VMs that wouldn't have a display attached. We can get around this issue by adding a VNC server. (Please note that this is not recommended in production environments due to potential security issues)
+
+To add a VNC server, install the helm chart with the following values included:
+
+[,yaml]
+```
+additionalContainers:
+- name: vnc
+  image:
+    repository: registry.opensuse.org/home/atgracey/wallboardos/15.6/vnc
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  ports:
+    - name: vnc
+      targetPort: 5900
+      servicePort: 5900
+  accessDisplay: true
+```
+
+Then, from the computer you want to connect from, run:
+
+`kubectl port-forward 5900:5900 svc/svc-vnc -n kiosk`
+
+You should now be able to connect your VNC client to localhost:5900
+
+=== Installing with with Edge Image Builder 
+
+To build a full stack kiosk installation image, you can use Edge Image Builder (EIB) with the following steps:
+
+1. Setup a basic EIB project according to the documentation at [https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md]
+
+2. Add the kubernetes version you want to run along with the helm chart to your eib config.yaml:
++
+```
+kubernetes:
+  version: {version-kubernetes-k3s}
+  helm:
+    charts:
+      - name: metallb
+        releaseName: metallb-deployment
+        version: 1.0.1
+        repositoryName: suse-kiosk
+        valuesFile: kiosk-values.yaml
+        targetNamespace: kiosk
+        createNamespace: true
+    repositories:
+      - name: suse-kiosk
+        url: oci://registry.suse.com/suse/kiosk
+```
+
+3. Add your values file at `kubernetes/helm/values/kiosk-values.yaml`
++
+[,yaml]
+```
+workload:
+  url: https://www.youtube.com/watch?v=Y5-dnGqbrDQ
+```
+
+4. Build the image with 
++
+[,bash]
+```
+podman run --rm -it -v $PWD:/eib \
+  registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+  build --definition-file config.yaml
+```
+
+You can then burn and boot the resulting image to setup a single node k8s cluster running a kiosk workload.
