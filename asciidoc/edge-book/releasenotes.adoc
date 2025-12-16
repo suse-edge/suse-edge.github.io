@@ -1,7 +1,7 @@
 [#release-notes]
 
 = Abstract
-:revdate: 2025-09-25
+:revdate: 2025-12-17
 :page-revdate: {revdate}
 ifdef::env-github[]
 :imagesdir: ../images/
@@ -31,6 +31,187 @@ Entries are only listed once, but they can be referenced in several places if th
 However, repeated entries are provided as a courtesy only. Therefore, if you are skipping one or more releases, check the release notes of the skipped releases also. If you are only reading the release notes of the current release, you could miss important changes that may affect system behavior. SUSE Edge versions are defined as x.y.z, where 'x' denotes the major version, 'y' denotes the minor, and 'z' denotes the patch version, also known as the "z-stream". SUSE Edge product lifecycles are defined based around a given minor release, e.g. "3.4", but ship with subsequent patch updates through its lifecycle, e.g. "3.4.1".
 
 NOTE: SUSE Edge z-stream releases are tightly integrated and thoroughly tested as a versioned stack. Upgrade of any individual components to a different versions to those listed above is likely to result in system downtime. While it's possible to run Edge clusters in untested configurations, it is not recommended, and it may take longer to provide resolution through the support channels.
+
+[#release-notes-3-4-2]
+= Release 3.4.2
+
+Availability Date: 17th December 2025
+
+Full Support End Date: 20th March 2026
+
+Maintenance Support End Date: 20th September 2027
+
+EOL: 21st September 2027
+
+Summary: SUSE Edge 3.4.2 is the second z-stream release in SUSE Edge 3.4 release stream
+
+== New Features
+
+* Updated to Rancher Prime 2.12.4 https://github.com/rancher/rancher/releases/tag/v2.12.4[Release Notes]
+* Updated to SUSE Security (Neuvector) 5.4.8 https://open-docs.neuvector.com/releasenotes/5x#548-december-2025[Release Notes]
+* Updated to SUSE Storage (Longhorn) 1.9.2 https://longhorn.io/docs/1.9.2/important-notes/[Release Notes]
+* Edge Image Builder has been updated to 1.3.1, see https://github.com/suse-edge/edge-image-builder/blob/release-1.3/RELEASE_NOTES.md[Upstream Release Notes]
+* Updated Rancher Turtles, Kiwi Builder, NM Configurator, Metal3/IPA/Ironic versions
+
+== Bug & Security Fixes
+
+* SUSE Security (Neuvector) 5.4.8 contains several bugfixes https://open-docs.neuvector.com/releasenotes/5x/#548-december-2025[Upstream Neuvector Bug Fixes]
+* SUSE Storage (Longhorn) 1.9.2 contains several bugfixes https://github.com/longhorn/longhorn/releases/tag/v1.9.2[Upstream Longhorn Bug Fixes]
+* EIB (edge-image-builder) 1.3.1 contains a fix for elemental cluster deletions https://github.com/suse-edge/edge-image-builder/issues/808[EIB Bug Fix]
+* Metal3 0.12.9 contains several bugfixes for LACP issue with some intel NICs and the addition of some environment variables to tune TLS cipher suite to overcome BMC issues.
+* NMC (nm-configurator) 0.3.5 contains several bugfixes https://github.com/suse-edge/nm-configurator/releases/tag/v0.3.5[NMC Bug Fixes]
+* Kiwi Builder 10.2.12.1 adds iptables as this is required when deploying RKE2
+
+== Known Issues
+
+[WARNING]
+====
+If deploying new clusters, please follow <<guides-kiwi-builder-images>> to build fresh images first as this is now the first step required to create clusters for both {x86-64} and {aarch64} architectures as well as management and downstream clusters.
+====
+
+* When deploying via Edge Image Builder, `HelmChartConfigs` manifests may fail if they are put in the `kubernetes/manifests` configuration directory. Instead it is reccomended to place any `HelmChartConfigs` in `/var/lib/rancher/{rke2/k3s}/server/manifests/` using the EIB os-files interface, see <<mgmt-cluster-directory-structure>> for example.  Failure to do this may cause nodes to stay in `NotReady` state on initial startup, as discussed in https://github.com/rancher/rke2/issues/8357[#8357 RKE2 issue]
+
+* On RKE2/K3s 1.31, 1.32 and 1.33 versions, the directory `/etc/cni` being used to store CNI configurations may not trigger a notification of the files being written there to `containerd` due to certain conditions related to `overlayfs` (see the https://github.com/rancher/rke2/issues/8356[#8356 RKE2 issue]). This in turn results in the deployment of RKE2/K3s to get stuck waiting for the CNI to start, and the RKE2/K3s nodes to stay in `NotReady` state. This can be seen at node level with `kubectl describe node <affected_node>`:
+
+[,bash]
+----
+Conditions:
+  Type   Status  LastHeartbeatTime                LastTransitionTime               Reason           Message
+  ----   ------  -----------------                ------------------               ------           -------
+  Ready  False   Thu, 05 Jun 2025 17:41:28 +0000  Thu, 05 Jun 2025 14:38:16 +0000  KubeletNotReady  container runtime network not ready: NetworkReady=false reason:NetworkPluginNotReady message:Network plugin returns error: cni plugin not initialized
+----
+
+As a workaround, a tmpfs volume can be mounted at the `/etc/cni` directory before RKE2 starts. It avoids the usage of overlayfs which results in containerd missing notifications and the configs should get rewritten every time the node is restarted and the pods initcontainers run again. If using EIB, this can be a `04-tmpfs-cni.sh` script in the `custom/scripts` directory (as explained here[https://github.com/suse-edge/edge-image-builder/blob/release-1.2/docs/building-images.md#custom]) that looks like:
+
+[,bash]
+----
+#!/bin/bash
+mkdir -p /etc/cni
+mount -t tmpfs -o mode=0700,size=5M tmpfs /etc/cni
+echo "tmpfs /etc/cni tmpfs defaults,size=5M,mode=0700 0 0" >> /etc/fstab
+----
+
+* When onboarding remote hosts using Elemental, a race condition between `dbus.service` and `elemental-system-agent.service` might occur, resulting in `rancher-system-agent.service` on remote host to fail starting with errors similar to the one below. (see the https://github.com/suse-edge/edge-image-builder/issues/784[#784 Edge Image Builder issue] for details.)
+
+[,bash]
+----
+Sep 19 19:38:07 elementalvm elemental-system-agent[3671]: time="2025-09-19T19:38:07Z" level=info msg="[6b20fe64c854da2639804884b34129bb8f718eb59578111da58d9de1509c24db_1:stderr]: Failed to restart rancher-system-agent.service: Message recipient disconnected from message bus without replying"
+----
+
+As a workaround, a systemd override file can be created as below
+
+[,bash]
+----
+[Unit]
+Wants=dbus.service network-online.target
+After=dbus.service network-online.target time-sync.target
+
+[Service]
+ExecStartPre=/bin/bash -c 'echo "Waiting for dbus to become active..." | systemd-cat -p info -t elemental-system-agent; sleep 15; timeout 300 bash -c "while ! systemctl is-active --quiet dbus.service; do sleep 15; done"'
+----
+
+and a custom script named `30a-copy-elemental-system-agent-override.sh` can be used to place the override to `/etc/systemd/system/elemental-system-agent.service.d` prior to EIB's https://github.com/suse-edge/edge-image-builder/blob/main/pkg/combustion/templates/31-elemental-register.sh.tpl[31-elemental-register.sh] script runs during the combustion phase.
+
+[,bash]
+----
+#!/bin/bash
+
+/bin/mkdir -p /etc/systemd/system/elemental-system-agent.service.d
+/bin/cp -f elemental-system-agent-override.conf /etc/systemd/system/elemental-system-agent.service.d/override.conf
+----
+
+== Component Versions
+
+The following table describes the individual components that make up the 3.4.1 release, including the version, the Helm chart version (if applicable), and from where the released artifact can be pulled in the binary format. Please follow the associated documentation for usage and deployment examples.
+
+|======
+| Name | Version | Helm Chart Version | Artifact Location (URL/Image)
+| SUSE Linux Micro | 6.1 (latest) | N/A | https://www.suse.com/download/sle-micro/[SUSE Linux Micro Download Page] +
+SL-Micro.x86_64-6.1-Base-SelfInstall-GM.install.iso (sha256 70b9be28f2d92bc3b228412e4fc2b1d5026e691874b728e530b8063522158854) +
+SL-Micro.x86_64-6.1-Base-RT-SelfInstall-GM.install.iso (sha256 9ce83e4545d4b36c7c6a44f7841dc3d9c6926fe32dbff694832e0fbd7c496e9d) +
+SL-Micro.x86_64-6.1-Base-GM.raw.xz (sha256 36e3efa55822113840dd76fdf6914e933a7b7e88a1dce5cb20c424ccf2fb4430) +
+SL-Micro.x86_64-6.1-Base-RT-GM.raw.xz (sha256 2ee66735da3e1da107b4878e73ae68f5fb7309f5ec02b5dfdb94e254fda8415e) +
+| SUSE Multi-Linux Manager | 5.0.5 | N/A | https://www.suse.com/download/suse-manager/[SUSE Multi-Linux Manager Download Page]
+| K3s | 1.33.5 | N/A | https://github.com/k3s-io/k3s/releases/tag/v1.33.5%2Bk3s1[Upstream K3s Release]
+| RKE2 | 1.33.5 | N/A | https://github.com/rancher/rke2/releases/tag/v1.33.5%2Brke2r1[Upstream RKE2 Release]
+s| SUSE Rancher Prime s| 2.12.4 s| 2.12.4 | https://charts.rancher.com/server-charts/prime/index.yaml[Rancher Prime Helm Repository] +
+https://prime.ribs.rancher.io/rancher/v2.12.4/rancher-images.txt[Rancher 2.12.4 Container Images]
+s| SUSE Storage (Longhorn) s| 1.9.2 s| 107.1.1+up1.9.2 | https://charts.rancher.io/index.yaml[Rancher Charts Helm Repository] +
+registry.suse.com/rancher/mirrored-longhornio-csi-attacher:v4.9.0-20250709 +
+registry.suse.com/rancher/mirrored-longhornio-csi-provisioner:v5.3.0-20250709 +
+registry.suse.com/rancher/mirrored-longhornio-csi-resizer:v1.14.0-20250709 +
+registry.suse.com/rancher/mirrored-longhornio-csi-snapshotter:v8.3.0-20250709 +
+registry.suse.com/rancher/mirrored-longhornio-csi-node-driver-registrar:v2.14.0-20250709 +
+registry.suse.com/rancher/mirrored-longhornio-livenessprobe:v2.16.0-20250709 +
+registry.suse.com/rancher/mirrored-longhornio-backing-image-manager:v1.9.2 +
+registry.suse.com/rancher/mirrored-longhornio-longhorn-engine:v1.9.2 +
+registry.suse.com/rancher/mirrored-longhornio-longhorn-instance-manager:v1.9.2 +
+registry.suse.com/rancher/mirrored-longhornio-longhorn-manager:v1.9.2 +
+registry.suse.com/rancher/mirrored-longhornio-longhorn-share-manager:v1.9.2 +
+registry.suse.com/rancher/mirrored-longhornio-longhorn-ui:v1.9.2 +
+registry.suse.com/rancher/mirrored-longhornio-support-bundle-kit:v0.0.61 +
+registry.suse.com/rancher/mirrored-longhornio-longhorn-cli:v1.9.2 +
+s| SUSE Security s| 5.4.8 s| 107.0.3+up2.8.10 | https://charts.rancher.io/index.yaml[Rancher Charts Helm Repository] +
+registry.suse.com/rancher/neuvector-controller:5.4.8 +
+registry.suse.com/rancher/neuvector-enforcer:5.4.8 +
+registry.suse.com/rancher/neuvector-manager:5.4.8 +
+registry.suse.com/rancher/neuvector-compliance-config:1.0.9 +
+registry.suse.com/rancher/neuvector-registry-adapter:0.1.8 +
+registry.suse.com/rancher/neuvector-scanner:6 +
+registry.suse.com/rancher/neuvector-updater:0.0.4
+s| Rancher Turtles (CAPI) s| 0.24.3 s| 304.0.7+up0.24.3 | registry.suse.com/edge/charts/rancher-turtles:304.0.7_up0.24.3 +
+registry.rancher.com/rancher/rancher/turtles:v0.24.3 +
+registry.rancher.com/rancher/cluster-api-metal3-controller:v1.10.2 +
+registry.rancher.com/rancher/cluster-api-metal3-ipam-controller:v1.10.2 +
+registry.suse.com/rancher/cluster-api-controller:v1.10.5 +
+registry.suse.com/rancher/cluster-api-provider-rke2-bootstrap:v0.20.1 +
+registry.suse.com/rancher/cluster-api-provider-rke2-controlplane:v0.20.1
+s| Rancher Turtles Airgap Resources s| 0.24.3 | 304.0.7+up0.24.3 | registry.suse.com/edge/charts/rancher-turtles-airgap-resources:304.0.7_up0.24.3
+s| Metal^3^ s| 0.12.9 | 304.0.19+up0.12.9 | registry.suse.com/edge/charts/metal3:304.0.19_up0.12.9 +
+registry.suse.com/edge/3.4/baremetal-operator:0.10.4 +
+registry.suse.com/edge/3.4/ironic:29.0.4.4 +
+registry.suse.com/edge/3.4/ironic-ipa-downloader:3.0.10 +
+| MetalLB | 0.14.9 | 304.0.0+up0.14.9 | registry.suse.com/edge/charts/metallb:304.0.0_up0.14.9 +
+registry.suse.com/edge/3.4/metallb-controller:v0.14.9 +
+registry.suse.com/edge/3.4/metallb-speaker:v0.14.9 +
+registry.suse.com/edge/3.4/frr:8.5.6 +
+registry.suse.com/edge/3.4/frr-k8s:v0.0.16 +
+registry.suse.com/edge/3.4/kube-rbac-proxy:0.18.1
+| Elemental | 1.7.3 | 1.7.3 | registry.suse.com/rancher/elemental-operator-chart:1.7.3 +
+registry.suse.com/rancher/elemental-operator-crds-chart:1.7.3 +
+registry.suse.com/rancher/elemental-operator:1.7.3
+| Elemental Dashboard Extension | 3.0.1 | 3.0.1 | link:https://github.com/rancher/ui-plugin-charts/tree/4.0.0/charts/elemental/3.0.1[Elemental Extension Helm Chart]
+s| Edge Image Builder s| 1.3.1 | N/A s| registry.suse.com/edge/3.4/edge-image-builder:1.3.1
+s| NM Configurator s| 0.3.5 | N/A s| https://github.com/suse-edge/nm-configurator/releases/tag/v0.3.5[NMConfigurator Upstream Release]
+| KubeVirt | 1.5.2 | 304.0.1+up0.6.0 | registry.suse.com/edge/charts/kubevirt:304.0.1_up0.6.0 +
+registry.suse.com/suse/sles/15.7/virt-operator:1.5.2 +
+registry.suse.com/suse/sles/15.7/virt-api:1.5.2 +
+registry.suse.com/suse/sles/15.7/virt-controller:1.5.2 +
+registry.suse.com/suse/sles/15.7/virt-exportproxy:1.5.2 +
+registry.suse.com/suse/sles/15.7/virt-exportserver:1.5.2 +
+registry.suse.com/suse/sles/15.7/virt-handler:1.5.2 +
+registry.suse.com/suse/sles/15.7/virt-launcher:1.5.2
+| KubeVirt Dashboard Extension | 1.3.2 | 304.0.3+up1.3.2 | registry.suse.com/edge/charts/kubevirt-dashboard-extension:304.0.3_up1.3.2
+| Containerized Data Importer | 1.62.0 | 304.0.1+up0.6.0 | registry.suse.com/edge/charts/cdi:304.0.1_up0.6.0 +
+registry.suse.com/suse/sles/15.7/cdi-operator:1.62.0 +
+registry.suse.com/suse/sles/15.7/cdi-controller:1.62.0 +
+registry.suse.com/suse/sles/15.7/cdi-importer:1.62.0 +
+registry.suse.com/suse/sles/15.7/cdi-cloner:1.62.0 +
+registry.suse.com/suse/sles/15.7/cdi-apiserver:1.62.0 +
+registry.suse.com/suse/sles/15.7/cdi-uploadserver:1.62.0 +
+registry.suse.com/suse/sles/15.7/cdi-uploadproxy:1.62.0
+| Endpoint Copier Operator | 0.3.0 | 304.0.1+up0.3.0 | registry.suse.com/edge/charts/endpoint-copier-operator:304.0.1_up0.3.0 +
+registry.suse.com/edge/3.4/endpoint-copier-operator:0.3.0
+| SR-IOV Network Operator | 1.5.0 | 304.0.2+up1.5.0 | registry.suse.com/edge/charts/sriov-network-operator:304.0.2_up1.5.0 +
+registry.suse.com/edge/charts/sriov-crd:304.0.2_up1.5.0
+| System Upgrade Controller | 0.16.0 | 107.0.0 | https://charts.rancher.io/index.yaml[Rancher Charts Helm Repository] +
+registry.suse.com/rancher/system-upgrade-controller:v0.16.0
+| Upgrade Controller | 0.1.1 | 304.0.1+up0.1.1 | registry.suse.com/edge/charts/upgrade-controller:304.0.1_up0.1.1 +
+registry.suse.com/edge/3.4/upgrade-controller:0.1.1 +
+registry.suse.com/edge/3.4/kubectl:1.33.4 +
+registry.suse.com/edge/3.4/release-manifest:3.4.2
+s| Kiwi Builder s| 10.2.12.1 | N/A s| registry.suse.com/edge/3.4/kiwi-builder:10.2.12.1
+|======
 
 [#release-notes-3-4-1]
 = Release 3.4.1
@@ -208,8 +389,6 @@ registry.suse.com/edge/3.4/kubectl:1.33.4 +
 registry.suse.com/edge/3.4/release-manifest:3.4.1
 | Kiwi Builder | 10.2.12.0 | N/A | registry.suse.com/edge/3.4/kiwi-builder:10.2.12.0
 |======
-
-
 
 [#release-notes-3-4-0]
 = Release 3.4.0
