@@ -15,6 +15,35 @@ endif::[]
 
 This section covers the lifecycle management actions for clusters deployed via SUSE Telco Cloud.
 
+=== Load Balancer Exclusion
+There are many lifecycle actions that require worker nodes to be drained. During
+the draining process all pods will be moved to other worker nodes in the
+cluster. This leaves a node that is not hosting any services and therefore
+should not have any traffic routed to it by external load balancers. In order to make
+external load balancers aware of a worker node not being able to provide any
+service a label can be applied to the node:
+[,yaml]
+----
+node.kubernetes.io/exclude-from-external-load-balancers: "true"
+----
+In the case of upgrades of downstream clusters this can be automated by
+annotating the RKE2ControlPlane on the management cluster with the annotation:
+[,yaml]
+----
+rke2.controlplane.cluster.x-k8s.io/load-balancer-exclusion="true"
+----
+
+This will immediately create an annotation:
+[,yaml]
+----
+pre-drain.delete.hook.machine.cluster.x-k8s.io/rke2-lb-exclusion: ""
+----
+on all machines object on the management cluster for that RKE2ControlPlane. +
+With this annotation on the machine objects, any node on the downstream cluster
+that is scheduled for draining will get the above node label attached prior to
+the draining process starting. The label will be removed from the node once it
+is available and ready again. 
+
 === Management cluster upgrades
 
 The upgrade of the management cluster is described in the `Day 2` <<day2-mgmt-cluster, management cluster>> documentation.
@@ -123,6 +152,29 @@ spec:
         format: raw
         url: http://imagecache.local:8080/${NEW_IMAGE_GENERATED}.raw
 ----
+
+Before applying the `capi-provisioning-example.yaml` file it is always good
+practice to inform external load balancers about worker nodes being drained so
+that they do not route traffic to nodes in this state. As mentioned in the
+<<Load Balancer Exclusion>> you can automate this by annotating the
+RKE2ControlPlane on the management cluster. In this examample an
+RKE2ControlPlane object called multinode-cluster is annotated:
+
+[,shell]
+----
+k annotate  RKE2ControlPlane/multinode-cluster  rke2.controlplane.cluster.x-k8s.io/load-balancer-exclusion="true"
+----
+
+Verify that the machine objects have been annotated with: 
+
+[,yaml]
+----
+pre-drain.delete.hook.machine.cluster.x-k8s.io/rke2-lb-exclusion: ""
+----
+
+Note that without these annotations users might experience longer response times
+for services as the external load-balancers are unaware of a node being drained
+and that it then do not provide any services. +
 
 After making these changes, the `capi-provisioning-example.yaml` file can be applied to the cluster using the following command:
 
