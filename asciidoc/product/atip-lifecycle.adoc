@@ -15,6 +15,46 @@ endif::[]
 
 This section covers the lifecycle management actions for clusters deployed via SUSE Telco Cloud.
 
+[#load-balancer-exclusion]
+=== Load Balancer Exclusion
+There are many lifecycle actions that require nodes to be drained. During the
+draining process, all pods will be moved to other nodes in the cluster. After
+the draining process is finished, the node does not host any services and
+therefore should not have any traffic routed to it. Load balancers, such as
+MetalLB, can be made aware of this by applying a label to the node:
+
+
+[,yaml]
+----
+node.kubernetes.io/exclude-from-external-load-balancers: "true"
+----
+For more details see: https://kubernetes.io/docs/reference/labels-annotations-taints/#node-kubernetes-io-exclude-from-external-load-balancers[Kubernetes Documentation].
+
+To see the labels on all your nodes in a cluster, you can run:
+[,shell]
+----
+kubectl get nodes -o json | jq -r '.items[].metadata | .name, .labels'
+----
+
+In the case of upgrades of downstream clusters, this can be automated by
+annotating the RKE2ControlPlane on the management cluster:
+
+[,yaml]
+----
+rke2.controlplane.cluster.x-k8s.io/load-balancer-exclusion="true"
+----
+
+This immediately creates an annotation on all machine objects on the management
+cluster for that RKE2ControlPlane.
+[,yaml]
+----
+pre-drain.delete.hook.machine.cluster.x-k8s.io/rke2-lb-exclusion: ""
+----
+With this annotation on the machine objects, any node on the downstream cluster
+that is scheduled for draining will get the above node label attached prior to
+the start of the draining process. The label will be removed from the node once
+it is available and ready again.
+
 === Management cluster upgrades
 
 The upgrade of the management cluster is described in the `Day 2` <<day2-mgmt-cluster, management cluster>> documentation.
@@ -123,6 +163,37 @@ spec:
         format: raw
         url: http://imagecache.local:8080/${NEW_IMAGE_GENERATED}.raw
 ----
+
+Before applying the `capi-provisioning-example.yaml` file, it is always a good
+practice to inform external load balancers (e.g. MetalLB) about nodes being
+drained so that they do not route traffic to nodes in this state. As mentioned
+in the <<Load Balancer Exclusion>> section, you can automate this by annotating
+the RKE2ControlPlane on the management cluster. In this example, an
+RKE2ControlPlane object called multinode-cluster is annotated:
+
+[,shell]
+----
+kubectl annotate  RKE2ControlPlane/multinode-cluster  rke2.controlplane.cluster.x-k8s.io/load-balancer-exclusion="true"
+----
+
+Verify that the machine objects have been annotated: 
+
+[,yaml]
+----
+pre-drain.delete.hook.machine.cluster.x-k8s.io/rke2-lb-exclusion: ""
+----
+Fetch the annotations for all your machine objects:
+
+[,shell]
+----
+kubectl get machines -o json | jq -r '.items[].metadata | .name, .annotations'
+----
+
+[NOTE]
+====
+Without these annotations users might experience longer response times
+for services as the load-balancers are unaware of drained nodes.
+====
 
 After making these changes, the `capi-provisioning-example.yaml` file can be applied to the cluster using the following command:
 
