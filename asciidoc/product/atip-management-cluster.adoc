@@ -1,6 +1,6 @@
 [#atip-management-cluster]
 == Setting up the management cluster
-:revdate: 2025-07-31
+:revdate: 2025-12-01
 :page-revdate: {revdate}
 :experimental:
 
@@ -64,7 +64,6 @@ The following are the main steps to set up the management cluster using a declar
   - xref:mgmt-cluster-image-definition-file-airgap[Modifications in the definition file]: The `mgmt-cluster.yaml` file must be modified to include the `embeddedArtifactRegistry` section with the `images` field set to all container images to be included into the EIB output image.
   - xref:mgmt-cluster-custom-folder-airgap[Modifications in the custom folder]: The `custom` folder must be modified to include the resources needed to run the management cluster in an air-gap environment.
         ** Register script: The `custom/scripts/99-register.sh` script must be removed when you use an air-gap environment.
-  - xref:mgmt-cluster-helm-values-folder-airgap[Modifications in the helm values folder]: The `helm/values` folder must be modified to include the configuration needed to run the management cluster in an air-gap environment.
 
 . **xref:mgmt-cluster-image-creation[Image creation]**: This step covers the creation of the image using the Edge Image Builder tool (for both, connected and air-gap scenarios). Check the <<components-eib,prerequisites>> to run the Edge Image Builder tool on your system.
 
@@ -195,10 +194,10 @@ kubernetes:
         createNamespace: true
         installationNamespace: kube-system
         valuesFile: metal3.yaml
-      - name: rancher-turtles
-        version: {version-rancher-turtles-chart}
+      - name: rancher-turtles-providers
+        version: {version-rancher-turtles-providers-chart}
         repositoryName: suse-edge-charts
-        targetNamespace: rancher-turtles-system
+        targetNamespace: cattle-turtles-system
         createNamespace: true
         installationNamespace: kube-system
       - name: neuvector-crd
@@ -320,10 +319,10 @@ kubernetes:
         createNamespace: true
         installationNamespace: kube-system
         valuesFile: metal3.yaml
-      - name: rancher-turtles
-        version: {version-rancher-turtles-chart}
+      - name: rancher-turtles-providers
+        version: {version-rancher-turtles-providers-chart}
         repositoryName: suse-edge-charts
-        targetNamespace: rancher-turtles-system
+        targetNamespace: cattle-turtles-system
         createNamespace: true
         installationNamespace: kube-system
       - name: neuvector-crd
@@ -514,21 +513,6 @@ if [ $(${KUBECTL} get svc -n ${METAL3_CHART_TARGETNAMESPACE} metal3-metal3-ironi
 	EOF
 fi
 
-# If rancher is deployed
-if [ $(${KUBECTL} get pods -n ${RANCHER_CHART_TARGETNAMESPACE} -l app=rancher -o name | wc -l) -ge 1 ]; then
-  cat <<-EOF | ${KUBECTL} apply -f -
-	apiVersion: management.cattle.io/v3
-	kind: Feature
-	metadata:
-	  name: embedded-cluster-api
-	spec:
-	  value: false
-	EOF
-
-  # Disable Rancher webhooks for CAPI
-  ${KUBECTL} delete --ignore-not-found=true mutatingwebhookconfiguration.admissionregistration.k8s.io mutating-webhook-configuration
-  ${KUBECTL} delete --ignore-not-found=true validatingwebhookconfigurations.admissionregistration.k8s.io validating-webhook-configuration
-  ${KUBECTL} wait --for=delete namespace/cattle-provisioning-capi-system --timeout=300s
 fi
 
 # Clean up the lock cm
@@ -997,7 +981,6 @@ interfaces:
 This section describes how to prepare the image for air-gap environments showing only the differences from the previous sections. The following changes to the previous section (xref:mgmt-cluster-image-preparation-connected[Image preparation for connected environments]) are required to prepare the image for air-gap environments:
 
 - The `mgmt-cluster.yaml` file must be modified to include the `embeddedArtifactRegistry` section with the `images` field set to all container images to be included into the EIB output image.
-- The `mgmt-cluster.yaml` file must be modified to include `rancher-turtles-airgap-resources` helm chart.
 - The `custom/scripts/99-register.sh` script must be removed when use an air-gap environment.
 
 [#mgmt-cluster-image-definition-file-airgap]
@@ -1011,8 +994,6 @@ In this section the `images` field must contain the list of all container images
 The following is an example of the `mgmt-cluster.yaml` file with the `embeddedArtifactRegistry` section included.
 Make sure to the listed images contain the component versions you need.
 ====
-
-The `rancher-turtles-airgap-resources` helm chart must also be added, this creates resources as described in the https://documentation.suse.com/cloudnative/cluster-api/{rancher-turtles-docs-version}/en/getting-started/air-gapped-environment.html[Rancher Turtles Airgap Documentation].  This also requires a turtles.yaml values file for the rancher-turtles chart to specify the necessary configuration.
 
 [,yaml,subs="attributes"]
 ----
@@ -1057,17 +1038,10 @@ kubernetes:
         createNamespace: true
         installationNamespace: kube-system
         valuesFile: metal3.yaml
-      - name: rancher-turtles
-        version: {version-rancher-turtles-chart}
+      - name: rancher-turtles-providers
+        version: {version-rancher-turtles-providers-chart}
         repositoryName: suse-edge-charts
-        targetNamespace: rancher-turtles-system
-        createNamespace: true
-        installationNamespace: kube-system
-        valuesFile: turtles.yaml
-      - name: rancher-turtles-airgap-resources
-        version: {version-rancher-turtles-chart}
-        repositoryName: suse-edge-charts
-        targetNamespace: rancher-turtles-system
+        targetNamespace: cattle-turtles-system
         createNamespace: true
         installationNamespace: kube-system
       - name: neuvector-crd
@@ -1144,17 +1118,18 @@ embeddedArtifactRegistry:
     - name: registry.rancher.com/rancher/fleet:v0.13.1
     - name: registry.rancher.com/rancher/hardened-node-feature-discovery:v0.15.7-build20250425
     - name: registry.rancher.com/rancher/rancher-webhook:v0.8.1
-    - name: registry.rancher.com/rancher/rancher/turtles:v0.24.0
+    - name: registry.rancher.com/rancher/rancher/turtles:v0.25.0
     - name: registry.rancher.com/rancher/rancher:v2.12.1
     - name: registry.rancher.com/rancher/rancher-agent:v2.12.1
     - name: registry.rancher.com/rancher/shell:v0.5.0
     - name: registry.rancher.com/rancher/system-upgrade-controller:v0.16.0
-    - name: registry.suse.com/rancher/cluster-api-controller:v1.10.5
-    - name: registry.suse.com/rancher/cluster-api-provider-metal3:v1.10.2
-    - name: registry.suse.com/rancher/cluster-api-provider-rke2-bootstrap:v0.20.1
-    - name: registry.suse.com/rancher/cluster-api-provider-rke2-controlplane:v0.20.1
+    - name: registry.suse.com/rancher/cluster-api-controller:v1.10.6
+    - name: registry.suse.com/rancher/cluster-api-provider-metal3:v1.10.4
+    - name: registry.suse.com/rancher/ip-address-manager:v1.10.4
+    - name: registry.suse.com/rancher/cluster-api-provider-rke2-bootstrap:v0.21.1
+    - name: registry.suse.com/rancher/cluster-api-provider-rke2-controlplane:v0.21.1
+    - name: registry.suse.com/rancher/cluster-api-addon-provider-fleet:v0.12.0
     - name: registry.suse.com/rancher/hardened-sriov-network-operator:v1.5.0-build20250425
-    - name: registry.suse.com/rancher/ip-address-manager:v1.10.2
     - name: registry.rancher.com/rancher/kubectl:v1.32.2
     - name: registry.rancher.com/rancher/mirrored-cluster-api-controller:v1.9.5
 ----
@@ -1164,38 +1139,6 @@ embeddedArtifactRegistry:
 
 - The `custom/scripts/99-register.sh` script must be removed when using an air-gap environment. As you can see in the directory structure, the `99-register.sh` script is not included in the `custom/scripts` folder.
 
-
-[#mgmt-cluster-helm-values-folder-airgap]
-==== Modifications in the helm values folder
-
-- The `turtles.yaml`: contains the configuration required to specify airgapped operation for Rancher Turtles, note this depends on installation of the rancher-turtles-airgap-resources chart.
-+
-[,yaml]
-----
-cluster-api-operator:
-  cluster-api:
-    core:
-      fetchConfig:
-        selector: "{\"matchLabels\": {\"provider-components\": \"core\"}}"
-    rke2:
-      bootstrap:
-        fetchConfig:
-          selector: "{\"matchLabels\": {\"provider-components\": \"rke2-bootstrap\"}}"
-      controlPlane:
-        fetchConfig:
-          selector: "{\"matchLabels\": {\"provider-components\": \"rke2-control-plane\"}}"
-    metal3:
-      infrastructure:
-        fetchConfig:
-          selector: "{\"matchLabels\": {\"provider-components\": \"metal3\"}}"
-      ipam:
-        fetchConfig:
-          selector: "{\"matchLabels\": {\"provider-components\": \"metal3ipam\"}}"
-    fleet:
-      addon:
-        fetchConfig:
-          selector: "{\"matchLabels\": {\"provider-components\": \"fleet\"}}"
-----
 
 [#mgmt-cluster-image-creation]
 === Image creation
