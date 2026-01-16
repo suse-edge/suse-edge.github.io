@@ -80,6 +80,169 @@ On a machine with `Helm` installed and `kubectl` configured to point to your `{c
 helm show crds oci://registry.suse.com/edge/charts/metal3 --version {version-metal3-chart} | kubectl apply -f -
 ----
 
+==== Prepare for SUSE Storage Migration
+
+[NOTE]
+====
+Applies only to management clusters that require a Longhorn chart upgrade.
+
+You must ensure the management cluster is first updated to the latest 3.4 z-stream, which contains the necessary 1.9.2 SUSE Storage version.
+====
+
+Starting with Longhorn 1.9.X, Longhorn no longer has a seperate CRD Helm Chart, they are packaged as one, therefore it is necessary to follow some additional migration steps as described in the https://documentation.suse.com/cloudnative/storage/1.9/en/migration/migration.html[SUSE Storage Documentation]
+
+. First, we can check to see the current version of the Longhorn CRD installed.
++
+[,bash,subs="attributes"]
+----
+helm list --all-namespaces | grep longhorn-crd
+longhorn-crd                    longhorn-system 1               2026-01-16 02:17:16.7804359 +0000 UTC   deployed        longhorn-crd-107.1.1+up1.9.2          v1.9.2
+----
++
+
+. Now we will clone the rancher/charts repository for the specific Longhorn version that we currently have installed.
+To do this, you must first download this https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/download-longhorn-crd-chart.sh[script].
++
+The script is executed like so:
++
+[,bash,subs="attributes"]
+----
+./download-longhorn-crd-chart.sh 107.1.1+up1.9.2
+----
++
+Now the longhorn-crd chart will be downloaded to the local directory `./107.1.1+up1.9.2`
+
+. After it is downloaded, check to make sure it is the correct version by opening the Chart.yaml
++
+[,bash,subs="attributes"]
+----
+cat 107.1.1+up1.9.2/Chart.yaml
+
+annotations:
+  catalog.cattle.io/certified: rancher
+  catalog.cattle.io/hidden: "true"
+  catalog.cattle.io/namespace: longhorn-system
+  catalog.cattle.io/release-name: longhorn-crd
+apiVersion: v1
+appVersion: v1.9.2
+description: Installs the CRDs for longhorn.
+name: longhorn-crd
+version: 107.1.1+up1.9.2
+----
++
+
+. Next we must patch the helm.sh/resource-policy. This ensures that Helm does not delete the CRDs when the release is uninstalled. 
++
+To do this, download this https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/patch-resource-policy-annotation.sh[script] to automatically patch the annotation:
++
+[,bash,subs="attributes"]
+----
+./patch-resource-policy-annotation.sh 107.1.1+up1.9.2/templates/crds.yaml
+
+Processing CRDs in '107.1.1+up1.9.2/templates/crds.yaml'...
+Creating backup: '/tmp/crds.yaml.original'
+Successfully processed the file
+Original file backed up to: '/tmp/crds.yaml.original'
+Modified file saved as: '107.1.1+up1.9.2/templates/crds.yaml'
+Found 22 CustomResourceDefinition(s)
+Added 22 helm.sh/resource-policy: keep annotation(s)
+Original file: 4575 lines, Modified file: 4597 lines
+----
++
+
+. To verify that the CRDs have been correctly patched, run:
++
+[,bash,subs="attributes"]
+----
+vim -d /tmp/crds.yaml.original 107.1.1+up1.9.2/templates/crds.yaml
+----
++
+
+. Next, upgrade the longhorn-crd Helm release using the locally patched chart:
++
+[,bash,subs="attributes"]
+----
+helm upgrade longhorn-crd -n longhorn-system ./107.1.1+up1.9.2
+----
++
+
+. Now uninstall the longhorn-crd Helm release from your system. Due to the applied patch, the CRDs will remain:
++
+[,bash,subs="attributes"]
+----
+helm uninstall longhorn-crd --namespace longhorn-system
+
+These resources were kept due to the resource policy:
+[CustomResourceDefinition] backingimagedatasources.longhorn.io
+[CustomResourceDefinition] backingimagemanagers.longhorn.io
+[CustomResourceDefinition] nodes.longhorn.io
+[CustomResourceDefinition] orphans.longhorn.io
+[CustomResourceDefinition] recurringjobs.longhorn.io
+[CustomResourceDefinition] replicas.longhorn.io
+[CustomResourceDefinition] settings.longhorn.io
+[CustomResourceDefinition] sharemanagers.longhorn.io
+[CustomResourceDefinition] snapshots.longhorn.io
+[CustomResourceDefinition] supportbundles.longhorn.io
+[CustomResourceDefinition] systembackups.longhorn.io
+[CustomResourceDefinition] systemrestores.longhorn.io
+[CustomResourceDefinition] backingimages.longhorn.io
+[CustomResourceDefinition] volumeattachments.longhorn.io
+[CustomResourceDefinition] volumes.longhorn.io
+[CustomResourceDefinition] backupbackingimages.longhorn.io
+[CustomResourceDefinition] backups.longhorn.io
+[CustomResourceDefinition] backuptargets.longhorn.io
+[CustomResourceDefinition] backupvolumes.longhorn.io
+[CustomResourceDefinition] engineimages.longhorn.io
+[CustomResourceDefinition] engines.longhorn.io
+[CustomResourceDefinition] instancemanagers.longhorn.io
+
+release "longhorn-crd" uninstalled
+----
++
+
+. After ensuring the longhorn-crd Helm release is uninstalled but the CRDs are kept, you need to update the ownership labels on the existing Longhorn CRDs to prepare for the main longhorn Helm chart. 
++
+Apply this https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/migrate-crd-ownership.sh[script] to perform the replacement.
++
+[,bash,subs="attributes"]
+----
+./migrate-crd-ownership.sh
+----
++
+
+. After all of the CRDs have been prepared, log into the Rancher Application Collection so that you are able to pull the Helm Chart:
++
+[,bash,subs="attributes"]
+----
+helm registry login dp.apps.rancher.io -u ${APPS.RANCHER.IO_USERNAME} -p ${APPS.RANCHER.IO_ACCESS_TOKEN}
+----
++
+
+. Then create a docker-registry secret so you are able to pull the container images:
++
+[,bash,subs="attributes"]
+----
+kubectl create secret docker-registry rancher-app-collection \
+  --namespace longhorn-system \
+  --docker-server=dp.apps.rancher.io \
+  --docker-username="${APPS.RANCHER.IO_USERNAME}" \
+  --docker-password="${APPS.RANCHER.IO_ACCESS_TOKEN}"
+----
++
+
+. Finally, upgrade your Longhorn installation to SUSE Storage:
++
+[,bash,subs="attributes"]
+----
+helm upgrade longhorn oci://dp.apps.rancher.io/charts/suse-storage \
+	--namespace longhorn-system \
+	--version 1.10.1 \
+	--set privateRegistry.registrySecret=rancher-app-collection
+----
++
+You can provide a `values.yaml` by appending `-f values.yaml` to the upgrade command if you wish.
+
+
 [#day2-migration-mgmt-upgrade-controller]
 === Upgrade Controller
 
