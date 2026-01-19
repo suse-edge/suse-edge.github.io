@@ -82,6 +82,8 @@ helm show crds oci://registry.suse.com/edge/charts/metal3 --version {version-met
 
 ==== Prepare for SUSE Storage Migration
 
+When upgrading to `Edge {static-edge-version}` it is necessary to migrate from the previous Longhorn chart to the SUSE Storage chart that is maintained in the https://www.suse.com/products/rancher/application-collection/[SUSE Application Collection]
+
 [NOTE]
 ====
 Applies only to management clusters that require a Longhorn chart upgrade.
@@ -89,7 +91,7 @@ Applies only to management clusters that require a Longhorn chart upgrade.
 You must ensure the management cluster is first updated to the latest 3.4 z-stream, which contains the necessary 1.9.2 SUSE Storage version.
 ====
 
-Starting with Longhorn 1.9.X, Longhorn no longer has a seperate CRD Helm Chart, they are packaged as one, therefore it is necessary to follow some additional migration steps as described in the https://documentation.suse.com/cloudnative/storage/1.9/en/migration/migration.html[SUSE Storage Documentation]
+The SUSE Storage chart no longer has a seperate CRD Helm Chart, they are packaged as one, therefore it is necessary to follow some additional migration steps as described in the https://documentation.suse.com/cloudnative/storage/1.9/en/migration/migration.html[SUSE Storage Documentation]
 
 . First, we can check to see the current version of the Longhorn CRD installed.
 +
@@ -131,7 +133,7 @@ version: 107.1.1+up1.9.2
 ----
 +
 
-. Next we must patch the helm.sh/resource-policy. This ensures that Helm does not delete the CRDs when the release is uninstalled. 
+. Next we must patch the helm.sh/resource-policy to the value `keep` in the `templates/crds.yaml` within the `longhorn-crd` chart that was cloned. This ensures that Helm does not delete the CRDs when the release is uninstalled. 
 +
 To do this, download this https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/patch-resource-policy-annotation.sh[script] to automatically patch the annotation:
 +
@@ -150,7 +152,7 @@ Original file: 4575 lines, Modified file: 4597 lines
 ----
 +
 
-. To verify that the CRDs have been correctly patched, run:
+. To verify that the CRDs have been correctly patched, check the diff between the original template and the patched one to ensure the value of `keep` is set for `helm.sh/resource-policy`:
 +
 [,bash,subs="attributes"]
 ----
@@ -200,13 +202,22 @@ release "longhorn-crd" uninstalled
 ----
 +
 
-. After ensuring the longhorn-crd Helm release is uninstalled but the CRDs are kept, you need to update the ownership labels on the existing Longhorn CRDs to prepare for the main longhorn Helm chart. 
+. Ensure that the `longhorn-crd` chart is uninstalled by re-running the same command as before: `helm list --all-namespaces | grep longhorn-crd` to verify that `longhorn-crd` is not present.
++
+Following this, you need to update the ownership labels on the existing Longhorn CRDs to prepare for upgrade to the SUSE Storage Helm chart. 
 +
 Apply this https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/migrate-crd-ownership.sh[script] to perform the replacement.
 +
 [,bash,subs="attributes"]
 ----
 ./migrate-crd-ownership.sh
+
+# The output will look like the following for each CRD. The most important thing to note is that each operation says "Successfully updated CRD..." at the end:
+
+Processing CRD: volumes.longhorn.io
+Warning: resource customresourcedefinitions/volumes.longhorn.io is missing the kubectl.kubernetes.io/last-applied-configuration annotation which is required by kubectl apply. kubectl apply should only be used on resources created declaratively by either kubectl create --save-config or kubectl apply. The missing annotation will be patched automatically.
+customresourcedefinition.apiextensions.k8s.io/volumes.longhorn.io configured
+Successfully updated CRD: volumes.longhorn.io
 ----
 +
 
@@ -217,6 +228,13 @@ Apply this https://documentation.suse.com/cloudnative/storage/1.9/en/_attachment
 helm registry login dp.apps.rancher.io -u ${APPS.RANCHER.IO_USERNAME} -p ${APPS.RANCHER.IO_ACCESS_TOKEN}
 ----
 +
+
+[NOTE]
+====
+Login Credentials for the Rancher Application Collection registry can be found in the https://apps.rancher.io/settings/access-tokens[access tokens section of your settings.] (Must be signed in)
+
+Furthermore, additional documentation for the Rancher Application Collection can be found https://docs.apps.rancher.io/[here.]
+====
 
 . Then create a docker-registry secret so you are able to pull the container images:
 +
@@ -236,11 +254,11 @@ kubectl create secret docker-registry rancher-app-collection \
 ----
 helm upgrade longhorn oci://dp.apps.rancher.io/charts/suse-storage \
 	--namespace longhorn-system \
-	--version 1.10.1 \
+	--version {version-longhorn-chart} \
 	--set privateRegistry.registrySecret=rancher-app-collection
 ----
 +
-You can provide a `values.yaml` by appending `-f values.yaml` to the upgrade command if you wish.
+You can provide a `values.yaml` file by appending `-f values.yaml` to the upgrade command if you wish.
 
 
 [#day2-migration-mgmt-upgrade-controller]
