@@ -1,6 +1,6 @@
 [#day2-migration]
 = Edge {version-edge} migration
-:revdate: 2025-09-30
+:revdate: 2026-01-19
 :page-revdate: {revdate}
 :experimental:
 
@@ -13,9 +13,9 @@ ifdef::env-github[]
 :warning-caption: :warning:
 endif::[]
 :toc: preamble
-:previous-edge-version: 3.3
-:static-edge-version: 3.4.0
-:static-fleet-examples-tag: release-3.4.0
+:previous-edge-version: 3.4
+:static-edge-version: 3.5.0
+:static-fleet-examples-tag: release-3.5.0
 
 This section explains how to migrate your `management` and `downstream` clusters from `Edge {previous-edge-version}` to `Edge {static-edge-version}`.
 
@@ -62,7 +62,7 @@ This section covers the following topics:
 
 [NOTE]
 ====
-Applies only to clusters that require a <<components-metal3>> chart upgrade.
+Applies only to CAPI/Metal3 management clusters that require a <<components-metal3>> chart upgrade.
 ====
 
 The `Metal^3^` Helm chart includes the link:https://book.metal3.io/bmo/introduction.html[Bare Metal Operator (BMO)] CRDs by leveraging Helm's link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#method-1-let-helm-do-it-for-you[CRD] directory.
@@ -260,6 +260,84 @@ helm upgrade longhorn oci://dp.apps.rancher.io/charts/suse-storage \
 +
 You can provide a `values.yaml` file by appending `-f values.yaml` to the upgrade command if you wish.
 
+==== Prepare for Rancher Turtles upgrade
+
+[NOTE]
+====
+Applies only to CAPI/Metal3 management clusters that require a rancher turtles chart upgrade.
+
+You must ensure the management cluster is first updated to the latest 3.4 z-stream, which contains the necessary 0.24.3 Rancher Turtles version.
+====
+
+Starting with Rancher 2.13, Rancher Turtles is installed by default, therefore it is necessary to follow some additional migration steps as described in the https://turtles.docs.rancher.com/turtles/next/en/tutorials/migration.html[Rancher Turtles Documentation]
+
+First we remove the installed `CAPIProvider` resources:
+
+[,bash,subs="attributes"]
+----
+kubectl delete capiprovider -A --all
+----
+
+After waiting for the step above to complete, we next remove the installed rancher-turtles chart and rancher-turtles-airgap-resources (if installed),
+when installed via Edge Image Builder this requires removal of the corresponding `HelmChart` resources:
+
+[,bash,subs="attributes"]
+----
+kubectl delete -n kube-system helmchart rancher-turtles
+kubectl delete -n kube-system helmchart rancher-turtles-airgap-resources
+----
+
+Next we must patch the CRD resources as described in the https://turtles.docs.rancher.com/turtles/next/en/tutorials/migration.html[Rancher Turtles Documentation]
+
+[,bash]
+----
+kubectl patch crd capiproviders.turtles-capi.cattle.io --type=json -p='[{"op": "add", "path": "/metadata/annotations/meta.helm.sh~1release-namespace", "value": "cattle-turtles-system"}]'
+kubectl patch crd clusterctlconfigs.turtles-capi.cattle.io --type=json -p='[{"op": "add", "path": "/metadata/annotations/meta.helm.sh~1release-namespace", "value": "cattle-turtles-system"}]'
+----
+
+Now follow the regular steps to upgrade the management cluster to `Edge {static-edge-version}`
+
+==== Rancher Turtles post-upgrade
+
+*After* following the steps below to upgrade to `Edge {static-edge-version}` it is necessary to install the new `rancher-turtles-providers` helm chart - this creates new `CAPIProvider` resources to replace those removed in the pre-upgrade steps above.
+
+This chart installation should be done via a `HelmChart` resource to enable future automated upgrade via the upgrade controller:
+
+[,shell,subs="attributes,specialchars"]
+----
+helm pull oci://registry.suse.com/edge/charts/rancher-turtles-providers --version {version-rancher-turtles-providers-chart}
+
+cat > turtles-providers-helmchart.yaml <<EOF
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  annotations:
+    edge.suse.com/repository-url: oci://registry.suse.com/edge/charts/rancher-turtles-providers
+  name: rancher-turtles-providers
+  namespace: kube-system
+spec:
+  chartContent: $(base64 -w 0 rancher-turtles-providers-{version-rancher-turtles-providers-chart}.tgz)
+  failurePolicy: reinstall
+  createNamespace: true
+  targetNamespace: cattle-turtles-system
+  version: {version-rancher-turtles-providers-chart}
+EOF
+kubectl apply -f turtles-providers-helmchart.yaml
+----
+
+After a few minutes, output similar to the following should be observed:
+
+[,shell]
+----
+kubectl get capiprovider -A
+NAMESPACE                   NAME                 TYPE             PROVIDERNAME    INSTALLEDVERSION   PHASE
+capm3-system                metal3               infrastructure   metal3          v1.10.4            Ready
+cattle-capi-system          cluster-api          core             cluster-api     v1.10.6            Ready
+fleet-addon-system          fleet                addon            rancher-fleet   v0.12.0            Ready
+metal3-ipam-system          metal3ipam           ipam             metal3ipam      v1.10.4            Ready
+rke2-bootstrap-system       rke2-bootstrap       bootstrap        rke2            v0.21.1            Ready
+rke2-control-plane-system   rke2-control-plane   controlPlane     rke2            v0.21.1            Ready
+----
 
 [#day2-migration-mgmt-upgrade-controller]
 === Upgrade Controller
