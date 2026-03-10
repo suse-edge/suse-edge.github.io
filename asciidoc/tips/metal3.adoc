@@ -1,6 +1,6 @@
 [#tips-metal3]
 = *Metal^3^*
-:revdate: 2025-10-07
+:revdate: 2026-03-06
 :page-revdate: {revdate}
 :experimental:
 
@@ -25,6 +25,7 @@ https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/[Kubern
 As an example, each `BareMetalHost` is labeled to identify its properties and intended cluster
 (e.g., its cluster-role, the cluster name, location, etc.):
 
+[,yaml]
 ----
 apiVersion: metal3.io/v1alpha1
 kind: BareMetalHost
@@ -65,6 +66,7 @@ Then, the `Metal3MachineTemplate` object uses the https://doc.crds.dev/github.co
 
 Both https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector-matchLabels[`matchLabels`] (for exact key-value matching) and https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector-matchExpressions[`matchExpressions`] (for more complex rules) can be used:
 
+[,yaml]
 ----
 apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
 kind: Metal3MachineTemplate
@@ -108,6 +110,7 @@ You can clean up those old entries by following any of the following procedures:
 * Delete them on the BIOS/EFI setup interface directly (the exact procedure will depend on the hardware).
 * Run the UEFI https://uefi.org/sites/default/files/resources/UEFI_Shell_2_2.pdf[`bcfg`] shell as:
 +
+[,console]
 ----
 # List the entries
 bcfg boot dump -b
@@ -118,13 +121,223 @@ bcfg boot rm X
 
 * Use `efibootmgr` on a Linux system as:
 +
+[,bash]
 ----
 # List the entries
 efibootmgr -v
 # Delete entry number X
-efibootmgr -b X -B 
+efibootmgr -b X -B
 ----
 
 The process may leave orphaned files on the EFI System Partition (ESP), usually found under subdirectories named by the vendor (e.g., `EFI/opensuse` or `EFI/Microsoft`).
 While these files are generally harmless, they should be deleted if they consume excessive space as it can prevent the installation of a new OS or a boot manager update.
 Removal may require explicitly mounting the ESP, typically mounted as `/boot/efi/EFI` on Linux systems.
+
+[#tips-metal3-two-secrets]
+== Custom network configuration using the two-secrets approach
+
+When Metal^3^ provisions a bare metal node, it goes through two distinct phases that may each require different network configuration:
+
+* The *IPA phase*, where the Ironic Python Agent (IPA) ramdisk runs during hardware inspection and provisioning
+* The *target OS phase*, where the deployed SLE Micro system runs after first boot
+
+The two-secrets approach addresses this by allowing a separate network configuration secret for each phase, using the `preprovisioningNetworkDataName` field for the IPA phase and the `networkData` field for the target OS phase.
+This is particularly useful when interface names differ between phases, which can happen because the IPA kernel and the SLE Micro kernel may discover the same hardware under different names.
+
+=== Example: interface renaming for VLANs
+
+A common scenario is when hardware gets a long PCI-based interface name such as `enp1s0np123`.
+Adding a VLAN on top of it may exceed the Linux kernel hard limit of *15 characters* for interface names:
+
+[,console]
+----
+enp1s0np123.100   = 15 chars  (barely fits, risky)
+enp1s0np123.3669  = 17 chars  (exceeds limit, fails)
+eth0.3669         =  9 chars  (works)
+----
+
+The IPA phase must reference `enp1s0np123` (the kernel-discovered name), while the target OS should use a short name like `eth0` so that `eth0.3669` stays under the limit.
+`nmc` (nm-configurator) bridges the two phases by matching interfaces via MAC address rather than name — you declare `name: eth0` alongside the hardware MAC address, and `nmc` creates the NetworkManager profile with the desired name regardless of what the kernel assigned.
+
+=== Prerequisite: EIB image setup
+
+The EIB image must include a first-boot script that reads the network configuration from the `config-2` partition Metal^3^ writes during provisioning.
+Create the following script at `/opt/EIB/network/configure-network.sh`:
+
+[,bash]
+----
+#!/bin/bash
+set -eux
+
+# Source: https://documentation.suse.com/suse-edge/3.5/html/edge/quickstart-metal3.html#metal3-add-network-eib
+
+CONFIG_DRIVE=$(blkid --label config-2 || true)
+if [ -z "${CONFIG_DRIVE}" ]; then
+  echo "No config-2 device found, skipping network configuration"
+  exit 0
+fi
+
+mount -o ro $CONFIG_DRIVE /mnt
+
+NETWORK_DATA_FILE="/mnt/openstack/latest/network_data.json"
+
+if [ ! -f "${NETWORK_DATA_FILE}" ]; then
+  umount /mnt
+  echo "No network_data.json found, skipping network configuration"
+  exit 0
+fi
+
+DESIRED_HOSTNAME=$(cat /mnt/openstack/latest/meta_data.json | tr ',{}' '\n' | grep '\"metal3-name\"' | sed 's/.*\"metal3-name\": \"\(.*\)\"/\1/')
+echo "${DESIRED_HOSTNAME}" > /etc/hostname
+
+mkdir -p /tmp/nmc/{desired,generated}
+cp ${NETWORK_DATA_FILE} /tmp/nmc/desired/_all.yaml
+umount /mnt
+
+./nmc generate --config-dir /tmp/nmc/desired --output-dir /tmp/nmc/generated
+./nmc apply --config-dir /tmp/nmc/generated
+----
+
+Then make it executable and build the EIB image as normal:
+
+[,bash]
+----
+mkdir -p /opt/EIB/network
+chmod +x /opt/EIB/network/configure-network.sh
+----
+
+NOTE: EIB automatically picks up scripts from the `network/` directory. Combustion runs them on first boot in initramfs, before the full OS starts.
+
+NOTE: The script also sets the node hostname from Metal^3^'s `metal3-name` metadata field.
+
+=== Configuring the two secrets
+
+The following examples use dummy values throughout: data NIC MAC `aa:bb:cc:11:22:33`, boot NIC MAC `aa:bb:cc:44:55:66`, node IP `10.0.0.10/24`, gateway `10.0.0.1`, DNS `10.0.0.53`, VLAN ID `100`, and BMC address `10.1.0.10`.
+
+*Secret 1 — IPA phase* (`static-networkdata-ipa.yaml`): references the kernel-assigned interface name. DHCP is used here to keep it simple during hardware discovery:
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: static-networkdata-ipa
+  namespace: default
+type: Opaque
+stringData:
+  networkData: |
+    interfaces:
+    - name: enp1s0np123
+      type: ethernet
+      state: up
+      mac-address: "aa:bb:cc:11:22:33"
+      ipv4:
+        enabled: true
+        dhcp: true
+    dns-resolver:
+      config:
+        server:
+        - 10.0.0.53
+----
+
+*Secret 2 — target OS phase* (`static-networkdata-os.yaml`): references the desired short name and declares the VLAN. The same MAC address is used so `nmc` can match the interface:
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: static-networkdata-os
+  namespace: default
+type: Opaque
+stringData:
+  networkData: |
+    interfaces:
+    - name: eth0
+      type: ethernet
+      state: up
+      mac-address: "aa:bb:cc:11:22:33"
+      mtu: 1500
+      ipv4:
+        enabled: false
+        dhcp: false
+    - name: eth0.100
+      type: vlan
+      state: up
+      mtu: 1500
+      vlan:
+        base-iface: eth0
+        id: 100
+      ipv4:
+        address:
+        - ip: 10.0.0.10
+          prefix-length: 24
+        enabled: true
+        dhcp: false
+    dns-resolver:
+      config:
+        server:
+        - 10.0.0.53
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-address: 10.0.0.1
+        next-hop-interface: eth0.100
+----
+
+The `BareMetalHost` object references both secrets:
+
+[,yaml]
+----
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: my-node
+  namespace: default
+spec:
+  online: true
+  bootMACAddress: "aa:bb:cc:44:55:66"
+  rootDeviceHints:
+    deviceName: /dev/nvme0n1
+  bmc:
+    address: redfish-virtualmedia://10.1.0.10/redfish/v1/Systems/1/
+    disableCertificateVerification: true
+    credentialsName: my-node-credentials
+  preprovisioningNetworkDataName: static-networkdata-ipa
+  networkData:
+    name: static-networkdata-os
+----
+
+[WARNING]
+====
+`preprovisioningNetworkDataName` is a plain string field, while `networkData` is a SecretReference object requiring a `name:` sub-key.
+The syntax differs between the two and is a common source of errors.
+====
+
+Apply all objects:
+
+[,bash]
+----
+kubectl apply -f bmc-credentials.yaml
+kubectl apply -f static-networkdata-ipa.yaml
+kubectl apply -f static-networkdata-os.yaml
+kubectl apply -f baremetalhost.yaml
+----
+
+After provisioning, SSH to the node and verify:
+
+[,console]
+----
+# Interface names
+ip link show
+# Expected: eth0 and eth0.100@eth0
+
+# IP on VLAN interface
+ip addr show eth0.100
+
+# NetworkManager profiles
+nmcli connection show
+
+# VLAN details
+nmcli connection show eth0.100 | grep -E '(vlan.parent|vlan.id)'
+----
