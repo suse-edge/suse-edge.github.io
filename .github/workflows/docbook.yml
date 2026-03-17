@@ -1,0 +1,123 @@
+name: Validate/build docs
+
+# https://github.com/peaceiris/actions-gh-pages/issues/852
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+      - "release-3.*"
+    # Review gh actions docs if you want to further define triggers, paths, etc
+    # https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#on
+  push:
+    branches:
+      - main
+      - "release-3.*"
+    # Review gh actions docs if you want to further define triggers, paths, etc
+    # https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#on
+    paths:
+      - 'DC-*'
+      - 'xml/**'
+      - 'adoc/**'
+      - 'images/src/**'
+      - '**/DC-*'
+      - '**/xml/**'
+      - '**/adoc/**'
+      - '**/images/src/**'
+
+jobs:
+  select-dc-files:
+    runs-on: ubuntu-latest
+    outputs:
+      validate-list: ${{ steps.select-dc-validate.outputs.dc-list }}
+      build-list: ${{ steps.select-dc-build.outputs.dc-list }}
+      allow-build: ${{ steps.select-dc-build.outputs.allow-build }}
+      relevant-branches: ${{ steps.select-dc-build.outputs.relevant-branches }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checking basic soundness of DC files
+        uses: openSUSE/doc-ci@gha-select-dcs
+        with:
+          mode: soundness
+
+      - name: Selecting DC files to validate
+        id: select-dc-validate
+        uses: openSUSE/doc-ci@gha-select-dcs
+        with:
+          mode: list-validate
+
+      - name: Selecting DC files to build
+        id: select-dc-build
+        uses: openSUSE/doc-ci@gha-select-dcs
+        with:
+          mode: list-build
+          original-org: SUSE
+
+  validate:
+    runs-on: ubuntu-latest
+    needs: select-dc-files
+    strategy:
+      # don't cancel all validation runners when one of them fails, we want full results
+      fail-fast: false
+      matrix:
+        dc-files: ${{ fromJson(needs.select-dc-files.outputs.validate-list) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validating DC file(s) ${{ matrix.dc-files }}
+        uses: openSUSE/doc-ci@gha-validate
+        with:
+          dc-files: ${{ matrix.dc-files }}
+
+
+  build-html:
+    runs-on: ubuntu-latest
+    needs: [select-dc-files, validate]
+    if: ${{ needs.select-dc-files.outputs.allow-build == 'true' }}
+    outputs:
+      artifact-name: ${{ steps.build-dc.outputs.artifact-name }}
+      artifact-dir: ${{ steps.build-dc.outputs.artifact-dir }}
+    strategy:
+      matrix:
+        dc-files: ${{ fromJson(needs.select-dc-files.outputs.build-list) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Building DC file(s) ${{ matrix.dc-files }}
+        id: build-dc
+        uses: openSUSE/doc-ci@gha-build
+        with:
+          dc-files: ${{ matrix.dc-files }}
+      - name: Uploading builds as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build-dc.outputs.artifact-name }}
+          path: ${{ steps.build-dc.outputs.artifact-dir }}/*
+          retention-days: 3
+
+
+  publish:
+    runs-on: ubuntu-latest
+    if: ${{ success() }}
+    needs: [select-dc-files, build-html]
+    continue-on-error: true
+    steps:
+      - name: Downloading all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifact-dir
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Build output to publish to the `gh-pages` branch:
+          publish_dir: artifact-dir
+          # The following lines assign commit authorship to the official
+          # GH-Actions bot for deploys to `gh-pages` branch:
+          # https://github.com/actions/checkout/issues/13#issuecomment-724415212
+          # The GH actions bot is used by default if you didn't specify the two fields.
+          # You can swap them out with your own user credentials.
+          user_name: github-actions[bot]
+          user_email: 41898282+github-actions[bot]@users.noreply.github.com
