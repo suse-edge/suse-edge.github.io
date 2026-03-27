@@ -233,8 +233,8 @@ kubernetes:
       - name: rancher-application-collection
         url: oci://dp.apps.rancher.io/charts
         authentication:
-          username: ${APPS.RANCHER.IO_USERNAME}
-          password: ${APPS.RANCHER.IO_ACCESS_TOKEN}
+          username: $\{APPS.RANCHER.IO_USERNAME\}
+          password: $\{APPS.RANCHER.IO_ACCESS_TOKEN\}
   network:
     apiHost: $API_HOST
     apiVIP: $API_VIP
@@ -363,8 +363,8 @@ kubernetes:
       - name: rancher-application-collection
         url: oci://dp.apps.rancher.io/charts
         authentication:
-          username: ${APPS.RANCHER.IO_USERNAME}
-          password: ${APPS.RANCHER.IO_ACCESS_TOKEN}
+          username: $\{APPS.RANCHER.IO_USERNAME\}
+          password: $\{APPS.RANCHER.IO_ACCESS_TOKEN\}
     network:
       apiHost: $API_HOST
       apiVIP: $API_VIP
@@ -842,8 +842,8 @@ global:
 privateRegistry:
   createSecret: true
   registryUrl: dp.apps.rancher.io
-  registryUser: ${APPS.RANCHER.IO_USERNAME}
-  registryPasswd: ${APPS.RANCHER.IO_ACCESS_TOKEN}
+  registryUser: $\{APPS.RANCHER.IO_USERNAME\}
+  registryPasswd: $\{APPS.RANCHER.IO_ACCESS_TOKEN\}
   registrySecret: rancher-app-collection
 ----
 
@@ -994,6 +994,16 @@ This section describes how to prepare the image for air-gap environments showing
 - The `mgmt-cluster.yaml` file must be modified to include the `embeddedArtifactRegistry` section with the `images` field set to all container images to be included into the EIB output image.
 - The `custom/scripts/99-register.sh` script must be removed when use an air-gap environment.
 
+To include the SUSE Private Registry in the management cluster for future downstream deployments, the following changes are also required:
+
+- The `mgmt-cluster.yaml` file must be modified to include the helm chart section as well as the embedded artifacts with the new images to include them in the EIB output image.
+- The `kubernetes/values` and `kubernetes/manifests` folders must include additional manifest files to properly configure the SUSE Private Registry in the management cluster. 
+
+[NOTE] 
+====
+You will need certain credentials, which can be retrieved by following the official https://documentation.suse.com/cloudnative/suse-private-registry/html/private-registry/pr-deployment.html#pr-deployment-kube-secrets[SUSE Private Registry documentation].
+====
+
 [#mgmt-cluster-image-definition-file-airgap]
 ==== Modifications in the definition file
 
@@ -1002,7 +1012,7 @@ In this section the `images` field must contain the list of all container images
 
 [NOTE]
 ====
-The following is an example of the `mgmt-cluster.yaml` file with the `embeddedArtifactRegistry` section included.
+The following example `mgmt-cluster.yaml` file includes both the `embeddedArtifactRegistry` section and the SUSE Private Registry feature.
 Make sure to the listed images contain the component versions you need.
 ====
 
@@ -1028,6 +1038,13 @@ kubernetes:
   version: {version-kubernetes-rke2}
   helm:
     charts:
+      - createNamespace: true
+        installationNamespace: kube-system
+        name: private-registry-helm
+        repositoryName: privateregistry
+        targetNamespace: suse-private-registry
+        valuesFile: privateregistry.yaml
+        version: {version-private-registry}
       - name: cert-manager
         repositoryName: jetstack
         version: {version-cert-manager}
@@ -1088,8 +1105,15 @@ kubernetes:
       - name: rancher-application-collection
         url: oci://dp.apps.rancher.io/charts
         authentication:
-          username: ${APPS.RANCHER.IO_USERNAME}
-          password: ${APPS.RANCHER.IO_ACCESS_TOKEN}
+          username: $\{APPS.RANCHER.IO_USERNAME\}
+          password: $\{APPS.RANCHER.IO_ACCESS_TOKEN\}
+      - name: privateregistry
+        authentication:
+          username: $\{PRIVATE_REGISTRY_USERNAME\}
+          password: $\{PRIVATE_REGISTRY_PASSWORD\}
+        plainHTTP: false
+        skipTLSVerify: false
+        url: oci://registry.suse.com/private-registry
     network:
       apiHost: $API_HOST
       apiVIP: $API_VIP
@@ -1103,7 +1127,22 @@ kubernetes:
 #     type: server
 #       type: server
 embeddedArtifactRegistry:
+  registries:
+    - uri: dp.apps.rancher.io
+      authentication:
+        username: $\{APPS.RANCHER.IO_USERNAME\}
+        password: $\{APPS.RANCHER.IO_ACCESS_TOKEN\}
+    - uri: registry.suse.com
+      authentication:
+        username: $\{PRIVATE_REGISTRY_USERNAME\}
+        password: $\{PRIVATE_REGISTRY_PASSWORD\}
   images:
+    - name: registry.suse.com/private-registry/harbor-core:1.1.1-1.19
+    - name: registry.suse.com/private-registry/harbor-jobservice:1.1.1-1.19
+    - name: registry.suse.com/private-registry/harbor-portal:1.1.1-1.20
+    - name: registry.suse.com/private-registry/harbor-registry:1.1.1-1.19
+    - name: registry.suse.com/private-registry/harbor-registryctl:1.1.1-1.19
+    - name: registry.suse.com/private-registry/harbor-trivy-adapter:1.1.1-1.24
     - name: registry.rancher.com/rancher/hardened-cluster-autoscaler:v1.10.2-build20251015
     - name: registry.rancher.com/rancher/hardened-cni-plugins:v1.8.0-build20251014
     - name: registry.rancher.com/rancher/hardened-coredns:v1.13.1-build20251015
@@ -1158,6 +1197,102 @@ embeddedArtifactRegistry:
 
 - The `custom/scripts/99-register.sh` script must be removed when using an air-gap environment. As you can see in the directory structure, the `99-register.sh` script is not included in the `custom/scripts` folder.
 
+[#mgmt-cluster-kubernetes-folder-airgap]
+==== Modifications in the kubernetes folder
+
+- You need to modify the `$\{MGMT_CLUSTER_REGISTRY_IP\}` with a reserved static IP for the SUSE Private Registry in the following file:
+
+. `kubernetes/manifests/metallb-registry.yaml`
++
+[,yaml,subs="attributes"]
+----
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: private-registry
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - private-registry-pool
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: private-registry-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - $\{MGMT_CLUSTER_REGISTRY_IP\}/32
+  serviceAllocation:
+    namespaces:
+    - suse-private-registry
+----
+
+. `kubernetes/helm/values/privateregistry.yaml`
++
+[,yaml,subs="attributes"]
+----
+core:
+  secretName: suse-registry-tls
+expose:
+  tls:
+    certSource: secret
+    enabled: true
+    secret:
+      secretName: suse-registry-tls
+  type: loadBalancer
+externalURL: https://$\{MGMT_CLUSTER_REGISTRY_IP\}
+persistence:
+  persistentVolumeClaim:
+    registry:
+      size: 20Gi
+----
+
+- The `kubernetes/manifests/suse-private-registry-creds.yaml` must be created with the following content:
+
+[,yaml,subs="attributes"]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: suse-registry
+  namespace: suse-private-registry
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: $\{DOCKER_CONFIG_JSON_BASE64\}  
+---
+apiVersion: v1
+kind: Secret
+metadata:
+    name: suse-registry-tls
+    namespace: suse-private-registry
+type: kubernetes.io/tls
+data:
+    tls.crt: $\{TLS_CRT_BASE64\}    
+    tls.key: $\{TLS_KEY_BASE64\}
+----
+
+You need to modify the `$\{DOCKER_CONFIG_JSON_BASE64\}`, `$\{TLS_CRT_BASE64\}` and `$\{TLS_KEY_BASE64\}`. To correctly configure the docker config json (base64), you can do the following:
+
+[,shell,subs="attributes"]
+----
+# $\{DOCKER_CONFIG_JSON_BASE64\} CONTENT
+echo -n '{"auths": {"&lt;MGMT_CLUSTER_REGISTRY_IP&gt;": {"username": "&lt;USERNAME&gt;", "password": "&lt;PASSWORD&gt;", "auth": "&lt;AUTH&gt;"}}}' | base64
+----
+
+where the IP is the same as the previously configured `$\{MGMT_CLUSTER_REGISTRY_IP\}`, and the `username`, `password`, and `auth` can be retrieved from the https://documentation.suse.com/cloudnative/suse-private-registry/html/private-registry/pr-deployment.html#pr-deployment-kube-secrets[SUSE Private Registry official documentation].
+
+To generate the base64-encoded TLS certificate and key (`tls.crt` and `tls.key`), you can create your own by running the following commands:
+
+[,shell,subs="attributes"]
+----
+# Generate a self-signed certificate and key
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -sha256 -days 365 -nodes
+
+# Convert them to base64 for the suse-private-registry-creds.yaml file
+cat cert.pem | base64 -w 0
+cat key.pem | base64 -w 0
+----
 
 [#mgmt-cluster-image-creation]
 === Image creation

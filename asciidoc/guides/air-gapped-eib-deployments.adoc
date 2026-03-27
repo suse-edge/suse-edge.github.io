@@ -22,6 +22,7 @@ We will cover an air-gapped installation of:
 * <<components-suse-security>>
 * <<components-suse-storage>>
 * <<components-kubevirt>>
+* SUSE Private Registry
 
 [WARNING]
 ====
@@ -888,6 +889,180 @@ replicaset.apps/cdi-apiserver-5598c9bf47     1         1         1       3m44s
 replicaset.apps/cdi-deployment-7cbc5db7f8    1         1         1       3m44s
 replicaset.apps/cdi-operator-777c865745      1         1         1       3m48s
 replicaset.apps/cdi-uploadproxy-646f4cd7f7   1         1         1       3m44s
+----
+
+== SUSE Private Registry Installation [[suse-private-registry-install]]
+
+To include the SUSE Private Registry in an air-gapped deployment, we must update the definition file to include the required helm chart as well as the embedded artifacts for the new images.
+
+Let's update the definition file:
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+kubernetes:
+  version: {version-kubernetes-rke2}
+  helm:
+    charts:
+      - createNamespace: true
+        installationNamespace: kube-system
+        name: private-registry-helm
+        repositoryName: privateregistry
+        targetNamespace: suse-private-registry
+        valuesFile: privateregistry.yaml
+        version: {version-private-registry}
+    repositories:
+      - name: privateregistry
+        authentication:
+          username: $\{PRIVATE_REGISTRY_USERNAME\}
+          password: $\{PRIVATE_REGISTRY_PASSWORD\}
+        plainHTTP: false
+        skipTLSVerify: false
+        url: oci://registry.suse.com/private-registry
+embeddedArtifactRegistry:
+  registries:
+    - uri: registry.suse.com
+      authentication:
+        username: $\{PRIVATE_REGISTRY_USERNAME\}
+        password: $\{PRIVATE_REGISTRY_PASSWORD\}
+  images:
+    - name: registry.suse.com/private-registry/harbor-core:1.1.1-1.19
+    - name: registry.suse.com/private-registry/harbor-jobservice:1.1.1-1.19
+    - name: registry.suse.com/private-registry/harbor-portal:1.1.1-1.20
+    - name: registry.suse.com/private-registry/harbor-registry:1.1.1-1.19
+    - name: registry.suse.com/private-registry/harbor-registryctl:1.1.1-1.19
+    - name: registry.suse.com/private-registry/harbor-trivy-adapter:1.1.1-1.24
+----
+
+[NOTE] 
+====
+You will need certain credentials, which can be retrieved by following the official https://documentation.suse.com/cloudnative/suse-private-registry/html/private-registry/pr-deployment.html#pr-deployment-kube-secrets[SUSE Private Registry documentation]. 
+You must also modify the `$\{PRIVATE_REGISTRY_USERNAME\}` and `$\{PRIVATE_REGISTRY_PASSWORD\}` variables. Make sure to list the images containing the component versions you need.
+====
+
+Now we need to add the required Kubernetes manifests to properly configure the SUSE Private Registry.
+
+You need to modify the `$\{MGMT_CLUSTER_REGISTRY_IP\}` with a reserved static IP for the SUSE Private Registry in the following files:
+
+. `kubernetes/manifests/metallb-registry.yaml`
++
+[,yaml,subs="attributes"]
+----
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: private-registry
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - private-registry-pool
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: private-registry-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - $\{MGMT_CLUSTER_REGISTRY_IP\}/32
+  serviceAllocation:
+    namespaces:
+    - suse-private-registry
+----
+
+. `kubernetes/helm/values/privateregistry.yaml`
++
+[,yaml,subs="attributes"]
+----
+core:
+  secretName: suse-registry-tls
+expose:
+  tls:
+    certSource: secret
+    enabled: true
+    secret:
+      secretName: suse-registry-tls
+  type: loadBalancer
+externalURL: https://$\{MGMT_CLUSTER_REGISTRY_IP\}
+persistence:
+  persistentVolumeClaim:
+    registry:
+      size: 20Gi
+----
+
+Finally, the `kubernetes/manifests/suse-private-registry-creds.yaml` must be created with the following content:
+
+[,yaml,subs="attributes"]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: suse-registry
+  namespace: suse-private-registry
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: $\{DOCKER_CONFIG_JSON_BASE64\}  
+---
+apiVersion: v1
+kind: Secret
+metadata:
+    name: suse-registry-tls
+    namespace: suse-private-registry
+type: kubernetes.io/tls
+data:
+    tls.crt: $\{TLS_CRT_BASE64\}    
+    tls.key: $\{TLS_KEY_BASE64\}
+----
+
+To correctly configure the docker config json (base64) for `$\{DOCKER_CONFIG_JSON_BASE64\}`, run:
+
+[,shell,subs="attributes"]
+----
+# $\{DOCKER_CONFIG_JSON_BASE64\} CONTENT
+echo -n '{"auths": {"&lt;MGMT_CLUSTER_REGISTRY_IP&gt;": {"username": "&lt;USERNAME&gt;", "password": "&lt;PASSWORD&gt;", "auth": "&lt;AUTH&gt;"}}}' | base64
+----
+
+Where the IP is the same as the previously configured `$\{MGMT_CLUSTER_REGISTRY_IP\}`, and the `username`, `password`, and `auth` can be retrieved from the https://documentation.suse.com/cloudnative/suse-private-registry/html/private-registry/pr-deployment.html#pr-deployment-kube-secrets[SUSE Private Registry official documentation].
+
+To generate the base64-encoded TLS certificate and key (`tls.crt` and `tls.key`) for `$\{TLS_CRT_BASE64\}` and `$\{TLS_KEY_BASE64\}`, you can create your own by running:
+
+[,shell,subs="attributes"]
+----
+# Generate a self-signed certificate and key
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -sha256 -days 365 -nodes
+
+# Convert them to base64 for the suse-private-registry-creds.yaml file
+cat cert.pem | base64 -w 0
+cat key.pem | base64 -w 0
+----
+
+Verify SUSE Private Registry:
+
+[,shell]
+----
+/var/lib/rancher/rke2/bin/kubectl get pods -n suse-private-registry --kubeconfig /etc/rancher/rke2/rke2.yaml
+----
+
+The output should be similar to the following, showing that everything has been successfully deployed:
+[,console]
+----
+NAME                                                      READY   STATUS    RESTARTS   AGE
+pod/private-registry-harbor-core-588fd4876f-8tqnv         1/1     Running   0          4m30s
+pod/private-registry-harbor-database-0                    1/1     Running   0          4m30s
+pod/private-registry-harbor-jobservice-7658f97fbc-4vq6n   1/1     Running   0          4m30s
+pod/private-registry-harbor-portal-5455ccc4bc-jpmt5       1/1     Running   0          4m30s
+pod/private-registry-harbor-redis-0                       1/1     Running   0          4m30s
+pod/private-registry-harbor-registry-5648b9d89-wdswz      2/2     Running   0          4m30s
+pod/private-registry-harbor-trivy-0                       1/1     Running   0          4m30s
 ----
 
 == Troubleshooting
