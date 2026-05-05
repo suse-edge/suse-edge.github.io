@@ -1,6 +1,6 @@
 [#atip-features]
 = Telco features configuration
-:revdate: 2026-05-08
+:revdate: 2026-05-11
 :page-revdate: {revdate}
 :experimental:
 
@@ -1890,6 +1890,7 @@ Check the synchronization status by observing the logs with:
 # journalctl -e -u ptp4l
 ----
 
+[#ptp-bc-setup]
 ==== PTP configuration of a Boundary Clock
 
 The previous sections covered the configuration of an Ordinary Clock, but Telco deployments can require the node to act as a Boundary Clock. In such a scenario the reference time must be propagated from a Grand Master to one or more Time Receivers downstream, which requires an NIC with two or more ports. In this case one port will take the Time Receiver role, that is driving the updates of the PTP Hardware Clock (PHC) on the NIC, while the remaining ones will work as Time Transmitters. A single instance of `ptp4l` is sufficient for a single multi-port NIC, but each kernel interface involved in the time distribution must be provided, as part of its configuration. For example, update the  `/etc/sysconfig/ptp4l` file to include four ports, just replace the variables with actual interface names or adjust it as needed:
@@ -1944,6 +1945,7 @@ serverOnly                      1
 
 However, make sure to determine the correct connection to the GM before starting the daemon.
 
+[#ptp-phc2sys-setup]
 ==== Synchronization of the system clock from PTP
 
 It is important to keep in mind that PTP works by synchronizing NIC local hardware clocks. This does not automatically align the system clock with the GM, as the system clock is derived from a different hardware clock.
@@ -2093,6 +2095,386 @@ Besides other variables, the above definition must be completed with the interfa
 ====
 
 At this point, your hosts should have a working and running PTP stack and will start negotiating their PTP role.
+
+=== PTP on Intel Granite Rapids-D platforms
+
+{product} supports precise timing on a variety of different platforms, including the latest Intel Granite Rapids-D based designs (GNR-D). These new servers typically include an embedded high-speed Ethernet controller and one or more add-in cards with an Ethernet controller for additional ports. Contrary to previous platform generations, they are also equipped with a dedicated DPLL that allows the routing of the timing signals across the system and the different NICS, and no longer requires external cabling.
+The overall deployment is thus simplified, but specific steps and software components are required, such as boot time DPLL and internal signal configuration.
+
+Before going through the setup steps, download and install the latest kernel driver for the _Intel 800 Series Network Devices_ from the https://www.intel.com/content/www/us/en/download/19630/intel-network-adapter-driver-for-800-series-devices-under-linux.html[Intel website]. Select the zip file containing the "ice_RPM_Files" and unpack the archive, then install the `ice-kmp-default-*sles16sp0.x86_64.rpm` RPM there contained, for example file `ice-kmp-default-2.4.5_k6.12.0_160000.5-1.sles16sp0.x86_64.rpm`:
+
+[,console]
+----
+# transactional-update pkg install ice-kmp-default-2.4.5_k6.12.0_160000.5-1.sles16sp0.x86_64.rpm
+----
+
+Reboot the server to make the change persistent and effective.
+
+[NOTE]
+====
+* A Dell PowerEdge XR8720t system will be used as the reference system through the examples, the kernel interfaces and port configuration might be different on a different GNR-D server.
+* A Telco deployment is assumed and the Telco profile G.8275.1 used through the following sections for PTP.
+====
+
+==== PTP Boundary Clock
+
+This section describes the process of setting up a Boundary Clock (BC) on a GNR-D system, where one port on the integrated NIC receives the PTP timestamps from a GM and all the remaining ports in the system act as Time Transmitters towards other network nodes.
+[NOTE]
+====
+The setup described here is completely static. If the GM becomes unavailable, the downstream synchronization will exclusively rely on the host holdhover capabilities; no automatic switching to a different source of time reference will be performed.
+====
+
+To enable the BC behavior, run the following steps in the same order every time the system is booted:
+
+. Verify the expected PTP devices that control the PHCs are present:
++
+[,console]
+----
+# ls -l /sys/class/ptp/
+total 0
+lrwxrwxrwx. 1 root root 0 Apr 27 20:21 ptp1 -> ../../devices/pci0000:12/0000:12:04.0/0000:13:00.0/ptp/ptp1
+lrwxrwxrwx. 1 root root 0 Apr 27 20:21 ptp2 -> ../../devices/pci0000:6b/0000:6b:02.0/0000:6c:00.0/ptp/ptp2
+lrwxrwxrwx. 1 root root 0 Apr 27 20:21 ptp3 -> ../../devices/pci0000:6b/0000:6b:06.0/0000:6e:00.0/ptp/ptp3
+----
++
+[NOTE]
+====
+Adjust the subsequent commands according to the actual names found on the system being configured.
+====
+
+. Identify the embedded controller, as it will require specific configuration:
++
+The previous output should indicate the device to which they are bound to through the PCI address and you can use `lspci` to look up the device type:
++
+[,console]
+----
+# lspci -s 0000:13:00.0
+13:00.0 Ethernet controller: Intel Corporation Ethernet Connection E825-C for SFP (rev 04)
+# lspci -s 0000:6c:00.0
+6c:00.0 Ethernet controller: Intel Corporation Ethernet Controller E830-CC for SFP
+# lspci -s 0000:6e:00.0
+6e:00.0 Ethernet controller: Intel Corporation Ethernet Controller E830-CC for SFP
+----
++
+This specific server is equipped with an _Intel E825-C_ embedded controller and two _E830-CC_ add-in cards.
++
+Alternatively, you can find more information about the controller by looking up the first network port of the controller that exposes that PHC:
++
+[,console]
+----
+# ls -l /sys/class/ptp/ptp0/device/net/
+total 0
+drwxr-xr-x. 5 root root 0 Apr 30 15:16 em5
+# ethtool -i em5
+driver: ice
+version: 2.4.5
+firmware-version: 4.03 0x80007f91 1.3881.0
+expansion-rom-version:
+bus-info: 0000:13:00.0
+[...]
+----
++
+Note that `em5` is the first port of the integrated Ethernet controller on this system.
+
+. Configure the signals between the PHC on the integrated Ethernet controller and the system timing DPLL:
+
+.. Let the DPLL drive the Ethernet clock on the integrated controller:
++
+[,console]
+----
+# echo 4 1 > /sys/class/net/em5/device/tspll_cfg
+----
+
+.. Enable a pulse every top of second (Pulse Per Second, PPS) from the PHC to the DPLL through the SDP2 pin (1kHz signal):
++
+[,console]
+----
+# echo 2 1 > /sys/class/ptp/ptp1/pins/SDP2
+# echo 1 0 0 0 1000000 > /sys/class/ptp/ptp1/period
+----
+
+.. Optionally, pin SPD0 (1Hz signal) can be enabled too:
++
+[,console]
+----
+# echo 2 2 > /sys/class/ptp/ptp1/pins/SDP0
+# echo 2 0 0 1 0 > /sys/class/ptp/ptp1/period
+----
+
+.. Enable the 1 PPS signal to be propagated from the timing system DPLL to the additional add-in cards:
++
+[,console]
+----
+# echo 1 1 > /sys/class/ptp/ptp2/pins/SDP1
+# echo 1 1 > /sys/class/ptp/ptp3/pins/SDP1
+----
+
+. Run `ts2phc` to keep PHCs of the add-in cards in sync with the same timestamp of PHC `/dev/ptp1`:
++
+[,console]
+----
+# ts2phc -f ts2phc-aic-all.cfg -s /dev/ptp1
+----
++
+Refer to <<gnrd-ts2phc-config-aics>> for the content of `ts2phc-aic-all.cfg`.
+
+. Run an instance of `ptp4l` for the integrated controller (`/dev/ptp1`):
++
+[,console]
+----
+# ptp4l -f ptp4l-G.8275.1-nac.conf
+----
++
+Refer to <<gnrd-ptp4l-config-nac>> for the content of `ptp4l-G.8275.1-nac.conf`.
+
+. Run an instance of `ptp4l` for each add-in card (`/dev/ptp3` and/or `/dev/ptp2`):
++
+[,console]
+----
+# ptp4l -f ptp4l-G.8275.1-aic1.conf
+# ptp4l -f ptp4l-G.8275.1-aic2.conf
+----
++
+Refer to <<gnrd-ptp4l-config-aics>> for the content of the configuration files.
++
+[NOTE]
+====
+To prevent conflicts and enable the next step, each of these instances must use different control and read-only sockets.
+====
+
+. Synchronize the PTP runtime parameters and values of the AICs `ptp4l` instances with `pmc`:
++
+A BC is expected to forward not only the time of a GM it is connected to, but also ancillary parameters, such as its clock class and accuracy level. This happens automatically within a group of interfaces managed by the same `ptp4l` instance, but not accross different `ptp4l` instances, handling different PHCs and ports.
++
+Once the system is synchronized to a GM, query the `ptp4l` instance on the integrated controller and set the values on the remaining `ptp4l` instances via `pmc` commands. For example:
++
+[,console]
+----
+# pmc -f /etc/ptp4l-G.8275.1-nac-bmca.conf -u -b 0 'GET PARENT_DATA_SET' | grep gm
+                gm.ClockClass                         8
+                gm.ClockAccuracy                      0xfe
+                gm.OffsetScaledLogVariance            0xffff
+# pmc -f /etc/ptp4l-G.8275.1-nac-bmca.conf -u -b 0 'GET TIME_PROPERTIES_DATA_SET' | grep -v PROPERTIES
+                currentUtcOffset      37
+                leap61                0
+                leap59                0
+                currentUtcOffsetValid 0
+                ptpTimescale          1
+                timeTraceable         0
+                frequencyTraceable    0
+                timeSource            0xa0
+pmc -f /etc/ptp4l-G.8275.1-aic1-static.conf -u -b 0 'SET GRANDMASTER_SETTINGS_NP
+                clockClass              8
+                clockAccuracy           0xfe
+                offsetScaledLogVariance 0xffff
+                currentUtcOffset        37
+                leap61                  0
+                leap59                  0
+                currentUtcOffsetValid   0
+                ptpTimescale            1
+                timeTraceable           0
+                frequencyTraceable      0
+                timeSource              0xa0
+----
++
+Refer to <<gnrd-pmc-forward>> to automate this process and avoid manual steps.
+
+. Optionally run `phc2sys` to derive the system time from the PTP synchronization:
++
+[,console]
+----
+# phc2sys -f /etc/ptp4l-G.8275.1-nac.conf -s /dev/ptp1 -c CLOCK_REALTIME -w
+----
++
+The input file is the same configuration file used for `ptp4l` and the integrated controller. See <<ptp-phc2sys-setup>> for letting systemd handle its execution.
+
+==== Configuration files
+
+This section provides sample configuration files and scripts that can be used in conjunction with the above steps to quickly set up a working BC on GNR-D. The `ptp4l` configuration files contain all the required settings, without the need for additional external execution flags, and are all based around the Telco profile G.8275.1. More details are provided for each file in their respective sections.
+
+[#gnrd-ptp4l-config-nac]
+===== `ptp4l` configuration file for the integrated controller (`/dev/ptp1`)
+
+[source,]
+----
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:1b:19:00:00:00
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l-nac"
+uds_address                     /var/run/ptp4l-nac
+uds_ro_address                  /var/run/ptp4lro-nac
+
+[em1]
+
+[em2]
+
+[em3]
+
+[em4]
+----
+
+The above configuration leverages the BMCA to determine the role of the port, assuming a GM is available through one of them. If tighter control is needed, add the `serverOnly` flag under each interface definition. For more details, refer to <<ptp-bc-setup>> or to the add-in cards configuration below as an example.
+For the sake of brevity, only four interfaces are listed, you need to adjust according to your requirements.
+
+[#gnrd-ptp4l-config-aics]
+===== `ptp4l` configuration file for add-in cards (`/dev/ptp2` or `/dev/ptp3`)
+
+[source,]
+----
+# Telecom G.8275.1 example configuration
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     250
+G.8275.defaultDS.localPriority  250
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:1b:19:00:00:00
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l-iac1"
+uds_address                     /var/run/ptp4l-aic1
+uds_ro_address                  /var/run/ptp4lro-aic1
+
+[p1p1]
+serverOnly                      1
+
+[p1p2]
+serverOnly                      1
+
+[p1p3]
+serverOnly                      1
+
+[p1p4]
+serverOnly                      1
+----
+
+For the sake of brevity, only four interfaces are listed. You need to adjust according to your requirements. All the interfaces have been statically set to the TimeTransmitter role.
+
+[#gnrd-ts2phc-config-aics]
+===== `ts2phc` configuration file for add-in cards
+
+[source,]
+----
+[global]
+use_syslog              0
+verbose                 1
+logging_level           7
+ts2phc.pulsewidth       100000000
+
+[p1p1]
+ts2phc.channel          1
+ts2phc.extts_polarity   rising
+ts2phc.pin_index        1
+
+[p2p1]
+ts2phc.channel          1
+ts2phc.extts_polarity   rising
+ts2phc.pin_index        1
+----
+
+This configuration covers the synchronization of two add-in cards (referenced by their first port, `p1p1` and `p2p1`) via the SDP1 on each controller.
+
+[#gnrd-pmc-forward]
+===== GM parameters forwarding script
+
+The script below can be leveraged to forward the GM values and parameters to Time Receivers on ports handled by `ptp4l` instances other than the one where the GM lives. Do not forget to edit the `Input variables` section to adjust the file names and run it once the system is sychronized to a GM.
+
+[bash,]
+----
+#!/bin/bash
+
+set -euo pipefail
+
+################## Input variables ##################
+VERBOSE=1
+
+CONFIG_FILE_NAC=/etc/ptp4l-G.8275.1-nac-bmca.conf
+CONFIG_FILES_AICS=(/etc/ptp4l-G.8275.1-aic1-static.conf /etc/ptp4l-G.8275.1-aic2-static.conf)
+
+#####################################################
+
+
+# Check the system is synchronized to a GM
+GM_PRESENT=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET TIME_STATUS_NP' | awk '/gmPresent/ {print $2}')
+
+if [ "${GM_PRESENT}" != "true" ]; then
+    echo "No GM present, exiting..."
+    exit 1
+fi
+
+# Get the "upstream" Grand Master values
+
+PDS_GM_VALUES=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET PARENT_DATA_SET' | awk 'BEGIN {ORS=" "} /gm./ {print $2}')
+TPDS_GM_VALUES=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET TIME_PROPERTIES_DATA_SET' | awk 'BEGIN {ORS=" "} NR>2 {print $2}')
+
+if [ -z "$PDS_GM_VALUES" ]; then
+    echo "No PARENT_DATA_SET values retrieved"
+    exit 2
+elif [ -z "$TPDS_GM_VALUES" ]; then
+    echo "No TIME_PROPERTIES_DATA_SET values retrieved"
+    exit 2
+fi
+
+# Unpack from PARENT_DATA_SET
+read CLOCK_CLASS CLOCK_ACCURACY VARIANCE <<< $PDS_GM_VALUES
+
+# Unpack from TIME_PROPERTIES_DATA_SET
+read UTC_OFFSET LEAP_61 LEAP_59 UTC_OFFSET_VALID PTP_TIMESCALE T_TRACEABLE F_TRACEABLE T_SOURCE <<< $TPDS_GM_VALUES
+
+if [ "$VERBOSE" -eq 1 ]; then
+    echo "Read from PARENT_DATA_SET: clockClass=${CLOCK_CLASS} clockAccuracy=${CLOCK_ACCURACY} offsetScaledLogVariance=${VARIANCE}"
+    echo "Read from TIME_PROPERTIES_DATA_SET: currentUtcOffset=${UTC_OFFSET} leap61=${LEAP_61} leap59=${LEAP_59}" \
+         "currentUtcOffsetValid=${UTC_OFFSET_VALID} ptpTimescale=${PTP_TIMESCALE} timeTraceable=${T_TRACEABLE}" \
+         "frequencyTraceable=${F_TRACEABLE} timeSource=${T_SOURCE}"
+fi
+
+
+# Forward these values to the "downstream" Time Receivers updating the ptp4l instances
+
+for FILE in "${CONFIG_FILES_AICS[@]}"; do
+    if [ "$VERBOSE" -eq 1 ]; then
+        echo "Updating GRANDMASTER_SETTINGS_NP (${FILE})"
+    fi
+
+    pmc -f ${FILE} -u -b 0 'SET GRANDMASTER_SETTINGS_NP
+       clockClass              '${CLOCK_CLASS}'
+       clockAccuracy           '${CLOCK_ACCURACY}'
+       offsetScaledLogVariance '${VARIANCE}'
+       currentUtcOffset        '${UTC_OFFSET}'
+       leap61                  '${LEAP_61}'
+       leap59                  '${LEAP_59}'
+       currentUtcOffsetValid   '${UTC_OFFSET_VALID}'
+       ptpTimescale            '${PTP_TIMESCALE}'
+       timeTraceable           '${T_TRACEABLE}'
+       frequencyTraceable      '${F_TRACEABLE}'
+       timeSource              '${T_SOURCE}'' &> /dev/null
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to update ${FILE}"
+    fi
+done
+----
+
+[NOTE]
+====
+The script must run every time the GM changes.
+====
 
 [#sctp]
 === SCTP - Stream Control Transmission Protocol
