@@ -1,6 +1,6 @@
 [#atip-features]
 == Telco features configuration
-:revdate: 2026-05-07
+:revdate: 2026-05-08
 :page-revdate: {revdate}
 :experimental:
 
@@ -1887,6 +1887,60 @@ Check the synchronization status by observing the logs with:
 ----
 # journalctl -e -u ptp4l
 ----
+
+===== PTP configuration of a Boundary Clock
+
+The previous sections covered the configuration of an Ordinary Clock, but Telco deployments can require the node to act as a Boundary Clock. In such a scenario the reference time must be propagated from a Grand Master to one or more Time Receivers downstream, which requires an NIC with two or more ports. In this case one port will take the Time Receiver role, that is driving the updates of the PTP Hardware Clock (PHC) on the NIC, while the remaining ones will work as Time Transmitters. A single instance of `ptp4l` is sufficient for a single multi-port NIC, but each kernel interface involved in the time distribution must be provided, as part of its configuration. For example, update the  `/etc/sysconfig/ptp4l` file to include four ports, just replace the variables with actual interface names or adjust it as needed:
+
+[,shell]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf --message_tag ptp-8275.1 -i $IFNAME1 -i $IFNAME2 -i $IFNAME3 -i $IFNAME4"
+----
+[NOTE]
+====
+There is no need to set `clock_type` to `BC`, as it will be automatically implied if more than one port is provided.
+====
+
+Once done, the `ptp4l` daemon can be (re)started, with:
+
+[,console]
+----
+# systemctl restart ptp4l
+----
+
+Without any specific port configuration, `ptp4l` will run the BMCA to determine through which port the GM can be reached. If a static configuration is preferred, append a section for each port with the prescribed role in the configuration file. For example:
+
+[source,]
+----
+# Telecom G.8275.1 example configuration
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+
+[$IFNAME1]
+# Time Receiver by default
+
+[$IFNAME2]
+serverOnly                      1
+
+[$IFNAME3]
+serverOnly                      1
+
+[$IFNAME4]
+serverOnly                      1
+----
+
+However, make sure to determine the correct connection to the GM before starting the daemon.
 
 ===== Synchronization of the system clock from PTP
 
