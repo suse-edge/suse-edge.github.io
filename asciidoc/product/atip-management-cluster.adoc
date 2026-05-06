@@ -866,7 +866,7 @@ privateRegistry:
 global:
   ironicIP: ${METAL3_VIP}
   enable_vmedia_tls: false
-  additionalTrustedCAs: false
+  # trustedCA: tls-ca-bundle  # Optional: Uncomment and set to ConfigMap name for additional trusted CAs
 metal3-ironic:
   ipa:
     useHauler: true
@@ -899,10 +899,40 @@ metal3-media:
     hostPath: ${MEDIA_VOLUME_PATH}
 ----
 
-An external media server can be used to store the images, and in the case you want to use it with TLS, you will need to modify the following configurations:
+An external media server can be used to store the images, and in the case you want to use it with TLS, you will need to provide the trusted CA bundle for Metal^3^.
 
-- set to `true` the `additionalTrustedCAs` in the previous `metal3.yaml` file to enable the additional trusted CAs from the external media server.
-- include the following secret configuration in the folder `kubernetes/manifests/metal3-cacert-secret.yaml` to store the CA certificate of the external media server.
+*Prepare the CA bundle:*
+
+First, prepare your CA bundle file containing all the certificates needed by Metal^3^. This includes your external media server's CA certificate(s).
++
+*Optional - System CA Bundle:* If Metal^3^ also needs to trust public CAs (for example, when accessing external HTTPS resources), you can include the system CA bundle. Extract it from a container image and concatenate it with your custom certificates:
++
+[,shell]
+----
+# Extract system CAs from a container image
+podman run --rm registry.suse.com/bci/bci-base:latest cat /etc/ssl/certs/ca-certificates.crt > system-cas.pem
+
+# Concatenate system CAs with your custom CA
+cat system-cas.pem your-custom-ca.crt > ca-bundle.pem
+----
++
+Or, if you only need your custom CA:
++
+[,shell]
+----
+cp your-custom-ca.crt ca-bundle.pem
+----
++
+[IMPORTANT]
+====
+If you include the system CA bundle, you become responsible for keeping it up-to-date. System CAs in container images may become outdated as certificates expire or are revoked. Periodically refresh the bundle by re-extracting from an updated container image.
+====
+
+*Create the ConfigMap:*
+
+You can create the ConfigMap in two ways:
+
+. *Using a manifest file (recommended for EIB):* Create the file `kubernetes/manifests/metal3-cacert-configmap.yaml` and include the CA bundle content inline. You need to properly indent each line of the certificate with 4 spaces:
 +
 [,yaml]
 ----
@@ -912,20 +942,56 @@ metadata:
   name: metal3-system
 ---
 apiVersion: v1
-kind: Secret
+kind: ConfigMap
 metadata:
-  name: tls-ca-additional
+  name: tls-ca-bundle
   namespace: metal3-system
-type: Opaque
 data:
-  ca-additional.crt: {{ additional_ca_cert | b64encode }}
+  ca-bundle.pem: |
+    -----BEGIN CERTIFICATE-----
+    MIIDXTCCAkWgAwIBAgIJAKJ... (your certificate content here)
+    ...
+    -----END CERTIFICATE-----
+    -----BEGIN CERTIFICATE-----
+    MIIEkjCCA3qgAwIBAgIQCgF... (additional certificates if any)
+    ...
+    -----END CERTIFICATE-----
 ----
-
-The `additional_ca_cert` is the base64-encoded CA certificate of the external media server. You can use the following command to encode the certificate and generate the secret doing manually:
-
++
+To fill this file automatically from your `ca-bundle.pem`, you can use:
++
 [,shell]
 ----
-kubectl -n meta3-system create secret generic tls-ca-additional --from-file=ca-additional.crt=./ca-additional.crt
+cat > kubernetes/manifests/metal3-cacert-configmap.yaml <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: metal3-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tls-ca-bundle
+  namespace: metal3-system
+data:
+  ca-bundle.pem: |
+$(sed 's/^/    /' ca-bundle.pem)
+EOF
+----
+
+. *Using kubectl directly (for manual deployment):* If you're not using EIB and want to create the ConfigMap directly on the cluster:
++
+[,shell]
+----
+kubectl -n metal3-system create configmap tls-ca-bundle --from-file=ca-bundle.pem=./ca-bundle.pem
+----
+
+- Set the `global.trustedCA` value in the `metal3.yaml` file to reference the ConfigMap name:
++
+[,yaml]
+----
+global:
+  trustedCA: tls-ca-bundle
 ----
 ====
 
@@ -1426,7 +1492,7 @@ We can now define the remaining files for a single node configuration, starting 
 global:
   ironicIP: ${MGMT_CLUSTER_IP_V4}
   enable_vmedia_tls: false
-  additionalTrustedCAs: false
+  # trustedCA: tls-ca-bundle  # Optional: Uncomment and set to ConfigMap name for trusted CA bundle
 metal3-ironic:
   global:
     predictableNicNames: true
@@ -1462,7 +1528,7 @@ Alternatively, to use the hostname in place of the IP addresses, modify `kuberne
 global:
   provisioningHostname: `${MGMT_CLUSTER_HOSTNAME}`
   enable_vmedia_tls: false
-  additionalTrustedCAs: false
+  # trustedCA: tls-ca-bundle  # Optional: Uncomment and set to ConfigMap name for trusted CA bundle
 metal3-ironic:
   global:
     predictableNicNames: true
