@@ -1,6 +1,6 @@
 [#day2-migration]
 = Edge {version-edge} migration
-:revdate: 2026-01-19
+:revdate: 2026-05-06
 :page-revdate: {revdate}
 :experimental:
 
@@ -13,9 +13,9 @@ ifdef::env-github[]
 :warning-caption: :warning:
 endif::[]
 :toc: preamble
-:previous-edge-version: 3.4
-:static-edge-version: 3.5.0
-:static-fleet-examples-tag: release-3.5.0
+:previous-edge-version: 3.5
+:static-edge-version: 3.6.0
+:static-fleet-examples-tag: release-3.6.0
 
 This section explains how to migrate your `management` and `downstream` clusters from `Edge {previous-edge-version}` to `Edge {static-edge-version}`.
 
@@ -80,263 +80,75 @@ On a machine with `Helm` installed and `kubectl` configured to point to your `{c
 helm show crds oci://registry.suse.com/edge/charts/metal3 --version {version-metal3-chart} | kubectl apply -f -
 ----
 
-==== Prepare for SUSE Storage Migration
-
-When upgrading to `Edge {static-edge-version}` it is necessary to migrate from the previous Longhorn chart to the SUSE Storage chart that is maintained in the https://www.suse.com/products/rancher/application-collection/[SUSE Application Collection]
+==== Migrate Metal^3^ CA Certificate Configuration
 
 [NOTE]
 ====
-This procedure applies only to management clusters that require a Longhorn chart upgrade.
-
-You must ensure the management cluster is first updated to the latest 3.4 z-stream, which contains the necessary 1.9.2 SUSE Storage version.
+Applies only to Metal^3^ deployments that use additional trusted CAs for external media servers with TLS.
 ====
 
-The SUSE Storage chart no longer has a seperate CRD Helm Chart, they are packaged as one, therefore it is necessary to follow some additional migration steps as described in the https://documentation.suse.com/cloudnative/storage/1.9/en/migration/migration.html[SUSE Storage Documentation]
+The Metal^3^ Helm chart has changed how trusted CA certificates are configured. Previously, additional CAs were provided via a Secret (`tls-ca-additional`) with the `additionalTrustedCAs` boolean flag. The new version uses a ConfigMap containing the complete CA bundle referenced by the `global.trustedCA` value.
 
-. First, we can check to see the current version of the Longhorn CRD installed.
+If you have configured additional trusted CAs for Metal^3^, you need to migrate from the Secret-based approach to the ConfigMap-based approach:
+
+. Create a ConfigMap containing your CA bundle from the existing Secret:
 +
-[,bash,subs="attributes"]
-----
-helm list --all-namespaces | grep longhorn-crd
-longhorn-crd                    longhorn-system 1               2026-01-16 02:17:16.7804359 +0000 UTC   deployed        longhorn-crd-107.1.1+up1.9.2          v1.9.2
-----
+Extract the certificates from the old Secret:
 +
-
-. Now we will clone the rancher/charts repository for the specific Longhorn version that we currently have installed.
-To do this, you must first download this https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/download-longhorn-crd-chart.sh[script].
-+
-The script is executed like so:
-+
-[,bash,subs="attributes"]
-----
-./download-longhorn-crd-chart.sh 107.1.1+up1.9.2
-----
-+
-Now the longhorn-crd chart will be downloaded to the local directory `./107.1.1+up1.9.2`
-
-. After it is downloaded, check to make sure it is the correct version by opening the `Chart.yaml` and verifying the `appVersion` is v1.9.2:
-+
-[,bash,subs="attributes"]
-----
-cat 107.1.1+up1.9.2/Chart.yaml
-
-annotations:
-  catalog.cattle.io/certified: rancher
-  catalog.cattle.io/hidden: "true"
-  catalog.cattle.io/namespace: longhorn-system
-  catalog.cattle.io/release-name: longhorn-crd
-apiVersion: v1
-appVersion: v1.9.2
-description: Installs the CRDs for longhorn.
-name: longhorn-crd
-version: 107.1.1+up1.9.2
-----
-+
-
-. Next we must patch the `helm.sh/resource-policy` annotation to the value `keep` in the `templates/crds.yaml` within the `longhorn-crd` chart that was cloned. This ensures that Helm does not delete the CRDs when the release is uninstalled. 
-+
-To do this, download this https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/patch-resource-policy-annotation.sh[script] to automatically patch the annotation:
-+
-[,bash,subs="attributes"]
-----
-./patch-resource-policy-annotation.sh 107.1.1+up1.9.2/templates/crds.yaml
-
-Processing CRDs in '107.1.1+up1.9.2/templates/crds.yaml'...
-Creating backup: '/tmp/crds.yaml.original'
-Successfully processed the file
-Original file backed up to: '/tmp/crds.yaml.original'
-Modified file saved as: '107.1.1+up1.9.2/templates/crds.yaml'
-Found 22 CustomResourceDefinition(s)
-Added 22 helm.sh/resource-policy: keep annotation(s)
-Original file: 4575 lines, Modified file: 4597 lines
-----
-+
-
-. To verify that the CRDs have been correctly patched, check the diff between the original template and the patched one to ensure the value of `keep` is set for `helm.sh/resource-policy`:
-+
-[,bash,subs="attributes"]
-----
-vim -d /tmp/crds.yaml.original 107.1.1+up1.9.2/templates/crds.yaml
-----
-+
-
-. Next, upgrade the longhorn-crd Helm release using the locally patched chart:
-+
-[,bash,subs="attributes"]
-----
-helm upgrade longhorn-crd -n longhorn-system ./107.1.1+up1.9.2
-----
-+
-
-. Now uninstall the longhorn-crd Helm release from your system. Due to the applied patch, the CRDs will remain:
-+
-[,bash,subs="attributes"]
-----
-helm uninstall longhorn-crd --namespace longhorn-system
-
-These resources were kept due to the resource policy:
-[CustomResourceDefinition] backingimagedatasources.longhorn.io
-[CustomResourceDefinition] backingimagemanagers.longhorn.io
-[CustomResourceDefinition] nodes.longhorn.io
-[CustomResourceDefinition] orphans.longhorn.io
-[CustomResourceDefinition] recurringjobs.longhorn.io
-[CustomResourceDefinition] replicas.longhorn.io
-[CustomResourceDefinition] settings.longhorn.io
-[CustomResourceDefinition] sharemanagers.longhorn.io
-[CustomResourceDefinition] snapshots.longhorn.io
-[CustomResourceDefinition] supportbundles.longhorn.io
-[CustomResourceDefinition] systembackups.longhorn.io
-[CustomResourceDefinition] systemrestores.longhorn.io
-[CustomResourceDefinition] backingimages.longhorn.io
-[CustomResourceDefinition] volumeattachments.longhorn.io
-[CustomResourceDefinition] volumes.longhorn.io
-[CustomResourceDefinition] backupbackingimages.longhorn.io
-[CustomResourceDefinition] backups.longhorn.io
-[CustomResourceDefinition] backuptargets.longhorn.io
-[CustomResourceDefinition] backupvolumes.longhorn.io
-[CustomResourceDefinition] engineimages.longhorn.io
-[CustomResourceDefinition] engines.longhorn.io
-[CustomResourceDefinition] instancemanagers.longhorn.io
-
-release "longhorn-crd" uninstalled
-----
-+
-
-. Ensure that the `longhorn-crd` chart is uninstalled by re-running the same command as before: `helm list --all-namespaces | grep longhorn-crd` to verify that `longhorn-crd` is not present.
-+
-Following this, you need to update the ownership labels on the existing Longhorn CRDs to prepare for upgrade to the SUSE Storage Helm chart. 
-+
-Apply this https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/migrate-crd-ownership.sh[script] to perform the replacement.
-+
-[,bash,subs="attributes"]
-----
-./migrate-crd-ownership.sh
-
-# The output will look like the following for each CRD. The most important thing to note is that each operation says "Successfully updated CRD..." at the end:
-
-Processing CRD: volumes.longhorn.io
-Warning: resource customresourcedefinitions/volumes.longhorn.io is missing the kubectl.kubernetes.io/last-applied-configuration annotation which is required by kubectl apply. kubectl apply should only be used on resources created declaratively by either kubectl create --save-config or kubectl apply. The missing annotation will be patched automatically.
-customresourcedefinition.apiextensions.k8s.io/volumes.longhorn.io configured
-Successfully updated CRD: volumes.longhorn.io
-----
-+
-
-[NOTE]
-====
-Login Credentials for the Rancher Application Collection registry can be found in the https://apps.rancher.io/settings/access-tokens[access tokens section of your settings.] (Must be signed in)
-
-Furthermore, additional documentation for the Rancher Application Collection can be found https://docs.apps.rancher.io/[here.]
-====
-
-. After all of the CRDs have been prepared, log into the Rancher Application Collection so that you are able to pull the Helm Chart:
-+
-[,bash,subs="attributes"]
-----
-helm registry login dp.apps.rancher.io -u ${APPS.RANCHER.IO_USERNAME} -p ${APPS.RANCHER.IO_ACCESS_TOKEN}
-----
-+
-
-. Then create a https://docs.apps.rancher.io/get-started/authentication#kubernetes[docker-registry secret] so you are able to pull the container images:
-+
-[,bash,subs="attributes"]
-----
-kubectl create secret docker-registry rancher-app-collection \
-  --namespace longhorn-system \
-  --docker-server=dp.apps.rancher.io \
-  --docker-username="${APPS.RANCHER.IO_USERNAME}" \
-  --docker-password="${APPS.RANCHER.IO_ACCESS_TOKEN}"
-----
-+
-
-. Finally, upgrade your Longhorn installation to SUSE Storage:
-+
-[,bash,subs="attributes"]
-----
-helm upgrade longhorn oci://dp.apps.rancher.io/charts/suse-storage \
-	--namespace longhorn-system \
-	--version {version-longhorn-chart} \
-	--set privateRegistry.registrySecret=rancher-app-collection
-----
-+
-You can provide a `values.yaml` file by appending `-f values.yaml` to the upgrade command if you wish.
-
-==== Prepare for Rancher Turtles upgrade
-
-[NOTE]
-====
-Applies only to CAPI/Metal3 management clusters that require a rancher turtles chart upgrade.
-
-You must ensure the management cluster is first updated to the latest 3.4 z-stream, which contains the necessary 0.24.3 Rancher Turtles version.
-====
-
-Starting with Rancher 2.13, Rancher Turtles is installed by default, therefore it is necessary to follow some additional migration steps as described in the https://documentation.suse.com/cloudnative/cluster-api/latest/en/tutorials/migration.html[Rancher Turtles Documentation]
-
-Before upgrade it is necessary to remove the installed rancher-turtles chart and rancher-turtles-airgap-resources (if installed),
-when installed via Edge Image Builder this requires removal of the corresponding `HelmChart` resources:
-
-[,bash,subs="attributes"]
-----
-kubectl delete -n kube-system helmchart rancher-turtles
-kubectl delete -n kube-system helmchart rancher-turtles-airgap-resources
-----
-
-Next we must patch the CRD resources as described in the https://turtles.docs.rancher.com/turtles/next/en/tutorials/migration.html[Rancher Turtles Documentation]
-
-[,bash]
-----
-kubectl patch crd capiproviders.turtles-capi.cattle.io --type=json -p='[{"op": "add", "path": "/metadata/annotations/meta.helm.sh~1release-namespace", "value": "cattle-turtles-system"}]'
-kubectl patch crd clusterctlconfigs.turtles-capi.cattle.io --type=json -p='[{"op": "add", "path": "/metadata/annotations/meta.helm.sh~1release-namespace", "value": "cattle-turtles-system"}]'
-----
-
-Now follow the regular steps to upgrade the management cluster to `Edge {static-edge-version}`
-
-==== Rancher Turtles post-upgrade
-
-*After* following the steps below to upgrade to `Edge {static-edge-version}` it is necessary to install the new `rancher-turtles-providers` helm chart - this creates new `CAPIProvider` resources to replace those removed in the pre-upgrade steps above.
-
-First we must run the migration script as described in the https://turtles.docs.rancher.com/turtles/next/en/tutorials/migration.html[Rancher Turtles Documentation]
-
-```
-wget https://raw.githubusercontent.com/rancher/turtles/refs/heads/release/v0.25/scripts/migrate-providers-ownership.sh
-bash migrate-providers-ownership.sh --adopt metal3:capm3-system --adopt metal3ipam:metal3-ipam-system
-```
-
-Next the `rancher-turtles-providers` chart can be installed.  This chart installation should be done via a `HelmChart` resource to enable future automated upgrade via the upgrade controller:
-
-[,shell,subs="attributes,specialchars"]
-----
-helm pull oci://registry.suse.com/edge/charts/rancher-turtles-providers --version {version-rancher-turtles-providers-chart}
-
-cat > turtles-providers-helmchart.yaml <<EOF
-apiVersion: helm.cattle.io/v1
-kind: HelmChart
-metadata:
-  annotations:
-    edge.suse.com/repository-url: oci://registry.suse.com/edge/charts/rancher-turtles-providers
-  name: rancher-turtles-providers
-  namespace: kube-system
-spec:
-  chartContent: $(base64 -w 0 rancher-turtles-providers-{version-rancher-turtles-providers-chart}.tgz)
-  failurePolicy: reinstall
-  createNamespace: true
-  targetNamespace: cattle-turtles-system
-  version: {version-rancher-turtles-providers-chart}
-EOF
-kubectl apply -f turtles-providers-helmchart.yaml
-----
-
-After a few minutes, output similar to the following should be observed:
-
 [,shell]
 ----
-kubectl get capiprovider -A
-NAMESPACE                   NAME                 TYPE             PROVIDERNAME    INSTALLEDVERSION   PHASE
-capm3-system                metal3               infrastructure   metal3          v1.10.4            Ready
-cattle-capi-system          cluster-api          core             cluster-api     v1.10.6            Ready
-fleet-addon-system          fleet                addon            rancher-fleet   v0.12.0            Ready
-metal3-ipam-system          metal3ipam           ipam             metal3ipam      v1.10.4            Ready
-rke2-bootstrap-system       rke2-bootstrap       bootstrap        rke2            v0.21.1            Ready
-rke2-control-plane-system   rke2-control-plane   controlPlane     rke2            v0.21.1            Ready
+kubectl get secret tls-ca-additional -n metal3-system -o jsonpath='{.data}' | \
+  jq -r 'to_entries[] | .value' | base64 -d > ca-bundle.pem
+----
++
+*Optional - Include system CA bundle:*
+If your Metal^3^ deployment also needs to trust public CAs (for example, when accessing external resources over HTTPS), you need to include the system CA bundle in addition to your custom CAs. Extract the system CA bundle from a container image and prepend it to your custom CAs:
++
+[,shell]
+----
+# Extract system CAs from a container image (using podman or docker)
+podman run --rm registry.suse.com/bci/bci-base:latest cat /etc/ssl/certs/ca-certificates.crt > system-cas.pem
+
+# Combine system CAs with your custom CAs
+cat system-cas.pem ca-bundle.pem > combined-ca-bundle.pem
+mv combined-ca-bundle.pem ca-bundle.pem
+----
++
+[IMPORTANT]
+====
+If you include the system CA bundle, it becomes your responsibility to keep it up-to-date. The system CAs in the container image may become outdated over time as CA certificates expire or are revoked. You should periodically refresh the system CA bundle by re-extracting it from an updated container image.
+====
++
+Create the ConfigMap with the final CA bundle:
++
+[,shell]
+----
+kubectl create configmap tls-ca-bundle -n metal3-system --from-file=ca-bundle.pem=ca-bundle.pem
+----
+
+. Update your Metal^3^ Helm values to use the new ConfigMap reference:
++
+Change from:
++
+[,yaml]
+----
+global:
+  additionalTrustedCAs: true
+----
++
+To:
++
+[,yaml]
+----
+global:
+  trustedCA: tls-ca-bundle
+----
+
+. After upgrading the Metal^3^ Helm chart with the new configuration, you can delete the old Secret:
++
+[,shell]
+----
+kubectl delete secret tls-ca-additional -n metal3-system
 ----
 
 [#day2-migration-mgmt-upgrade-controller]
