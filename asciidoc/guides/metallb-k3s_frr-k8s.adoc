@@ -1,0 +1,173 @@
+[#guides-metallb-k3s-frr-k8s]
+= MetalLB on K3s (using FRR-K8s Mode)
+:revdate: 2026-05-04
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+MetalLB is a load-balancer implementation for bare-metal Kubernetes clusters, using standard routing protocols.
+
+In this guide, we demonstrate how to deploy MetalLB in layer 3 FRR-K8s BGP mode.
+
+== MetalLB on K3s (using FRR-K8s)
+[NOTE]
+====
+FRR-K8s is currently a Technology Preview feature. Community documentation of
+FRR-K8s is https://github.com/metallb/frr-k8s/[here].
+====
+
+In this quick start, FRR-K8s mode is used.
+
+== Prerequisites
+
+* All prerequisites for FRR-K8s are the same as for <<guides-metallb-k3s-l3>>
+apart from the need for a free IP address.
++
+[NOTE]
+====
+The example here does not include setting up a service so there is no need for
+an IP address. 
+====
+
+* A K3s cluster where MetalLB is going to be deployed.
+* Router(s) on the network that support the BGP protocol.
+
+
+== Configuration to Accept Incoming Route
+Out of the box MetalLB BGP advertises a Service IP address to all the BGP peers
+that are configured. These peers, which are usually routers, will receive a
+route for each Service IP address with a 32 bit network mask. When using FRR-K8s
+with the FRRConfiguration CR, it is also possible to receive routes from external
+routers. These external routes will show up in each node's routing table. There
+are multiple benefits from this, but the main one is that it eliminates the need
+to manually update Linux routing tables on nodes when the external network
+changes, specifically in cases where it is desirable to avoid sending traffic
+through the default gateway.
+
+== Deployment
+
+We will be using the MetalLB Helm chart published as part of the SUSE Edge
+solution. Note that the FRR-K8s is a sub-chart of MetalLB, and to enable it,
+set `frrk8s.enabled` to `true`. FRR-K8s also requires some elevated
+privileges on the namespace. 
+
+[,bash,subs="attributes"]
+----
+kubectl create namespace metallb-system
+kubectl label namespace metallb-system pod-security.kubernetes.io/enforce=privileged
+kubectl label namespace metallb-system pod-security.kubernetes.io/audit=privileged
+kubectl label namespace metallb-system pod-security.kubernetes.io/warn=privileged
+helm install metallb \
+  oci://registry.suse.com/edge/charts/metallb \
+  --namespace metallb-system \
+  --set frrk8s.enabled=true --set frrk8s.external=false
+
+
+while ! kubectl wait --for condition=ready -n metallb-system $(kubectl get\
+ pods -n metallb-system -l app.kubernetes.io/component=controller -o name)\
+ --timeout=10s; do
+ sleep 2
+done
+----
+
+Verify that you have 4 pods in the `metallb-system` namespace and that they are
+all running without a problem: 
+
+[,bash,subs="attributes"]
+----
+k get pods -n metallb-system
+NAME                                                      READY   STATUS    RESTARTS     AGE
+metallb-controller-7fbfd8977d-m2q9t                       1/1     Running   0            46s
+metallb-metallb-frr-k8s-9w7wl                             6/6     Running   0            46s
+metallb-metallb-frr-k8s-webhook-server-5d9d67ffd6-8jqnc   1/1     Running   1 (6s ago)   46s
+metallb-speaker-qx8bl                                     1/1     Running   0            46s
+----
+At this point, the installation of MetalLB and FRR-K8s is complete.
+
+== Configuration
+
+. Create an `FRRConfiguration` for FRR-K8s:
++
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: frrk8s.metallb.io/v1beta1
+kind: FRRConfiguration
+metadata:
+  name: frrdemo
+  namespace: metallb-system
+spec:
+  bgp:
+    routers:
+    - asn: 64513
+      neighbors:
+        - address: 192.168.20.154
+          asn: 64512
+          port: 179
+          toAdvertise:
+            allowed:
+              mode: all
+          toReceive:
+            allowed:
+              mode: all
+EOF
+----
++
+The external BGP router has ASN 64512 while our `BGPPeer` will have 64513. We can also
+see that the external BGP Router has an IP address that is 192.168.20.154.
+
+. Verify that the FRRConfiguration has been deployed: 
++
+[,bash]
+----
+k get FRRConfiguration -A
+NAMESPACE        NAME      AGE
+metallb-system   frrdemo   4s
+----
++
+
+[NOTE]
+====
+The `toReceive` settings above will make your cluster accept all incoming routes. This
+might not be advisable in a production environment as, depending on your
+external routers, it can cause your nodes' routing tables to fill up. See
+documentation on https://github.com/metallb/frr-k8s/[how to filter toReceive
+further.]
+====
+
+With FRR-K8s these are all the settings needed. Any route that your external BGP
+router is receiving will be shared with your cluster and all the nodes will have
+their routing tables updated. 
+
+The setup can be tested with what is described in <<guides-metallb-k3s-l3>>. In
+order to combine these setups there are some requirements: 
+
+* The FRR-K8s configuration is done on a separate cluster. This is required to
+  avoid cluster internal routing.
+* Changes to ASN IDs and to the Router IP address are required to match both
+  setups.
+
+With both these setups in place the following can be observed:
+
+* Once the Deployment and Service have been applied on the cluster described in
+  <<guides-metallb-k3s-l3>>, the route to the service will be visible on the
+  external FRR Router.
+* The route will be added to all nodes on the FRR-K8s cluster.
+
+[NOTE]
+====
+In standard configurations of FRR Routing routes are shared with the next-hop
+set to the IP Address of the FRR Router. To achieve a next-hop without the FRR
+Router IP Address, one can add a line "neighbor BGPPG next-hop-unchanged" and a
+line "neighbor BGPPG as-override" to the `/etc/frr/frr.conf` file on the FRR
+Router. With this in place, the nodes on the FRR-K8s cluster will get a direct
+route to the service.
+====
