@@ -128,26 +128,44 @@ jobs:
           pattern: site-*
           path: downloads
       - name: Stage gh-pages site
-        # Each DC file produces a self-contained build with its own index.html,
-        # so flavors must live in separate subdirectories on gh-pages —
-        # otherwise their filenames would collide. Result:
-        #   site/index.html       → https://suse-edge.github.io/   (landing page)
-        #   site/edge/index.html  → https://suse-edge.github.io/edge/
-        #   site/telco/index.html → https://suse-edge.github.io/telco/
+        # gha-build's artifact contains html/<book>/ (multi-page) and
+        # single-html/<book>/ (single-page) inside each downloaded artifact
+        # dir. Promote the multi-page tree to site/<flavor>/ so each flavor's
+        # HTML lives at clean URLs:
+        #   site/index.html              → https://suse-edge.github.io/
+        #   site/edge/index.html         → https://suse-edge.github.io/edge/
+        #   site/edge/single-page/...    → https://suse-edge.github.io/edge/single-page/
+        #   site/telco/index.html        → https://suse-edge.github.io/telco/
+        #   site/telco/single-page/...   → https://suse-edge.github.io/telco/single-page/
+        # The book directory name comes from each DC file's MAIN attribute,
+        # so we discover it via glob rather than assuming it equals $flavor.
         # The root index.html is copied from the repo so it stays under
         # version control and rendering is deterministic.
         run: |
           set -euo pipefail
-          mkdir -p site
           shopt -s nullglob
+          mkdir -p site
           found=0
           for d in downloads/site-*; do
             [ -d "$d" ] || continue
             flavor=$(basename "$d")
             flavor=${flavor#site-}
-            mv "$d" "site/${flavor}"
+
+            html_books=("$d"/html/*/)
+            if [ ${#html_books[@]} -ne 1 ]; then
+              echo "ERROR: expected exactly one html/<book>/ dir in $d, found ${#html_books[@]}" >&2
+              exit 1
+            fi
+            mv "${html_books[0]%/}" "site/$flavor"
+
+            single_books=("$d"/single-html/*/)
+            if [ ${#single_books[@]} -eq 1 ]; then
+              mv "${single_books[0]%/}" "site/$flavor/single-page"
+            fi
+
+            rm -rf "$d"
             found=$((found + 1))
-            echo "Staged flavor: ${flavor}"
+            echo "Staged flavor: $flavor"
           done
           if [ "$found" -eq 0 ]; then
             echo "No site-* artifacts found — nothing to publish." >&2
