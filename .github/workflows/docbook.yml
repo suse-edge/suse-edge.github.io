@@ -34,10 +34,14 @@ jobs:
   select-dc-files:
     runs-on: ubuntu-latest
     outputs:
-      validate-list: ${{ steps.select-dc-validate.outputs.dc-list }}
-      build-list: ${{ steps.select-dc-build.outputs.dc-list }}
-      allow-build: ${{ steps.select-dc-build.outputs.allow-build }}
-      relevant-branches: ${{ steps.select-dc-build.outputs.relevant-branches }}
+      # gha-select-dcs `mode: list-validate` enumerates every DC-* file in the
+      # repo (deduplicated by content hash). It does not depend on SUSE's
+      # central doc config — unlike `mode: list-build`, which queries
+      # SUSEdoc/susedoc.github.io's config.xml and disables building unless
+      # the repo+branch is registered there. suse-edge is not part of that
+      # central pipeline (it publishes via gh-pages from this repo), so
+      # we use the validate list as the build list too.
+      dc-list: ${{ steps.select-dcs.outputs.dc-list }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
@@ -46,18 +50,11 @@ jobs:
         with:
           mode: soundness
 
-      - name: Selecting DC files to validate
-        id: select-dc-validate
+      - name: Listing DC files
+        id: select-dcs
         uses: openSUSE/doc-ci@e349aced35306105cd981adfa9243836deb119ea # gha-select-dcs
         with:
           mode: list-validate
-
-      - name: Selecting DC files to build
-        id: select-dc-build
-        uses: openSUSE/doc-ci@e349aced35306105cd981adfa9243836deb119ea # gha-select-dcs
-        with:
-          mode: list-build
-          original-org: SUSE
 
   validate:
     runs-on: ubuntu-latest
@@ -66,7 +63,7 @@ jobs:
       # don't cancel all validation runners when one of them fails, we want full results
       fail-fast: false
       matrix:
-        dc-files: ${{ fromJson(needs.select-dc-files.outputs.validate-list) }}
+        dc-files: ${{ fromJson(needs.select-dc-files.outputs.dc-list) }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Validating DC file(s) ${{ matrix.dc-files }}
@@ -78,10 +75,9 @@ jobs:
   build-html:
     runs-on: ubuntu-latest
     needs: [select-dc-files, validate]
-    if: ${{ needs.select-dc-files.outputs.allow-build == 'true' }}
     strategy:
       matrix:
-        dc-files: ${{ fromJson(needs.select-dc-files.outputs.build-list) }}
+        dc-files: ${{ fromJson(needs.select-dc-files.outputs.dc-list) }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Building DC file(s) ${{ matrix.dc-files }}
