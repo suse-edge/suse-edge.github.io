@@ -117,6 +117,13 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [select-dc-files, build-html]
     steps:
+      - name: Checkout repo (for root index.html)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # Only need the landing page; sparse-checkout keeps the workspace tidy.
+          sparse-checkout: |
+            index.html
+          sparse-checkout-cone-mode: false
       - name: Download all build artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -128,11 +135,11 @@ jobs:
         # Each DC file produces a self-contained build with its own index.html,
         # so flavors must live in separate subdirectories on gh-pages —
         # otherwise their filenames would collide. Result:
+        #   site/index.html       → https://suse-edge.github.io/   (landing page)
         #   site/edge/index.html  → https://suse-edge.github.io/edge/
         #   site/telco/index.html → https://suse-edge.github.io/telco/
-        # Note: this changes URLs from the pre-split layout (HTML at root).
-        # Add a root index.html under asciidoc/ (or wherever the build pulls
-        # static assets) if you want a landing page at suse-edge.github.io/.
+        # The root index.html is copied from the repo so it stays under
+        # version control and rendering is deterministic.
         run: |
           set -euo pipefail
           mkdir -p site
@@ -149,6 +156,12 @@ jobs:
           if [ "$found" -eq 0 ]; then
             echo "No site-* artifacts found — nothing to publish." >&2
             exit 1
+          fi
+          if [ -f index.html ]; then
+            cp index.html site/index.html
+            echo "Copied root landing page into site/index.html"
+          else
+            echo "WARNING: no root index.html in repo — gh-pages will have no landing page." >&2
           fi
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@373f7f263a76c20808c831209c920827a82a2847 # v3.9.3
