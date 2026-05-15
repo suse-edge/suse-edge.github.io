@@ -22,11 +22,13 @@ on:
       - 'DC-*'
       - 'xml/**'
       - 'adoc/**'
+      - 'asciidoc/**'
       - 'images/src/**'
       - '**/DC-*'
       - '**/xml/**'
       - '**/adoc/**'
       - '**/images/src/**'
+      - '.github/workflows/docbook.yml'
 
 jobs:
   select-dc-files:
@@ -77,9 +79,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: [select-dc-files, validate]
     if: ${{ needs.select-dc-files.outputs.allow-build == 'true' }}
-    outputs:
-      artifact-name: ${{ steps.build-dc.outputs.artifact-name }}
-      artifact-dir: ${{ steps.build-dc.outputs.artifact-dir }}
     strategy:
       matrix:
         dc-files: ${{ fromJson(needs.select-dc-files.outputs.build-list) }}
@@ -90,30 +89,73 @@ jobs:
         uses: openSUSE/doc-ci@44a20400dc813c17b3683a3d445b726e77cc9d09 # gha-build
         with:
           dc-files: ${{ matrix.dc-files }}
+      # Derive a human-readable "flavor" from the DC file path so each
+      # matrix run produces a distinctly-named artifact (e.g. site-edge,
+      # site-telco). The upstream gha-build artifact-name is `build-<sha1>`,
+      # which is unique but opaque — no good for picking a publish layout.
+      - name: Compute flavor name
+        id: flavor
+        run: |
+          dc='${{ matrix.dc-files }}'
+          base=$(basename "$dc")
+          flavor="${base#DC-}"
+          echo "flavor=${flavor}" >> "$GITHUB_OUTPUT"
       - name: Uploading builds as artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ steps.build-dc.outputs.artifact-name }}
+          name: site-${{ steps.flavor.outputs.flavor }}
           path: ${{ steps.build-dc.outputs.artifact-dir }}/*
           retention-days: 3
 
 
   publish:
     runs-on: ubuntu-latest
-    if: ${{ success() }}
+    # Only publish on pushes to main — never from PRs (PR previews must not
+    # overwrite the live site, and the token is read-only on fork PRs anyway)
+    # and never from release-3.* pushes (those branches validate/build but
+    # are not the source of the published site).
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [select-dc-files, build-html]
-    continue-on-error: true
     steps:
-      - name: Downloading all build artifacts
+      - name: Download all build artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          path: artifact-dir
+          # Match the names produced by build-html. v4 places each artifact
+          # in <path>/<artifact-name>/, e.g. downloads/site-edge/index.html.
+          pattern: site-*
+          path: downloads
+      - name: Stage gh-pages site
+        # Each DC file produces a self-contained build with its own index.html,
+        # so flavors must live in separate subdirectories on gh-pages —
+        # otherwise their filenames would collide. Result:
+        #   site/edge/index.html  → https://suse-edge.github.io/edge/
+        #   site/telco/index.html → https://suse-edge.github.io/telco/
+        # Note: this changes URLs from the pre-split layout (HTML at root).
+        # Add a root index.html under asciidoc/ (or wherever the build pulls
+        # static assets) if you want a landing page at suse-edge.github.io/.
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          shopt -s nullglob
+          found=0
+          for d in downloads/site-*; do
+            [ -d "$d" ] || continue
+            flavor=$(basename "$d")
+            flavor=${flavor#site-}
+            mv "$d" "site/${flavor}"
+            found=$((found + 1))
+            echo "Staged flavor: ${flavor}"
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "No site-* artifacts found — nothing to publish." >&2
+            exit 1
+          fi
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@373f7f263a76c20808c831209c920827a82a2847 # v3.9.3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           # Build output to publish to the `gh-pages` branch:
-          publish_dir: artifact-dir
+          publish_dir: site
           # The following lines assign commit authorship to the official
           # GH-Actions bot for deploys to `gh-pages` branch:
           # https://github.com/actions/checkout/issues/13#issuecomment-724415212
