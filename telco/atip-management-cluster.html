@@ -38,7 +38,7 @@
       }
     ],
       
-    "datePublished": "2026-05-18T09:26+02:00",
+    "datePublished": "2026-05-18T14:07+02:00",
 
     "about": [
       
@@ -602,7 +602,7 @@ global:
   registrySecret: rancher-app-collection</code></pre></div></li><li class="listitem"><p><code class="literal">metal3.yaml</code>: contains the configuration to create the <code class="literal">Metal<sup>3</sup></code> component. The <code class="literal">${METAL3_VIP}</code> must be set properly to define the IP address to be consumed by the <code class="literal">Metal<sup>3</sup></code> component.</p><div class="verbatim-wrap highlight yaml"><pre class="screen"><code class="language-yaml">global:
   ironicIP: ${METAL3_VIP}
   enable_vmedia_tls: false
-  additionalTrustedCAs: false
+  # trustedCA: tls-ca-bundle  # Optional: Uncomment and set to ConfigMap name for additional trusted CAs
 metal3-ironic:
   ipa:
     useHauler: true
@@ -613,19 +613,47 @@ metal3-ironic:
       size: "5Gi"</code></pre></div><div id="id-1.8.6.4.9.13.4.3" class="admonition important normal"><img class="symbol" alt="Important" title="Important" src="static/images/icon-important.svg"/><div class="admon-title">Important</div><p>The <code class="literal">metal3-ironic.ipa.useHauler</code> value <span><span class="emphasis"><strong>must</strong></span></span> be set to <code class="literal">true</code> (boolean value) in air-gapped environments. This instructs Metal<sup>3</sup> to retrieve the Ironic Python Agent (IPA) image from the embedded artifact registry instead of attempting to download it from the internet. The IPA image must also be included in the <code class="literal">embeddedArtifactRegistry.images</code> list as shown in the definition file example above.</p></div></li></ul></div><div id="metal3-media-server" class="admonition note normal"><img class="symbol" alt="Note" title="Note" src="static/images/icon-note.svg"/><div class="admon-title">Note</div><p>The Media Server is an optional feature included in Metal<sup>3</sup> (by default is disabled). To use the Metal3 feature, you need to configure it on the previous manifest.
 To use the Metal<sup>3</sup> media server, specify the following variable:</p><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p>add the <code class="literal">enable_metal3_media_server</code> to <code class="literal">true</code> to enable the media server feature in the global section.</p></li><li class="listitem"><p>include the following configuration about the media server where ${MEDIA_VOLUME_PATH} is the path to the media volume in the media (e.g <code class="literal">/home/metal3/bmh-image-cache</code>)</p><div class="verbatim-wrap highlight yaml"><pre class="screen"><code class="language-yaml">metal3-media:
   mediaVolume:
-    hostPath: ${MEDIA_VOLUME_PATH}</code></pre></div></li></ul></div><p>An external media server can be used to store the images, and in the case you want to use it with TLS, you will need to modify the following configurations:</p><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p>set to <code class="literal">true</code> the <code class="literal">additionalTrustedCAs</code> in the previous <code class="literal">metal3.yaml</code> file to enable the additional trusted CAs from the external media server.</p></li><li class="listitem"><p>include the following secret configuration in the folder <code class="literal">kubernetes/manifests/metal3-cacert-secret.yaml</code> to store the CA certificate of the external media server.</p><div class="verbatim-wrap highlight yaml"><pre class="screen"><code class="language-yaml">apiVersion: v1
+    hostPath: ${MEDIA_VOLUME_PATH}</code></pre></div></li></ul></div><p>An external media server can be used to store the images, and in the case you want to use it with TLS, you will need to provide the trusted CA bundle for Metal<sup>3</sup>.</p><p><span><span class="emphasis"><strong>Prepare the CA bundle:</strong></span></span></p><p>First, prepare your CA bundle file containing all the certificates needed by Metal<sup>3</sup>. This includes your external media server’s CA certificate(s).</p><p>+
+<span><span class="emphasis"><strong>Optional - System CA Bundle:</strong></span></span> If Metal<sup>3</sup> also needs to trust public CAs (for example, when accessing external HTTPS resources), you can include the system CA bundle. Extract it from a container image and concatenate it with your custom certificates:</p><p>+</p><div class="verbatim-wrap"><pre class="screen"><code class="language-shell"># Extract system CAs from a container image
+podman run --rm registry.suse.com/bci/bci-base:latest cat /etc/ssl/certs/ca-certificates.crt &gt; system-cas.pem
+
+# Concatenate system CAs with your custom CA
+cat system-cas.pem your-custom-ca.crt &gt; ca-bundle.pem</code></pre></div><p>+
+Or, if you only need your custom CA:</p><p>+</p><div class="verbatim-wrap"><pre class="screen"><code class="language-shell">cp your-custom-ca.crt ca-bundle.pem</code></pre></div><p>+</p></div><p>If you include the system CA bundle, you become responsible for keeping it up-to-date. System CAs in container images may become outdated as certificates expire or are revoked. Periodically refresh the bundle by re-extracting from an updated container image.</p><div class="informalexample"><p><span><span class="emphasis"><strong>Create the ConfigMap:</strong></span></span></p><p>You can create the ConfigMap in two ways:</p><div class="orderedlist"><ol class="orderedlist" type="1"><li class="listitem"><p><span><span class="emphasis"><strong>Using a manifest file (recommended for EIB):</strong></span></span> Create the file <code class="literal">kubernetes/manifests/metal3-cacert-configmap.yaml</code> and include the CA bundle content inline. You need to properly indent each line of the certificate with 4 spaces:</p><div class="verbatim-wrap highlight yaml"><pre class="screen"><code class="language-yaml">apiVersion: v1
 kind: Namespace
 metadata:
   name: metal3-system
 ---
 apiVersion: v1
-kind: Secret
+kind: ConfigMap
 metadata:
-  name: tls-ca-additional
+  name: tls-ca-bundle
   namespace: metal3-system
-type: Opaque
 data:
-  ca-additional.crt: {{ additional_ca_cert | b64encode }}</code></pre></div></li></ul></div><p>The <code class="literal">additional_ca_cert</code> is the base64-encoded CA certificate of the external media server. You can use the following command to encode the certificate and generate the secret doing manually:</p><div class="verbatim-wrap"><pre class="screen"><code class="language-shell">kubectl -n meta3-system create secret generic tls-ca-additional --from-file=ca-additional.crt=./ca-additional.crt</code></pre></div></div><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p><code class="literal">certmanager.yaml</code>: contains the configuration to create the <code class="literal">Cert-Manager</code> component (no modifications needed).</p><div class="verbatim-wrap highlight yaml"><pre class="screen"><code class="language-yaml">installCRDs: true</code></pre></div></li></ul></div></section><section class="sect2" id="mgmt-cluster-network-folder" data-id-title="Networking folder"><div class="titlepage"><div><div><div class="title-container"><h3 class="title"><span class="title-number-name"><span class="title-number">32.3.5 </span><span class="title-name">Networking folder</span></span> <a title="Permalink" class="permalink" href="atip-management-cluster.html#mgmt-cluster-network-folder">#</a></h3><div class="icons"><a target="_blank" class="icon-reportbug" title="Report an issue"> </a></div></div></div></div></div><p>The <code class="literal">network</code> folder contains as many files as nodes in the management cluster. In our case, we have only one node, so we have only one file called <code class="literal">mgmt-cluster-node1.yaml</code>.
+  ca-bundle.pem: |
+    -----BEGIN CERTIFICATE-----
+    MIIDXTCCAkWgAwIBAgIJAKJ... (your certificate content here)
+    ...
+    -----END CERTIFICATE-----
+    -----BEGIN CERTIFICATE-----
+    MIIEkjCCA3qgAwIBAgIQCgF... (additional certificates if any)
+    ...
+    -----END CERTIFICATE-----</code></pre></div><p>To fill this file automatically from your <code class="literal">ca-bundle.pem</code>, you can use:</p><div class="verbatim-wrap"><pre class="screen"><code class="language-shell">cat &gt; kubernetes/manifests/metal3-cacert-configmap.yaml &lt;&lt;EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: metal3-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tls-ca-bundle
+  namespace: metal3-system
+data:
+  ca-bundle.pem: |
+$(sed 's/^/    /' ca-bundle.pem)
+EOF</code></pre></div></li><li class="listitem"><p><span><span class="emphasis"><strong>Using kubectl directly (for manual deployment):</strong></span></span> If you’re not using EIB and want to create the ConfigMap directly on the cluster:</p><div class="verbatim-wrap"><pre class="screen"><code class="language-shell">kubectl -n metal3-system create configmap tls-ca-bundle --from-file=ca-bundle.pem=./ca-bundle.pem</code></pre></div><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p>Set the <code class="literal">global.trustedCA</code> value in the <code class="literal">metal3.yaml</code> file to reference the ConfigMap name:</p><div class="verbatim-wrap highlight yaml"><pre class="screen"><code class="language-yaml">global:
+  trustedCA: tls-ca-bundle</code></pre></div></li></ul></div></li></ol></div></div><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p><code class="literal">certmanager.yaml</code>: contains the configuration to create the <code class="literal">Cert-Manager</code> component (no modifications needed).</p><div class="verbatim-wrap highlight yaml"><pre class="screen"><code class="language-yaml">installCRDs: true</code></pre></div></li></ul></div></section><section class="sect2" id="mgmt-cluster-network-folder" data-id-title="Networking folder"><div class="titlepage"><div><div><div class="title-container"><h3 class="title"><span class="title-number-name"><span class="title-number">32.3.5 </span><span class="title-name">Networking folder</span></span> <a title="Permalink" class="permalink" href="atip-management-cluster.html#mgmt-cluster-network-folder">#</a></h3><div class="icons"><a target="_blank" class="icon-reportbug" title="Report an issue"> </a></div></div></div></div></div><p>The <code class="literal">network</code> folder contains as many files as nodes in the management cluster. In our case, we have only one node, so we have only one file called <code class="literal">mgmt-cluster-node1.yaml</code>.
 The name of the file must match the host name defined in the <code class="literal">mgmt-cluster.yaml</code> definition file into the network/node section described above.</p><p>If you need to customize the networking configuration, for example, to use a specific static IP address (DHCP-less scenario), you can use the <code class="literal">mgmt-cluster-node1.yaml</code> file under the <code class="literal">network</code> folder. It contains the following information:</p><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p><code class="literal">${MGMT_GATEWAY}</code>: The gateway IP address.</p></li><li class="listitem"><p><code class="literal">${MGMT_DNS}</code>: The DNS server IP address.</p></li><li class="listitem"><p><code class="literal">${MGMT_MAC}</code>: The MAC address of the network interface.</p></li><li class="listitem"><p><code class="literal">${MGMT_NODE_IP}</code>: The IP address of the management cluster.</p></li></ul></div><div class="verbatim-wrap highlight yaml"><pre class="screen"><code class="language-yaml">routes:
   config:
   - destination: 0.0.0.0/0
@@ -943,7 +971,7 @@ interfaces:
     autoconf: true</code></pre></div><p>We can now define the remaining files for a single node configuration, starting from the first option, by creating <code class="literal">kubernetes/helm/values/metal3.yaml</code> as:</p><div class="verbatim-wrap highlight yaml"><pre class="screen"><code class="language-yaml">global:
   ironicIP: ${MGMT_CLUSTER_IP_V4}
   enable_vmedia_tls: false
-  additionalTrustedCAs: false
+  # trustedCA: tls-ca-bundle  # Optional: Uncomment and set to ConfigMap name for trusted CA bundle
 metal3-ironic:
   global:
     predictableNicNames: true
@@ -963,7 +991,7 @@ global:
     systemDefaultRegistry: "registry.rancher.com"</code></pre></div><p>where <code class="literal">${MGMT_CLUSTER_IP_V4}</code> and <code class="literal">${MGMT_CLUSTER_IP_V6}</code> are the IP addresses previously assigned to the host.</p><p>Alternatively, to use the hostname in place of the IP addresses, modify <code class="literal">kubernetes/helm/values/metal3.yaml</code> to:</p><div class="verbatim-wrap highlight yaml"><pre class="screen"><code class="language-yaml">global:
   provisioningHostname: `${MGMT_CLUSTER_HOSTNAME}`
   enable_vmedia_tls: false
-  additionalTrustedCAs: false
+  # trustedCA: tls-ca-bundle  # Optional: Uncomment and set to ConfigMap name for trusted CA bundle
 metal3-ironic:
   global:
     predictableNicNames: true
