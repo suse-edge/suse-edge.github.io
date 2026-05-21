@@ -1,6 +1,6 @@
 [#atip-features]
 == Telco features configuration
-:revdate: 2025-08-25
+:revdate: 2026-05-27
 :page-revdate: {revdate}
 :experimental:
 
@@ -20,7 +20,7 @@ The directed network provisioning deployment method is used, as described in the
 The following topics are covered in this section:
 
 * <<kernel-image-for-real-time,Kernel image for real time>>: Kernel image to be used by the real-time kernel.
-* <<kernel-args,Kernel arguments for low latency and high performance>>: Kernel arguments to be used by the real-time kernel for maximum performance and low latency running telco workloads.
+* <<kernel-args,Kernel arguments for low latency and high performance>>: Kernel arguments to be used for maximum performance and low latency running telco workloads.
 * <<cpu-pinning-host,CPU Pinning on Host>>: Isolating the CPUs via kernel arguments and TuneD profile.
 * <<cpu-pinning-k8s,CPU Pinning on Kubernetes>>: Isolating the CPUs on Kubernetes via Kubelet configuration.
 * <<cni-configuration,CNI configuration>>: CNI configuration to be used by the Kubernetes cluster.
@@ -68,7 +68,7 @@ For more information about the real-time kernel, visit https://www.suse.com/prod
 [#kernel-args]
 === Kernel arguments for low latency and high performance
 
-The kernel arguments are important to be configured to enable the real-time kernel to work properly giving the best performance and low latency to run telco workloads.  There are some important concepts to keep in mind when configuring the kernel arguments for this use case:
+Configuring the appropriate kernel arguments is essential for optimizing performance, achieving low latency, and ensuring successful cluster deployment for telco workloads. While some parameters are designed specifically to enable the real-time kernel to function optimally, this section applies to both RT and default kernel configurations. Additionally, certain arguments are mandatory for Directed Network Provisioning method to successfully deploy downstream cluster nodes.
 
 * Remove `kthread_cpus` when using SUSE real-time kernel. This parameter controls on which CPUs kernel threads are created. It also controls which CPUs are allowed for PID 1 and for loading kernel modules (the kmod user-space helper). This parameter is not
 recognized and does not have any effect.
@@ -108,6 +108,8 @@ This behavior prevents any disruption caused by disk I/O to any time sensitive a
 
 * Add `ignition.platform.id=openstack` for Metal3 and Cluster API to successfully provision/deprovision the cluster. This is used by Metal3 Python agent, which originated from Openstack Ironic.
 
+* Enable https://documentation.suse.com/smart/network/html/network-interface-predictable-naming/index.html[Predictable Network Interface Naming] via `net.ifnames=1`. From SUSE Linux Micro 6.2 onwards, this is enabled by default and explicit configuration is not required. For versions prior to 6.2, this must be explicitly set as a kernel argument. This aligns with the `predictableNicNames` configuration in the Management Cluster's Metal^3^ Helm chart, which is required for Directed Network Provisioning to function correctly. Consistent interface naming is also critical when SR-IOV is utilized.
+
 * Remove `intel_pstate=passive`. This option configures `intel_pstate` to work with generic cpufreq governors, but to make this work, it disables hardware-managed P-states (`HWP`) as a side effect. To reduce the hardware latency, this option is not recommended for real-time workloads.
 
 * Replace `intel_idle.max_cstate=0 processor.max_cstate=1` with `idle=poll`. To avoid C-State transitions, the `idle=poll` option is used to disable the C-State transitions and keep the CPU in the highest C-State. The `intel_idle.max_cstate=0` option disables `intel_idle`, so `acpi_idle` is used, and `acpi_idle.max_cstate=1` then sets max C-state for acpi_idle.
@@ -123,14 +125,14 @@ This provides an example of kernel arguments for a 32-core Intel server, includi
 [,shell]
 ----
 $ cat /proc/cmdline
-BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off net.ifnames=0 nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll
+BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll
 ----
 
 Here is another configuration example for a 64-core AMD server. Among the 128 logical processors (`0-127`), first 8 cores (`0-7`) are designated for housekeeping, while the remaining 120 cores (`8-127`) are pinned for the applications:
 [,shell]
 ----
 $ cat /proc/cmdline
-BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=575291cf-74e8-42cf-8f2c-408a20dc00b8 skew_tick=1 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack amd_iommu=on iommu=pt irqaffinity=0-7 isolcpus=domain,nohz,managed_irq,8-127 nohz_full=8-127 rcu_nocbs=8-127 mce=off nohz=on net.ifnames=0 nowatchdog nmi_watchdog=0 nosoftlockup quiet rcu_nocb_poll rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll
+BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=575291cf-74e8-42cf-8f2c-408a20dc00b8 skew_tick=1 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 amd_iommu=on iommu=pt irqaffinity=0-7 isolcpus=domain,nohz,managed_irq,8-127 nohz_full=8-127 rcu_nocbs=8-127 mce=off nohz=on nowatchdog nmi_watchdog=0 nosoftlockup quiet rcu_nocb_poll rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll
 ----
 
 [#cpu-pinning-host]
@@ -209,7 +211,7 @@ Edit the `/etc/default/grub` file with above parameters and the file will look l
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off net.ifnames=0 nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
 ----
 
 Update the GRUB configuration:
@@ -1206,7 +1208,7 @@ To enable the parameters, add them to the `/etc/default/grub` file:
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off net.ifnames=0 nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
 ----
 
 Update the GRUB configuration and reboot the system to apply the changes:
@@ -1300,7 +1302,7 @@ Modify the GRUB file `/etc/default/grub` to add them to the kernel command line:
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off net.ifnames=0 nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
 ----
 
 Update the GRUB configuration and reboot the system to apply the changes:
