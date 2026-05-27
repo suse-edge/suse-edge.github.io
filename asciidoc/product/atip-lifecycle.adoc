@@ -78,6 +78,19 @@ The changes required to upgrade the `RKE2` cluster using the automated workflow 
 
   ** Specify the desired `rolloutStrategy`.
   ** Change the version of the `RKE2` cluster to the new version replacing `$\{RKE2_NEW_VERSION\}`.
+  ** Decide if an ingress controller is to be deployed in the downstream cluster:
+  *** [Option 0]: Do not deploy any ingress controller
+  *** [Option 1]: Deploy only `Traefik`
+  *** [Option 2]: Deploy both `Ingress-NGINX` and `Traefik` (to be used for complex ingress migration scenarios)
+
+[NOTE]
+====
+The `Traefik` ingress provider integrated into RKE2/K3s is the only ingress controller supported in `{product} {version}` release, being still possible to temporarily run `Ingress-NGINX` alongside `Traefik` in order to support complex ingress migration scenarios, but only after `{product}` Management and/or Downstream clusters have been upgraded to version `{version}` and for the time required to perform that migration. Since `Traefik` is not yet the default ingress controller in RKE2 (it will be
+from RKE2 v1.36 onwards), it must be explicitly "requested" from the RKE2 server configuration file.
+
+RKE2 https://docs.rke2.io/reference/ingress_migration[Ingress NGINX to Traefik Migration] guide provides details on the ingress migration paths available
+once the `Traefik` ingress controller replaces the discontinued `Ingress-NGINX`.
+====
 
 [,yaml]
 ----
@@ -99,6 +112,14 @@ spec:
       maxSurge: 0
   serverConfig:
     cni: cilium
+  #===========================================================================
+  # Uncomment the following lines if selecting [Option 0]: Do not deploy
+  # any ingress controller
+  #===========================================================================
+    #disableComponents:
+    #  pluginComponents:
+    #  - "rke2-ingress-nginx"
+  #---------------------------------------------------------------------------
   rolloutStrategy:
     rollingUpdate:
       maxSurge: 0
@@ -111,26 +132,128 @@ spec:
         version: 1.4.0
         systemd:
           units:
-            - name: rke2-preinstall.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=rke2-preinstall
-                Wants=network-online.target
-                Before=rke2-install.service
-                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
-                [Service]
-                Type=oneshot
-                User=root
-                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
-                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
-                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
-                ExecStartPost=/bin/sh -c "umount /mnt"
-                [Install]
-                WantedBy=multi-user.target
+          - name: rke2-preinstall.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-preinstall
+              Wants=network-online.target
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+              ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStartPost=/bin/sh -c "umount /mnt"
+              [Install]
+              WantedBy=multi-user.target
+          # rke2-ingress-deployment.service unit
+          - name: rke2-ingress-deployment.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-ingress-deployment
+              Wants=rke2-preinstall.service
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              #===============================================================================================================================
+              # Leave one (and only one) of the two following ExecStart lines uncommented, depending on the desired ingress-controller(s):
+              #   [Option 1]: Deploy only "Traefik"
+              #   [Option 2]: Deploy both "Ingress-NGINX" and "Traefik"
+              #
+              # Keep both commented ONLY in case of seleting [Option 0]: "Do not deploy any ingress controller"
+              #===============================================================================================================================
+              #ExecStart=/bin/sh -c "echo \"ingress-controller: traefik\" >> /etc/rancher/rke2/config.yaml"                       # [Option 1]
+              ExecStart=/bin/sh -c "echo -e \"ingress-controller:\n- ingress-nginx\n- traefik\" >> /etc/rancher/rke2/config.yaml" # [Option 2]
+              #-------------------------------------------------------------------------------------------------------------------------------
+              [Install]
+              WantedBy=multi-user.target
+        storage:
+          directories:
+          - path: /var/lib/rancher/rke2/server/manifests
+            overwrite: true
+          files:
+          #############################################################################    
+          # if [Option 2]: "Deploy both `Ingress-NGINX` and `Traefik`" is selected
+          #############################################################################
+          - path: /var/lib/rancher/rke2/server/manifests/rke2-ingress-nginx-config.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChartConfig
+                metadata:
+                  name: rke2-ingress-nginx
+                  namespace: kube-system
+                spec:
+                  valuesContent: |-
+                    controller:
+                      hostPort:
+                        enabled: false  # not needed when exposing through a type:LoadBalancer service
+                      config:
+                        use-forwarded-headers: "true"
+                        enable-real-ip: "true"
+                      publishService:
+                        enabled: true
+                      service:
+                        enabled: true
+                        type: LoadBalancer
+                        externalTrafficPolicy: Local
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
+          #############################################################################    
+          # if [Option 1]: "Deploy only `Traefik`" OR  [Option 2]: "Deploy both
+          #`Ingress-NGINX` and `Traefik`" is selected
+          #############################################################################
+          - path: /var/lib/rancher/rke2/server/manifests/rke2-traefik-config.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChartConfig
+                metadata:
+                  name: rke2-traefik
+                  namespace: kube-system
+                spec:
+                  valuesContent: |-
+                    ingressClass:
+                      isDefaultClass: false  # Assumes [Option 2]; set to true if [Option 1]: "only deploying `Traefik`"
+                    ports:
+                      web:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 80
+                      websecure:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 443
+                    service:
+                      enabled: true
+                      type: LoadBalancer
+                      spec:
+                        externalTrafficPolicy: Local
+                        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+                    providers:
+                      kubernetesIngressNginx:  # this provider allows Traefik to "understand" most of the Ingress-NGINX annotations
+                        enabled: true
+                        ingressClass: "rke2-ingress-nginx-migration"
+                        controllerClass: "rke2.​cattle.​io/ingress-nginx-migration"
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
     kubelet:
       extraArgs:
-        - provider-id=metal3://BAREMETALHOST_UUID
+      - provider-id=metal3://BAREMETALHOST_UUID
     nodeName: "localhost.localdomain"
 ----
 

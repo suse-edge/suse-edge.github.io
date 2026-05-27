@@ -18,7 +18,7 @@ endif::[]
 The `Upgrade Controller` currently only supports `Day 2` operations for *non air-gapped management* clusters.
 ====
 
-This section covers how to perform the various `Day 2` operations related to upgrading your `management` cluster from one Edge platform version to another.
+This section covers how to perform the various `Day 2` operations related to upgrading your `management` cluster from one `{product}` platform version to another.
 
 The `Day 2` operations are automated by the <<components-upgrade-controller, Upgrade Controller>> and include:
 
@@ -35,13 +35,13 @@ endif::[]
 
 Before upgrading your `management` cluster, the following prerequisites must be met:
 
-. `SCC registered nodes` - ensure your cluster nodes' OS are registered with a subscription key that supports the OS version specified in the Edge <<release-notes,release>> you intend to upgrade to.
+. `SCC registered nodes` - ensure your cluster nodes' OS are registered with a subscription key that supports the OS version specified in the `{product}` <<release-notes,release>> you intend to upgrade to.
 
 . `Upgrade Controller` - make sure that the `Upgrade Controller` has been deployed on your `management` cluster. For installation steps, refer to <<components-upgrade-controller-installation>>.
 
 === Upgrade
 
-. Determine the Edge <<release-notes,release>> version that you wish to upgrade your `management` cluster to.
+. Determine the `{product}` <<release-notes,release>> version that you wish to upgrade your `management` cluster to.
 
 . In the `management` cluster, deploy an `UpgradePlan` that specifies the desired `release version`. The `UpgradePlan` must be deployed in the namespace of the `Upgrade Controller`.
 +
@@ -70,4 +70,154 @@ There may be use-cases where you would want to make additional configurations ov
 For more information on the actual `upgrade process`, refer to <<components-upgrade-controller-how>>.
 
 For information on how to track the `upgrade process`, refer to <<components-upgrade-controller-how-track>>.
+====
+
+=== Post-Upgrade Steps
+`{product}` upgrades from latest `{previous-edge-version}` z-stream to `{static-edge-version}` can require some final manual steps to be performed after the `Upgrade Controller` has completed the upgrade process. Those are related to the replacement of Ingress-NGINX with Traefik as the single supported ingress controller in `{product}` from `{version}` release.
+
+[NOTE]
+====
+The `Traefik` ingress provider integrated into RKE2/K3s is the only ingress controller supported in `{product} {version}` release, being still possible to temporarily run `Ingress-NGINX` alongside `Traefik` in order to support complex ingress migration scenarios, but only after `{product}` Management and/or Downstream clusters have been upgraded to version `{version}` and for the time required to perform that migration.
+
+RKE2 https://docs.rke2.io/reference/ingress_migration[Ingress NGINX to Traefik Migration] guide provides details on the ingress migration paths available
+once the `Traefik` ingress controller replaces the discontinued `Ingress-NGINX`.
+====
+
+In case the just upgraded Management cluster was not running the `Traefik` ingress controller (but the default Ingress-NGINX one) before triggering the upgrade, it is now then needed to manually deploy `Traefik`.
+
+First we are going to assure the deployed ingress-NGINX instance is properly configured (e.g., to avoid unnecessary hostPort collisions between the pods from the
+two ingress controllers):
+
+[,shell]
+----
+kubectl apply -f - <<- EOF
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-ingress-nginx
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    controller:
+      hostPort:
+        enabled: false  # not needed when exposing through a type:LoadBalancer service
+      config:
+        use-forwarded-headers: "true"
+        enable-real-ip: "true"
+      publishService:
+        enabled: true
+      service:
+        enabled: true
+        type: LoadBalancer
+        externalTrafficPolicy: Local
+EOF
+----
+
+Now we can proceed with the deployment of `Traefik`, through the installation of both `rke2-traefik-crd` and `rke2-traefik` Helm charts.
+[NOTE]
+====
+Deploy these Helm chats through `HelmChart` manifests, as shown below, to assure the `Upgrade Controller` will take care of also upgrading these Helm charts
+in future Management cluster upgrades.
+====
+
+[,shell]
+----
+kubectl apply -f - <<- EOF
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: rke2-traefik-crd
+  namespace: kube-system
+spec:
+  chart: rke2-traefik-crd
+  version: {rke2-traefik-crd Helm chart version}
+  repo: https://rke2-charts.rancher.io
+  bootstrap: false
+  failurePolicy: reinstall
+  backOffLimit: 20
+  targetNamespace: kube-system
+  set:
+    global.cattle.systemDefaultRegistry: registry.rancher.com
+    global.rke2DataDir: /var/lib/rancher/rke2
+    global.systemDefaultRegistry: registry.rancher.com
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: rke2-traefik
+  namespace: kube-system
+spec:
+  chart: rke2-traefik
+  version: {rke2-traefik Helm chart version}
+  repo: https://rke2-charts.rancher.io
+  bootstrap: false
+  failurePolicy: reinstall
+  backOffLimit: 20
+  targetNamespace: kube-system
+  set:
+    global.cattle.systemDefaultRegistry: registry.rancher.com
+    global.rke2DataDir: /var/lib/rancher/rke2
+    global.systemDefaultRegistry: registry.rancher.com
+  valuesContent: |-
+    ingressClass:
+      isDefaultClass: false  # if traefik deployed alongside ingress-nginx
+    ports:
+      web:
+        hostPort: null    # disallow hostPort
+        exposedPort: 80
+      websecure:
+        hostPort: null    # disallow hostPort
+        exposedPort: 443
+    service:
+      enabled: true
+      type: LoadBalancer
+      spec:
+        externalTrafficPolicy: Local
+        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+    providers:
+      kubernetesIngressNginx:  # this provider allows traefik to "understand" most of the ingress-nginx annotations
+        enabled: true
+        ingressClass: "rke2-ingress-nginx-migration"
+        controllerClass: "rke2.​cattle.​io/ingress-nginx-migration"
+EOF
+----
+
+The `{rke2-traefik-crd Helm chart version}` and `{rke2-traefik-crd Helm chart version}` are the ones dictated by the RKE2/k3s version
+we have upgraded to.
+
+In the last step, we finally create the MetalLB required objects to expose the `Traefik` service through a LoadBalancer type service:
+
+[,shell]
+----
+kubectl apply -f - <<- EOF
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: ingress-ippool-traefik
+  namespace: metallb-system
+spec:
+  addresses:
+  - {EXTERNAL_IP_FOR_TRAEFIK_SERVICE}/32
+  serviceAllocation:
+    priority: 100
+    serviceSelectors:
+    - matchExpressions:
+      - {key: app.kubernetes.io/name, operator: In, values: [rke2-traefik]}
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: ingress-l2-adv-traefik
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - ingress-ippool-traefik
+EOF
+----
+
+Now both `Traefik` and `Ingress-NGINX` are running side by side, allowing you to safely perform the necessary migration of your ingresses from one to the other.
+
+[IMPORTANT]
+====
+Once all ingresses have been migrated and you no longer need `Ingress-NGINX`, make sure to uninstall it and clean up all related resources to avoid any unnecessary resource consumption on your cluster.
 ====

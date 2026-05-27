@@ -20,7 +20,7 @@ endif::[]
 === Expose Rancher service
 
 When using RKE2 or K3s we need to expose services (Rancher in this context) from the management cluster as they are not exposed by default.
-In RKE2 there is an NGINX Ingress controller, whilst k3s is using Traefik.
+In both RKE2 and k3s there is a Traefik Ingress controller.
 The current workflow suggests using MetalLB for announcing a service (via L2 or BGP Advertisement) and the respective Ingress Controller
 to create an Ingress via `HelmChartConfig` since creating a new Ingress object would override the existing setup.
 
@@ -45,20 +45,25 @@ kubectl apply -f - <<EOF
 apiVersion: helm.cattle.io/v1
 kind: HelmChartConfig
 metadata:
-  name: rke2-ingress-nginx
+  name: rke2-traefik
   namespace: kube-system
 spec:
   valuesContent: |-
-    controller:
-      config:
-        use-forwarded-headers: "true"
-        enable-real-ip: "true"
-      publishService:
-        enabled: true
-      service:
-        enabled: true
-        type: LoadBalancer
+    ingressClass:
+      isDefaultClass: true
+    ports:
+      web:
+        hostPort: null    # disallow hostPort
+        exposedPort: 80
+      websecure:
+        hostPort: null    # disallow hostPort
+        exposedPort: 443
+    service:
+      enabled: true
+      type: LoadBalancer
+      spec:
         externalTrafficPolicy: Local
+        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
 EOF
 ----
 +
@@ -80,7 +85,7 @@ spec:
     priority: 100
     serviceSelectors:
     - matchExpressions:
-      - {key: app.kubernetes.io/name, operator: In, values: [rke2-ingress-nginx]}
+      - {key: app.kubernetes.io/name, operator: In, values: [rke2-traefik]}
 EOF
 ----
 +
