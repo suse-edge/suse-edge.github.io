@@ -2,7 +2,7 @@
 <!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head><title>Downstream cluster provisioning with Directed network provisioning (single-node) | SUSE Telco Cloud Documentation</title><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes"/><link rel="stylesheet" type="text/css" href="static/css/style-new.css"/>
 <link rel="schema.dc" href="http://purl.org/dc/elements/1.1/"/><link rel="schema.dcterms" href="http://purl.org/dc/terms/"/>
 <meta name="dcterms.modified" content="2026-05-27"/>
-<meta name="dcterms.dateSubmitted" content="2026-05-26"/>
+<meta name="dcterms.dateSubmitted" content="2026-05-27"/>
 <meta name="title" content="Downstream cluster provisioning with Directed network …"/>
 <meta name="description" content="Downstream cluster provisioning with Directed network provisioning (single-node)"/>
 <meta name="book-title" content="SUSE Telco Cloud Documentation"/>
@@ -38,7 +38,7 @@
       }
     ],
       
-    "datePublished": "2026-05-26T16:00+02:00",
+    "datePublished": "2026-05-27T08:02+02:00",
 
     "about": [
       
@@ -134,13 +134,12 @@ metadata:
   annotations: {
     rke2.controlplane.cluster.x-k8s.io/load-balancer-exclusion: "true"
   }
-
 spec:
   machineTemplate:
   infrastructureRef:
-      apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
-      kind: Metal3MachineTemplate
-      name: single-node-cluster-controlplane
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
   replicas: 1
   version: ${RKE2_VERSION}
   rolloutStrategy:
@@ -157,47 +156,98 @@ spec:
         version: 1.4.0
         systemd:
           units:
-            - name: rke2-preinstall.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=rke2-preinstall
-                Wants=network-online.target
-                Before=rke2-install.service
-                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
-                [Service]
-                Type=oneshot
-                User=root
-                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
-                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
-                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" &gt;&gt; /etc/rancher/rke2/config.yaml"
-                ExecStartPost=/bin/sh -c "umount /mnt"
-                [Install]
-                WantedBy=multi-user.target
+          - name: rke2-preinstall.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-preinstall
+              Wants=network-online.target
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+              ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" &gt;&gt; /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-label:\" &gt;&gt; /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" &gt;&gt; /etc/rancher/rke2/config.yaml"
+              ExecStartPost=/bin/sh -c "umount /mnt"
+              [Install]
+              WantedBy=multi-user.target
+          # rke2-traefik-deployment.service unit to be removed once "traefik" being the default ingress controller (starting with RKE2 v1.36)
+          - name: rke2-traefik-deployment.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-traefik-deployment
+              Wants=rke2-preinstall.service
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo \"ingress-controller: traefik\" &gt;&gt; /etc/rancher/rke2/config.yaml"
+              [Install]
+              WantedBy=multi-user.target
         storage:
+          directories:
+          - path: /var/lib/rancher/rke2/server/manifests
+            overwrite: true
           files:
-            # https://docs.rke2.io/networking/multus_sriov#using-multus-with-cilium
-            - path: /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
-              overwrite: true
-              contents:
-                inline: |
-                  apiVersion: helm.cattle.io/v1
-                  kind: HelmChartConfig
-                  metadata:
-                    name: rke2-cilium
-                    namespace: kube-system
-                  spec:
-                    valuesContent: |-
-                      cni:
-                        exclusive: false
-              mode: 0644
-              user:
-                name: root
-              group:
-                name: root
+          # https://docs.rke2.io/networking/multus_sriov#using-multus-with-cilium
+          - path: /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChartConfig
+                metadata:
+                  name: rke2-cilium
+                  namespace: kube-system
+                spec:
+                  valuesContent: |-
+                    cni:
+                      exclusive: false
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
+          - path: /var/lib/rancher/rke2/server/manifests/rke2-traefik-config.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChartConfig
+                metadata:
+                  name: rke2-traefik
+                  namespace: kube-system
+                spec:
+                  valuesContent: |-
+                    ingressClass:
+                      isDefaultClass: true
+                    ports:
+                      web:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 80
+                      websecure:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 443
+                    service:
+                      enabled: true
+                      type: LoadBalancer
+                      spec:
+                        externalTrafficPolicy: Local
+                        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
     kubelet:
       extraArgs:
-        - provider-id=metal3://BAREMETALHOST_UUID
+      - provider-id=metal3://BAREMETALHOST_UUID
     nodeName: "localhost.localdomain"</code></pre></div><p>The <code class="literal">Metal3MachineTemplate</code> object specifies the following information:</p><div class="itemizedlist"><ul class="itemizedlist"><li class="listitem"><p>The <code class="literal">dataTemplate</code> to be used as a reference to the template.</p></li><li class="listitem"><p>The <code class="literal">hostSelector</code> to be used matching with the label created during the enrollment process.</p></li><li class="listitem"><p>The <code class="literal">image</code> to be used as a reference to the image generated using <code class="literal">EIB</code> on the previous section (<a class="xref" href="eib-edge-image-connected.html" title="Chapter 49. Prepare downstream cluster image for connected scenarios">Chapter 49, <em>Prepare downstream cluster image for connected scenarios</em></a>), and the <code class="literal">checksum</code> and <code class="literal">checksumType</code> to be used to validate the image.</p></li></ul></div><div class="verbatim-wrap highlight yaml"><pre class="screen"><code class="language-yaml">apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
 kind: Metal3MachineTemplate
 metadata:

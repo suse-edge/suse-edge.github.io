@@ -2,7 +2,7 @@
 <!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head><title>BMC automated deployments with Metal3 | SUSE Telco Cloud Documentation</title><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes"/><link rel="stylesheet" type="text/css" href="static/css/style-new.css"/>
 <link rel="schema.dc" href="http://purl.org/dc/elements/1.1/"/><link rel="schema.dcterms" href="http://purl.org/dc/terms/"/>
 <meta name="dcterms.modified" content="2026-05-27"/>
-<meta name="dcterms.dateSubmitted" content="2026-05-26"/>
+<meta name="dcterms.dateSubmitted" content="2026-05-27"/>
 <meta name="title" content="BMC automated deployments with Metal3"/>
 <meta name="description" content="BMC automated deployments with Metal3"/>
 <meta name="book-title" content="SUSE Telco Cloud Documentation"/>
@@ -38,7 +38,7 @@
       }
     ],
       
-    "datePublished": "2026-05-26T16:00+02:00",
+    "datePublished": "2026-05-27T08:02+02:00",
 
     "about": [
       
@@ -322,30 +322,81 @@ spec:
     format: ignition
     kubelet:
       extraArgs:
-        - provider-id=metal3://BAREMETALHOST_UUID
+      - provider-id=metal3://BAREMETALHOST_UUID
     additionalUserData:
       config: |
         variant: fcos
         version: 1.4.0
         systemd:
           units:
-            - name: rke2-preinstall.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=rke2-preinstall
-                Wants=network-online.target
-                Before=rke2-install.service
-                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
-                [Service]
-                Type=oneshot
-                User=root
-                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
-                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
-                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" &gt;&gt; /etc/rancher/rke2/config.yaml"
-                ExecStartPost=/bin/sh -c "umount /mnt"
-                [Install]
-                WantedBy=multi-user.target
+          - name: rke2-preinstall.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-preinstall
+              Wants=network-online.target
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+              ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" &gt;&gt; /etc/rancher/rke2/config.yaml"
+              ExecStartPost=/bin/sh -c "umount /mnt"
+              [Install]
+              WantedBy=multi-user.target
+          # rke2-traefik-deployment.service unit to be removed once "traefik" being the default ingress controller (starting with RKE2 v1.36)
+          - name: rke2-traefik-deployment.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-traefik-deployment
+              Wants=rke2-preinstall.service
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo \"ingress-controller: traefik\" &gt;&gt; /etc/rancher/rke2/config.yaml"
+              [Install]
+              WantedBy=multi-user.target
+        storage:
+          directories:
+          - path: /var/lib/rancher/rke2/server/manifests
+            overwrite: true
+          files:
+          - path: /var/lib/rancher/rke2/server/manifests/rke2-traefik-config.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChartConfig
+                metadata:
+                  name: rke2-traefik
+                  namespace: kube-system
+                spec:
+                  valuesContent: |-
+                    ingressClass:
+                      isDefaultClass: true
+                    ports:
+                      web:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 80
+                      websecure:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 443
+                    service:
+                      enabled: true
+                      type: LoadBalancer
+                      spec:
+                        externalTrafficPolicy: Local
+                        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
 ---
 apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
 kind: Metal3MachineTemplate
@@ -375,12 +426,12 @@ spec:
   clusterName: sample-cluster
   metaData:
     objectNames:
-      - key: name
-        object: machine
-      - key: local-hostname
-        object: machine
-      - key: local_hostname
-        object: machine</code></pre></div><div id="id-1.4.3.8.8.6" class="admonition note normal"><img class="symbol" alt="Note" title="Note" src="static/images/icon-note.svg"/><div class="admon-title">Note</div><p>Adding the label <code class="literal">cluster-api.cattle.io/rancher-auto-import: "true"</code> to the <code class="literal">cluster.x-k8s.io</code> objects will import the cluster
+    - key: name
+      object: machine
+    - key: local-hostname
+      object: machine
+    - key: local_hostname
+      object: machine</code></pre></div><div id="id-1.4.3.8.8.6" class="admonition note normal"><img class="symbol" alt="Note" title="Note" src="static/images/icon-note.svg"/><div class="admon-title">Note</div><p>Adding the label <code class="literal">cluster-api.cattle.io/rancher-auto-import: "true"</code> to the <code class="literal">cluster.x-k8s.io</code> objects will import the cluster
 into Rancher (by creating a corresponding <code class="literal">clusters.management.cattle.io</code> object).
 See the <a class="link" href="https://documentation.suse.com/cloudnative/cluster-api/latest/en/tutorials/first-cluster.html#_mark_namespace_for_auto_import" target="_blank">Cluster API documentation</a> for more information.</p></div><p>Once adapted to your environment, you can apply the example via <code class="literal">kubectl</code> and then monitor the cluster status via <code class="literal">clusterctl</code>.</p><div class="verbatim-wrap highlight bash"><pre class="screen"><code class="language-bash">% kubectl apply -f rke2-control-plane.yaml
 
@@ -419,7 +470,6 @@ spec:
         kind: Metal3MachineTemplate
         name: sample-cluster-workers
       deletion:
-
         nodeDrainTimeoutSeconds: 0
       version: v1.35.3+rke2r3
 ---
@@ -436,30 +486,30 @@ spec:
         version: v1.35.3+rke2r3
         kubelet:
           extraArgs:
-            - provider-id=metal3://BAREMETALHOST_UUID
+          - provider-id=metal3://BAREMETALHOST_UUID
         additionalUserData:
           config: |
             variant: fcos
             version: 1.4.0
             systemd:
               units:
-                - name: rke2-preinstall.service
-                  enabled: true
-                  contents: |
-                    [Unit]
-                    Description=rke2-preinstall
-                    Wants=network-online.target
-                    Before=rke2-install.service
-                    ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
-                    [Service]
-                    Type=oneshot
-                    User=root
-                    ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
-                    ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
-                    ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" &gt;&gt; /etc/rancher/rke2/config.yaml"
-                    ExecStartPost=/bin/sh -c "umount /mnt"
-                    [Install]
-                    WantedBy=multi-user.target
+              - name: rke2-preinstall.service
+                enabled: true
+                contents: |
+                  [Unit]
+                  Description=rke2-preinstall
+                  Wants=network-online.target
+                  Before=rke2-install.service
+                  ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                  [Service]
+                  Type=oneshot
+                  User=root
+                  ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                  ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                  ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" &gt;&gt; /etc/rancher/rke2/config.yaml"
+                  ExecStartPost=/bin/sh -c "umount /mnt"
+                  [Install]
+                  WantedBy=multi-user.target
 ---
 apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
 kind: Metal3MachineTemplate
@@ -489,12 +539,12 @@ spec:
   clusterName: sample-cluster
   metaData:
     objectNames:
-      - key: name
-        object: machine
-      - key: local-hostname
-        object: machine
-      - key: local_hostname
-        object: machine</code></pre></div><p>When the example above has been copied and adapted to suit your environment, it can be applied via <code class="literal">kubectl</code> then the cluster status can be monitored with <code class="literal">clusterctl</code></p><div class="verbatim-wrap highlight bash"><pre class="screen"><code class="language-bash">% kubectl apply -f rke2-agent.yaml
+    - key: name
+      object: machine
+    - key: local-hostname
+      object: machine
+    - key: local_hostname
+      object: machine</code></pre></div><p>When the example above has been copied and adapted to suit your environment, it can be applied via <code class="literal">kubectl</code> then the cluster status can be monitored with <code class="literal">clusterctl</code></p><div class="verbatim-wrap highlight bash"><pre class="screen"><code class="language-bash">% kubectl apply -f rke2-agent.yaml
 
 # Wait for the worker nodes to be provisioned
 % clusterctl describe cluster sample-cluster
