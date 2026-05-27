@@ -261,7 +261,7 @@ operatingSystem:
       - linuxptp      # TelCo RAN; time sync (gNB: DU) - category: runtime
       - synce4l       # TelCo RAN; time sync (gNN: DU) - category: runtime
       - pciutils      # Non Telco specific (provides "lspci" command) - category: testing/utils
-      - numactl       # Non Telco specific (provides "numatcl" command) - category: testing/utils
+      - numactl       # Non Telco specific (provides "numactl" command) - category: testing/utils
     sccRegistrationCode: $SCC_REGISTRATION_CODE
 ----
 
@@ -385,6 +385,7 @@ When running Edge Image Builder, a directory is mounted from the host, so it is 
     |   └ rke2-images-core.linux-amd64.tar.zst
     |   └ rke2-images-multus.linux-amd64.tar.zst
     |   └ rke2-images.linux-amd64.tar.zst
+    |   └ rke2-images-traefik.linux-amd64.tar.zst
     |   └ rke2.linux-amd64.tar.zst
     |   └ sha256sum-amd64.txt
     |   └ performance-settings.sh
@@ -744,13 +745,12 @@ metadata:
   annotations: {
     rke2.controlplane.cluster.x-k8s.io/load-balancer-exclusion: "true"
   }
-
 spec:
   machineTemplate:
   infrastructureRef:
-      apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
-      kind: Metal3MachineTemplate
-      name: single-node-cluster-controlplane
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
   replicas: 1
   version: $\{RKE2_VERSION}
   rolloutStrategy:
@@ -767,47 +767,98 @@ spec:
         version: 1.4.0
         systemd:
           units:
-            - name: rke2-preinstall.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=rke2-preinstall
-                Wants=network-online.target
-                Before=rke2-install.service
-                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
-                [Service]
-                Type=oneshot
-                User=root
-                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
-                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
-                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
-                ExecStartPost=/bin/sh -c "umount /mnt"
-                [Install]
-                WantedBy=multi-user.target
+          - name: rke2-preinstall.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-preinstall
+              Wants=network-online.target
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+              ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStartPost=/bin/sh -c "umount /mnt"
+              [Install]
+              WantedBy=multi-user.target
+          # rke2-traefik-deployment.service unit to be removed once "traefik" being the default ingress controller (starting with RKE2 v1.36)
+          - name: rke2-traefik-deployment.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-traefik-deployment
+              Wants=rke2-preinstall.service
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo \"ingress-controller: traefik\" >> /etc/rancher/rke2/config.yaml"
+              [Install]
+              WantedBy=multi-user.target
         storage:
+          directories:
+          - path: /var/lib/rancher/rke2/server/manifests
+            overwrite: true
           files:
-            # https://docs.rke2.io/networking/multus_sriov#using-multus-with-cilium
-            - path: /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
-              overwrite: true
-              contents:
-                inline: |
-                  apiVersion: helm.cattle.io/v1
-                  kind: HelmChartConfig
-                  metadata:
-                    name: rke2-cilium
-                    namespace: kube-system
-                  spec:
-                    valuesContent: |-
-                      cni:
-                        exclusive: false
-              mode: 0644
-              user:
-                name: root
-              group:
-                name: root
+          # https://docs.rke2.io/networking/multus_sriov#using-multus-with-cilium
+          - path: /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChartConfig
+                metadata:
+                  name: rke2-cilium
+                  namespace: kube-system
+                spec:
+                  valuesContent: |-
+                    cni:
+                      exclusive: false
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
+          - path: /var/lib/rancher/rke2/server/manifests/rke2-traefik-config.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChartConfig
+                metadata:
+                  name: rke2-traefik
+                  namespace: kube-system
+                spec:
+                  valuesContent: |-
+                    ingressClass:
+                      isDefaultClass: true
+                    ports:
+                      web:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 80
+                      websecure:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 443
+                    service:
+                      enabled: true
+                      type: LoadBalancer
+                      spec:
+                        externalTrafficPolicy: Local
+                        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
     kubelet:
       extraArgs:
-        - provider-id=metal3://BAREMETALHOST_UUID
+      - provider-id=metal3://BAREMETALHOST_UUID
     nodeName: "localhost.localdomain"
 ----
 
@@ -1038,7 +1089,8 @@ The `RKE2ControlPlane` object specifies the control-plane configuration to be us
 * The advertisement mode to be used by the Load Balancer (`address` uses the L2 implementation), as well as the address to be used (replacing the `$\{EDGE_VIP_ADDRESS\}` with the `VIP` address).
 * The `serverConfig` with the `CNI` plug-in to be used (in this case, `Cilium`), and the additional `VIP` address(es) and name(s) to be listed under `tlsSan`.
 * The agentConfig block contains the `Ignition` format to be used and the `additionalUserData` to be used to configure the `RKE2` node with information like:
-    ** The systemd service named `rke2-preinstall.service` to replace automatically the `BAREMETALHOST_UUID` and `node-name` during the provisioning process using the Ironic information.
+    ** The systemd service named `rke2-preinstall.service` to replace automatically the `BAREMETALHOST_UUID` and `node-name` during the provisioning process using the Ironic information plus adding the `metal3.io/uuid` label to Node objects with the `BareMetalHost` UUID.
+    ** The systemd service named `rke2-traefik-deployment.service` to set the RKE2 `ingress-controller` config. server option in `/etc/rancher/rke2/config.yaml` file to `traefik`.
     ** The `storage` block which contains the Helm charts to be used to install the `MetalLB` and the `endpoint-copier-operator`.
     ** The `metalLB` custom resource file with the `IPaddressPool` and the `L2Advertisement` to be used (replacing `$\{EDGE_VIP_ADDRESS_IPV4\}` with the `VIP` address).
     ** The `endpoint-svc.yaml` file to be used to configure the `kubernetes-vip` service to be used by the `MetalLB` to manage the `VIP` address.
@@ -1082,24 +1134,44 @@ spec:
         version: 1.4.0
         systemd:
           units:
-            - name: rke2-preinstall.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=rke2-preinstall
-                Wants=network-online.target
-                Before=rke2-install.service
-                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
-                [Service]
-                Type=oneshot
-                User=root
-                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
-                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
-                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
-                ExecStartPost=/bin/sh -c "umount /mnt"
-                [Install]
-                WantedBy=multi-user.target
+          - name: rke2-preinstall.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-preinstall
+              Wants=network-online.target
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+              ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStartPost=/bin/sh -c "umount /mnt"
+              [Install]
+              WantedBy=multi-user.target
+          # rke2-traefik-deployment.service unit to be removed once "traefik" being the default ingress controller (starting with RKE2 v1.36)
+          - name: rke2-traefik-deployment.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-traefik-deployment
+              Wants=rke2-preinstall.service
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo \"ingress-controller: traefik\" >> /etc/rancher/rke2/config.yaml"
+              [Install]
+              WantedBy=multi-user.target
         storage:
+          directories:
+          - path: /var/lib/rancher/rke2/server/manifests
+            overwrite: true
           files:
             # https://docs.rke2.io/networking/multus_sriov#using-multus-with-cilium
             - path: /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
@@ -1201,9 +1273,40 @@ spec:
                       protocol: TCP
                       targetPort: 6443
                     type: LoadBalancer
+          - path: /var/lib/rancher/rke2/server/manifests/rke2-traefik-config.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChartConfig
+                metadata:
+                  name: rke2-traefik
+                  namespace: kube-system
+                spec:
+                  valuesContent: |-
+                    ingressClass:
+                      isDefaultClass: true
+                    ports:
+                      web:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 80
+                      websecure:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 443
+                    service:
+                      enabled: true
+                      type: LoadBalancer
+                      spec:
+                        externalTrafficPolicy: Local
+                        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
     kubelet:
       extraArgs:
-        - provider-id=metal3://BAREMETALHOST_UUID
+      - provider-id=metal3://BAREMETALHOST_UUID
     nodeName: "Node-multinode-cluster"
 ----
 
@@ -1248,12 +1351,12 @@ spec:
   clusterName: multinode-cluster
   metaData:
     objectNames:
-      - key: name
-        object: machine
-      - key: local-hostname
-        object: machine
-      - key: local_hostname
-        object: machine
+    - key: name
+      object: machine
+    - key: local-hostname
+      object: machine
+    - key: local_hostname
+      object: machine
 ----
 
 The following yaml files are an example configuration for the worker nodes.
@@ -1322,23 +1425,26 @@ spec:
             version: 1.4.0
             systemd:
               units:
-                - name: rke2-preinstall.service
-                  enabled: true
-                  contents: |
-                    [Unit]
-                    Description=rke2-preinstall
-                    Wants=network-online.target
-                    Before=rke2-install.service
-                    ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
-                    [Service]
-                    Type=oneshot
-                    User=root
-                    ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
-                    ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
-                    ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
-                    ExecStartPost=/bin/sh -c "umount /mnt"
-                    [Install]
-                    WantedBy=multi-user.target
+              - name: rke2-preinstall.service
+                enabled: true
+                contents: |
+                  [Unit]
+                  Description=rke2-preinstall
+                  Wants=network-online.target
+                  Before=rke2-install.service
+                  ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                  [Service]
+                  Type=oneshot
+                  User=root
+                  ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                  ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                  ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                  ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+                  ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                  ExecStartPost=/bin/sh -c "umount /mnt"
+                  [Install]
+                  WantedBy=multi-user.target
+
 ----
 
 The `Metal3MachineTemplate` object contain references to `dataTemplate`, `hostSelector`, and `image` for the worker nodes:
@@ -1378,12 +1484,12 @@ spec:
   clusterName: multinode-cluster
   metaData:
     objectNames:
-      - key: name
-        object: machine
-      - key: local-hostname
-        object: machine
-      - key: local_hostname
-        object: machine
+    - key: name
+      object: machine
+    - key: local-hostname
+      object: machine
+    - key: local_hostname
+      object: machine
 ----
 
 Once the file is created by joining the previous blocks, run the following command in the management cluster to start provisioning the new three bare-metal hosts:
@@ -1659,7 +1765,7 @@ spec:
     cni: calico
     cniMultusEnable: true
   preRKE2Commands:
-    - modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
+  - modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
   agentConfig:
     format: ignition
     additionalUserData:
@@ -1668,66 +1774,66 @@ spec:
         version: 1.4.0
         storage:
           files:
-            - path: /var/lib/rancher/rke2/server/manifests/configmap-sriov-custom-auto.yaml
-              overwrite: true
-              contents:
-                inline: |
-                  apiVersion: v1
-                  kind: ConfigMap
-                  metadata:
-                    name: sriov-custom-auto-config
-                    namespace: kube-system
-                  data:
-                    config.json: |
-                      [
-                         {
-                           "resourceName": "$\{RESOURCE_NAME1}",
-                           "interface": "$\{SRIOV-NIC-NAME1}",
-                           "pfname": "$\{PF_NAME1}",
-                           "driver": "$\{DRIVER_NAME1}",
-                           "numVFsToCreate": $\{NUM_VFS1}
-                         },
-                         {
-                           "resourceName": "$\{RESOURCE_NAME2}",
-                           "interface": "$\{SRIOV-NIC-NAME2}",
-                           "pfname": "$\{PF_NAME2}",
-                           "driver": "$\{DRIVER_NAME2}",
-                           "numVFsToCreate": $\{NUM_VFS2}
-                         }
-                      ]
-              mode: 0644
-              user:
-                name: root
-              group:
-                name: root
-            - path: /var/lib/rancher/rke2/server/manifests/sriov-crd.yaml
-              overwrite: true
-              contents:
-                inline: |
-                  apiVersion: helm.cattle.io/v1
-                  kind: HelmChart
-                  metadata:
-                    name: sriov-crd
-                    namespace: kube-system
-                  spec:
-                    chart: oci://registry.suse.com/edge/charts/sriov-crd
-                    targetNamespace: sriov-network-operator
-                    version: {version-sriov-crd-chart}
-                    createNamespace: true
-            - path: /var/lib/rancher/rke2/server/manifests/sriov-network-operator.yaml
-              overwrite: true
-              contents:
-                inline: |
-                  apiVersion: helm.cattle.io/v1
-                  kind: HelmChart
-                  metadata:
-                    name: sriov-network-operator
-                    namespace: kube-system
-                  spec:
-                    chart: oci://registry.suse.com/edge/charts/sriov-network-operator
-                    targetNamespace: sriov-network-operator
-                    version: {version-sriov-network-operator-chart}
-                    createNamespace: true
+          - path: /var/lib/rancher/rke2/server/manifests/configmap-sriov-custom-auto.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: sriov-custom-auto-config
+                  namespace: kube-system
+                data:
+                  config.json: |
+                    [
+                        {
+                          "resourceName": "$\{RESOURCE_NAME1}",
+                          "interface": "$\{SRIOV-NIC-NAME1}",
+                          "pfname": "$\{PF_NAME1}",
+                          "driver": "$\{DRIVER_NAME1}",
+                          "numVFsToCreate": $\{NUM_VFS1}
+                        },
+                        {
+                          "resourceName": "$\{RESOURCE_NAME2}",
+                          "interface": "$\{SRIOV-NIC-NAME2}",
+                          "pfname": "$\{PF_NAME2}",
+                          "driver": "$\{DRIVER_NAME2}",
+                          "numVFsToCreate": $\{NUM_VFS2}
+                        }
+                    ]
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
+          - path: /var/lib/rancher/rke2/server/manifests/sriov-crd.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChart
+                metadata:
+                  name: sriov-crd
+                  namespace: kube-system
+                spec:
+                  chart: oci://registry.suse.com/edge/charts/sriov-crd
+                  targetNamespace: sriov-network-operator
+                  version: {version-sriov-crd-chart}
+                  createNamespace: true
+          - path: /var/lib/rancher/rke2/server/manifests/sriov-network-operator.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChart
+                metadata:
+                  name: sriov-network-operator
+                  namespace: kube-system
+                spec:
+                  chart: oci://registry.suse.com/edge/charts/sriov-network-operator
+                  targetNamespace: sriov-network-operator
+                  version: {version-sriov-network-operator-chart}
+                  createNamespace: true
         kernel_arguments:
           should_exist:
             - intel_iommu=on
@@ -1750,72 +1856,87 @@ spec:
             - quiet
         systemd:
           units:
-            - name: rke2-preinstall.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=rke2-preinstall
-                Wants=network-online.target
-                Before=rke2-install.service
-                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
-                [Service]
-                Type=oneshot
-                User=root
-                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
-                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
-                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
-                ExecStartPost=/bin/sh -c "umount /mnt"
-                [Install]
-                WantedBy=multi-user.target
-            - name: cpu-partitioning.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=cpu-partitioning
-                Wants=network-online.target
-                After=network.target network-online.target
-                [Service]
-                Type=oneshot
-                User=root
-                ExecStart=/bin/sh -c "echo isolated_cores=$\{ISOLATED_CPU_CORES} > /etc/tuned/cpu-partitioning-variables.conf"
-                ExecStartPost=/bin/sh -c "tuned-adm profile cpu-partitioning"
-                ExecStartPost=/bin/sh -c "systemctl enable tuned.service"
-                [Install]
-                WantedBy=multi-user.target
-            - name: performance-settings.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=performance-settings
-                Wants=network-online.target
-                After=network.target network-online.target cpu-partitioning.service
-                [Service]
-                Type=oneshot
-                User=root
-                ExecStart=/bin/sh -c "/opt/performance-settings/performance-settings.sh"
-                [Install]
-                WantedBy=multi-user.target
-            - name: sriov-custom-auto-vfs.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=SRIOV Custom Auto VF Creation
-                Wants=network-online.target  rke2-server.target
-                After=network.target network-online.target rke2-server.target
-                [Service]
-                User=root
-                Type=forking
-                TimeoutStartSec=900
-                ExecStart=/bin/sh -c "while ! /var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml wait --for condition=ready nodes --all ; do sleep 2 ; done"
-                ExecStartPost=/bin/sh -c "while [ $(/var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml get sriovnetworknodestates.sriovnetwork.openshift.io --ignore-not-found --no-headers -A | wc -l) -eq 0 ]; do sleep 1; done"
-                ExecStartPost=/bin/sh -c "/opt/sriov/sriov-auto-filler.sh"
-                RemainAfterExit=yes
-                KillMode=process
-                [Install]
-                WantedBy=multi-user.target
+          - name: rke2-preinstall.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-preinstall
+              Wants=network-online.target
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+              ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStartPost=/bin/sh -c "umount /mnt"
+              [Install]
+              WantedBy=multi-user.target
+          # rke2-traefik-deployment.service unit to be removed once "traefik" being the default ingress controller (starting with RKE2 v1.36)
+          - name: rke2-traefik-deployment.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-traefik-deployment
+              Wants=rke2-preinstall.service
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo \"ingress-controller: traefik\" >> /etc/rancher/rke2/config.yaml"
+              [Install]
+              WantedBy=multi-user.target
+          - name: cpu-partitioning.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=cpu-partitioning
+              Wants=network-online.target
+              After=network.target network-online.target
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo isolated_cores=$\{ISOLATED_CPU_CORES} > /etc/tuned/cpu-partitioning-variables.conf"
+              ExecStartPost=/bin/sh -c "tuned-adm profile cpu-partitioning"
+              ExecStartPost=/bin/sh -c "systemctl enable tuned.service"
+              [Install]
+              WantedBy=multi-user.target
+          - name: performance-settings.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=performance-settings
+              Wants=network-online.target
+              After=network.target network-online.target cpu-partitioning.service
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "/opt/performance-settings/performance-settings.sh"
+              [Install]
+              WantedBy=multi-user.target
+          - name: sriov-custom-auto-vfs.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=SRIOV Custom Auto VF Creation
+              Wants=network-online.target  rke2-server.target
+              After=network.target network-online.target rke2-server.target
+              [Service]
+              User=root
+              Type=forking
+              TimeoutStartSec=900
+              ExecStart=/bin/sh -c "while ! /var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml wait --for condition=ready nodes --all ; do sleep 2 ; done"
+              ExecStartPost=/bin/sh -c "while [ $(/var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml get sriovnetworknodestates.sriovnetwork.openshift.io --ignore-not-found --no-headers -A | wc -l) -eq 0 ]; do sleep 1; done"
+              ExecStartPost=/bin/sh -c "/opt/sriov/sriov-auto-filler.sh"
+              RemainAfterExit=yes
+              KillMode=process
+              [Install]
+              WantedBy=multi-user.target
     kubelet:
       extraArgs:
-        - provider-id=metal3://BAREMETALHOST_UUID
+      - provider-id=metal3://BAREMETALHOST_UUID
     nodeName: "localhost.localdomain"
 ----
 
@@ -1912,26 +2033,43 @@ spec:
         version: 1.4.0
         systemd:
           units:
-            - name: rke2-preinstall.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=rke2-preinstall
-                Wants=network-online.target
-                Before=rke2-install.service
-                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
-                [Service]
-                Type=oneshot
-                User=root
-                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
-                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
-                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
-                ExecStartPost=/bin/sh -c "umount /mnt"
-                [Install]
-                WantedBy=multi-user.target
+          - name: rke2-preinstall.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-preinstall
+              Wants=network-online.target
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+              ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStartPost=/bin/sh -c "umount /mnt"
+              [Install]
+              WantedBy=multi-user.target
+          # rke2-traefik-deployment.service unit to be removed once "traefik" being the default ingress controller (starting with RKE2 v1.36)
+          - name: rke2-traefik-deployment.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-traefik-deployment
+              Wants=rke2-preinstall.service
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo \"ingress-controller: traefik\" >> /etc/rancher/rke2/config.yaml"
+              [Install]
+              WantedBy=multi-user.target
     kubelet:
       extraArgs:
-        - provider-id=metal3://BAREMETALHOST_UUID
+      - provider-id=metal3://BAREMETALHOST_UUID
     nodeName: "localhost.localdomain"
 ----
 
@@ -2063,110 +2201,110 @@ spec:
         version: 1.4.0
         storage:
           files:
-            - path: /var/lib/rancher/rke2/server/manifests/configmap-sriov-custom-auto.yaml
-              overwrite: true
-              contents:
-                inline: |
-                  apiVersion: v1
-                  kind: ConfigMap
-                  metadata:
-                    name: sriov-custom-auto-config
-                    namespace: sriov-network-operator
-                  data:
-                    config.json: |
-                      [
-                         {
-                           "resourceName": "$\{RESOURCE_NAME1}",
-                           "interface": "$\{SRIOV-NIC-NAME1}",
-                           "pfname": "$\{PF_NAME1}",
-                           "driver": "$\{DRIVER_NAME1}",
-                           "numVFsToCreate": $\{NUM_VFS1}
-                         },
-                         {
-                           "resourceName": "$\{RESOURCE_NAME2}",
-                           "interface": "$\{SRIOV-NIC-NAME2}",
-                           "pfname": "$\{PF_NAME2}",
-                           "driver": "$\{DRIVER_NAME2}",
-                           "numVFsToCreate": $\{NUM_VFS2}
-                         }
-                      ]
-              mode: 0644
-              user:
-                name: root
-              group:
-                name: root
-            - path: /var/lib/rancher/rke2/server/manifests/sriov.yaml
-              overwrite: true
-              contents:
-                inline: |
-                  apiVersion: v1
-                  data:
-                    .dockerconfigjson: $\{REGISTRY_AUTH_DOCKERCONFIGJSON}
-                  kind: Secret
-                  metadata:
+          - path: /var/lib/rancher/rke2/server/manifests/configmap-sriov-custom-auto.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: sriov-custom-auto-config
+                  namespace: sriov-network-operator
+                data:
+                  config.json: |
+                    [
+                        {
+                          "resourceName": "$\{RESOURCE_NAME1}",
+                          "interface": "$\{SRIOV-NIC-NAME1}",
+                          "pfname": "$\{PF_NAME1}",
+                          "driver": "$\{DRIVER_NAME1}",
+                          "numVFsToCreate": $\{NUM_VFS1}
+                        },
+                        {
+                          "resourceName": "$\{RESOURCE_NAME2}",
+                          "interface": "$\{SRIOV-NIC-NAME2}",
+                          "pfname": "$\{PF_NAME2}",
+                          "driver": "$\{DRIVER_NAME2}",
+                          "numVFsToCreate": $\{NUM_VFS2}
+                        }
+                    ]
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
+          - path: /var/lib/rancher/rke2/server/manifests/sriov.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: v1
+                data:
+                  .dockerconfigjson: $\{REGISTRY_AUTH_DOCKERCONFIGJSON}
+                kind: Secret
+                metadata:
+                  name: privregauth
+                  namespace: kube-system
+                type: kubernetes.io/dockerconfigjson
+                ---
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  namespace: kube-system
+                  name: example-repo-ca
+                data:
+                  ca.crt: |-
+                    -----BEGIN CERTIFICATE-----
+                    $\{CA_BASE64_CERT}
+                    -----END CERTIFICATE-----
+                ---
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChart
+                metadata:
+                  name: sriov-crd
+                  namespace: kube-system
+                spec:
+                  chart: oci://$\{PRIVATE_REGISTRY_URL}/mirror/sriov-crd
+                  dockerRegistrySecret:
                     name: privregauth
-                    namespace: kube-system
-                  type: kubernetes.io/dockerconfigjson
-                  ---
-                  apiVersion: v1
-                  kind: ConfigMap
-                  metadata:
-                    namespace: kube-system
+                  repoCAConfigMap:
                     name: example-repo-ca
-                  data:
-                    ca.crt: |-
-                      -----BEGIN CERTIFICATE-----
-                      $\{CA_BASE64_CERT}
-                      -----END CERTIFICATE-----
-                  ---
-                  apiVersion: helm.cattle.io/v1
-                  kind: HelmChart
-                  metadata:
-                    name: sriov-crd
-                    namespace: kube-system
-                  spec:
-                    chart: oci://$\{PRIVATE_REGISTRY_URL}/mirror/sriov-crd
-                    dockerRegistrySecret:
-                      name: privregauth
-                    repoCAConfigMap:
-                      name: example-repo-ca
-                    createNamespace: true
-                    set:
-                      global.clusterCIDR: 192.168.0.0/18
-                      global.clusterCIDRv4: 192.168.0.0/18
-                      global.clusterDNS: 10.96.0.10
-                      global.clusterDomain: cluster.local
-                      global.rke2DataDir: /var/lib/rancher/rke2
-                      global.serviceCIDR: 10.96.0.0/12
-                    targetNamespace: sriov-network-operator
-                    version: {version-sriov-crd-chart}
-                  ---
-                  apiVersion: helm.cattle.io/v1
-                  kind: HelmChart
-                  metadata:
-                    name: sriov-network-operator
-                    namespace: kube-system
-                  spec:
-                    chart: oci://$\{PRIVATE_REGISTRY_URL\}/mirror/sriov-network-operator
-                    dockerRegistrySecret:
-                      name: privregauth
-                    repoCAConfigMap:
-                      name: example-repo-ca
-                    createNamespace: true
-                    set:
-                      global.clusterCIDR: 192.168.0.0/18
-                      global.clusterCIDRv4: 192.168.0.0/18
-                      global.clusterDNS: 10.96.0.10
-                      global.clusterDomain: cluster.local
-                      global.rke2DataDir: /var/lib/rancher/rke2
-                      global.serviceCIDR: 10.96.0.0/12
-                    targetNamespace: sriov-network-operator
-                    version: {version-sriov-network-operator-chart}
-              mode: 0644
-              user:
-                name: root
-              group:
-                name: root
+                  createNamespace: true
+                  set:
+                    global.clusterCIDR: 192.168.0.0/18
+                    global.clusterCIDRv4: 192.168.0.0/18
+                    global.clusterDNS: 10.96.0.10
+                    global.clusterDomain: cluster.local
+                    global.rke2DataDir: /var/lib/rancher/rke2
+                    global.serviceCIDR: 10.96.0.0/12
+                  targetNamespace: sriov-network-operator
+                  version: {version-sriov-crd-chart}
+                ---
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChart
+                metadata:
+                  name: sriov-network-operator
+                  namespace: kube-system
+                spec:
+                  chart: oci://$\{PRIVATE_REGISTRY_URL\}/mirror/sriov-network-operator
+                  dockerRegistrySecret:
+                    name: privregauth
+                  repoCAConfigMap:
+                    name: example-repo-ca
+                  createNamespace: true
+                  set:
+                    global.clusterCIDR: 192.168.0.0/18
+                    global.clusterCIDRv4: 192.168.0.0/18
+                    global.clusterDNS: 10.96.0.10
+                    global.clusterDomain: cluster.local
+                    global.rke2DataDir: /var/lib/rancher/rke2
+                    global.serviceCIDR: 10.96.0.0/12
+                  targetNamespace: sriov-network-operator
+                  version: {version-sriov-network-operator-chart}
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
         kernel_arguments:
           should_exist:
             - intel_iommu=on
@@ -2189,71 +2327,88 @@ spec:
             - quiet
         systemd:
           units:
-            - name: rke2-preinstall.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=rke2-preinstall
-                Wants=network-online.target
-                Before=rke2-install.service
-                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
-                [Service]
-                Type=oneshot
-                User=root
-                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
-                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
-                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
-                ExecStartPost=/bin/sh -c "umount /mnt"
-                [Install]
-                WantedBy=multi-user.target
-            - name: cpu-partitioning.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=cpu-partitioning
-                Wants=network-online.target
-                After=network.target network-online.target
-                [Service]
-                Type=oneshot
-                User=root
-                ExecStart=/bin/sh -c "echo isolated_cores=$\{ISOLATED_CPU_CORES} > /etc/tuned/cpu-partitioning-variables.conf"
-                ExecStartPost=/bin/sh -c "tuned-adm profile cpu-partitioning"
-                ExecStartPost=/bin/sh -c "systemctl enable tuned.service"
-                [Install]
-                WantedBy=multi-user.target
-            - name: performance-settings.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=performance-settings
-                Wants=network-online.target
-                After=network.target network-online.target cpu-partitioning.service
-                [Service]
-                Type=oneshot
-                User=root
-                ExecStart=/bin/sh -c "/opt/performance-settings/performance-settings.sh"
-                [Install]
-                WantedBy=multi-user.target
-            - name: sriov-custom-auto-vfs.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=SRIOV Custom Auto VF Creation
-                Wants=network-online.target  rke2-server.target
-                After=network.target network-online.target rke2-server.target
-                [Service]
-                User=root
-                Type=forking
-                TimeoutStartSec=1800
-                ExecStart=/bin/sh -c "while ! /var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml wait --for condition=ready nodes --timeout=30m --all ; do sleep 10 ; done"
-                ExecStartPost=/bin/sh -c "/opt/sriov/sriov-auto-filler.sh"
-                RemainAfterExit=yes
-                KillMode=process
-                [Install]
-                WantedBy=multi-user.target
+          - name: rke2-preinstall.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-preinstall
+              Wants=network-online.target
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+              ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStartPost=/bin/sh -c "umount /mnt"
+              [Install]
+              WantedBy=multi-user.target
+          # rke2-traefik-deployment.service unit to be removed once "traefik" being the default ingress controller (starting with RKE2 v1.36)
+          - name: rke2-traefik-deployment.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-traefik-deployment
+              Wants=rke2-preinstall.service
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo \"ingress-controller: traefik\" >> /etc/rancher/rke2/config.yaml"
+              [Install]
+              WantedBy=multi-user.target
+          - name: cpu-partitioning.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=cpu-partitioning
+              Wants=network-online.target
+              After=network.target network-online.target
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo isolated_cores=$\{ISOLATED_CPU_CORES} > /etc/tuned/cpu-partitioning-variables.conf"
+              ExecStartPost=/bin/sh -c "tuned-adm profile cpu-partitioning"
+              ExecStartPost=/bin/sh -c "systemctl enable tuned.service"
+              [Install]
+              WantedBy=multi-user.target
+          - name: performance-settings.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=performance-settings
+              Wants=network-online.target
+              After=network.target network-online.target cpu-partitioning.service
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "/opt/performance-settings/performance-settings.sh"
+              [Install]
+              WantedBy=multi-user.target
+          - name: sriov-custom-auto-vfs.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=SRIOV Custom Auto VF Creation
+              Wants=network-online.target  rke2-server.target
+              After=network.target network-online.target rke2-server.target
+              [Service]
+              User=root
+              Type=forking
+              TimeoutStartSec=1800
+              ExecStart=/bin/sh -c "while ! /var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml wait --for condition=ready nodes --timeout=30m --all ; do sleep 10 ; done"
+              ExecStartPost=/bin/sh -c "/opt/sriov/sriov-auto-filler.sh"
+              RemainAfterExit=yes
+              KillMode=process
+              [Install]
+              WantedBy=multi-user.target
     kubelet:
       extraArgs:
-        - provider-id=metal3://BAREMETALHOST_UUID
+      - provider-id=metal3://BAREMETALHOST_UUID
     nodeName: "localhost.localdomain"
 ----
 

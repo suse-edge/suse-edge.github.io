@@ -715,13 +715,14 @@ The `kubernetes` folder contains the following subfolders:
 
 The `kubernetes/config` folder contains the following files:
 
-- `server.yaml`: By default, the `CNI` plug-in installed by default is `Cilium`, so you do not need to create this folder and file. Just in case you need to customize the `CNI` plug-in, you can use the `server.yaml` file under the `kubernetes/config` folder. It contains the following information:
+- `server.yaml`: The `CNI` plug-in installed by default is `Cilium`, so you do not need to create this folder and file to set that. Just in case you need to customize the `CNI` plug-in, you can use the `server.yaml` file under the `kubernetes/config` folder. It contains the following information:
 +
 [,yaml]
 ----
 cni:
 - multus
 - cilium
+ingress-controller: traefik
 write-kubeconfig-mode: '0644'
 selinux: true
 system-default-registry: registry.rancher.com
@@ -730,6 +731,15 @@ system-default-registry: registry.rancher.com
 [NOTE]
 ====
 This is an optional file to define certain Kubernetes customization, like the CNI plug-ins to be used or many options you can check in the https://docs.rke2.io/install/configuration[official documentation].
+====
+
+[WARNING]
+====
+The `Traefik` ingress provider integrated into RKE2/K3s is the only ingress controller supported in `{product} {version}` release, being still possible to temporarily run `Ingress-NGINX` alongside `Traefik` in order to support complex ingress migration scenarios, but only after `{product}` Management and/or Downstream clusters have been upgraded to version `{version}` and for the time required to perform that migration. Since `Traefik` is not yet the default ingress controller in RKE2 (it will be
+from RKE2 v1.36 onwards), it must be explicitly "requested" from the RKE2 server configuration file, resulting in the need to include the `kubernetes/config/server.yaml` file in  all the EIB self-install iso images generated to provision `{product} {version}` Management clusters' nodes.
+
+RKE2 https://docs.rke2.io/reference/ingress_migration[Ingress NGINX to Traefik Migration] guide provides details on the ingress migration paths available
+once the `Traefik` ingress controller replaces the discontinued `Ingress-NGINX`.
 ====
 
 The `os-files/var/lib/rancher/rke2/server/manifests` folder contains the following file:
@@ -741,20 +751,30 @@ The `os-files/var/lib/rancher/rke2/server/manifests` folder contains the followi
 apiVersion: helm.cattle.io/v1
 kind: HelmChartConfig
 metadata:
-  name: rke2-ingress-nginx
+  name: rke2-traefik
   namespace: kube-system
 spec:
   valuesContent: |-
-    controller:
-      config:
-        use-forwarded-headers: "true"
-        enable-real-ip: "true"
-      publishService:
-        enabled: true
-      service:
-        enabled: true
-        type: LoadBalancer
+    ingressClass:
+      isDefaultClass: true
+    ports:
+      web:
+        hostPort: null    # disallow hostPort
+        exposedPort: 80
+      websecure:
+        hostPort: null    # disallow hostPort
+        exposedPort: 443
+    service:
+      enabled: true
+      type: LoadBalancer
+      spec:
         externalTrafficPolicy: Local
+        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+    providers:
+      kubernetesIngressNginx:  # this provider allows traefik to "understand" most of the ingress-nginx annotations
+        enabled: true
+        ingressClass: "rke2-ingress-nginx-migration"
+        controllerClass: "rke2.​cattle.​io/ingress-nginx-migration"
 ----
 
 [NOTE]
@@ -790,7 +810,7 @@ spec:
     - ingress-ippool
 ----
 
-- `ingress-ippool.yaml`: contains the configuration to create the `IPAddressPool` for the `rke2-ingress-nginx` component. The `$\{INGRESS_VIP\}` has to be set properly to define the IP address reserved to be used by the `rke2-ingress-nginx` component.
+- `ingress-ippool.yaml`: contains the configuration to create the MetalLB `IPAddressPool` object for the `rke2-traefik` component. The `$\{INGRESS_VIP\}` has to be set properly to define the exposed IP address reserved to be used to reach the (internal) `rke2-traefik` service.
 +
 [,yaml]
 ----
@@ -806,7 +826,7 @@ spec:
     priority: 100
     serviceSelectors:
       - matchExpressions:
-          - {key: app.kubernetes.io/name, operator: In, values: [rke2-ingress-nginx]}
+          - {key: app.kubernetes.io/name, operator: In, values: [rke2-traefik]}
 ----
 
 The `kubernetes/helm/values` folder contains the following files:
@@ -1238,6 +1258,7 @@ embeddedArtifactRegistry:
     - name: registry.rancher.com/rancher/hardened-coredns:v1.14.2-build20260310
     - name: registry.rancher.com/rancher/hardened-k8s-metrics-server:v0.8.1-build20260206
     - name: registry.rancher.com/rancher/hardened-multus-cni:v4.2.4-build20260310
+    - name: registry.rancher.com/rancher/hardened-traefik:v3.6.10-build20260309
     - name: registry.rancher.com/rancher/klipper-helm:v0.9.14-build20260309
     - name: registry.rancher.com/rancher/mirrored-cilium-cilium:v1.19.1
     - name: registry.rancher.com/rancher/mirrored-cilium-operator-generic:v1.19.1
