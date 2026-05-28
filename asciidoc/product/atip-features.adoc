@@ -1,6 +1,6 @@
 [#atip-features]
-== Telco features configuration
-:revdate: 2025-08-25
+= Telco features configuration
+:revdate: 2026-05-27
 :page-revdate: {revdate}
 :experimental:
 
@@ -20,8 +20,9 @@ The directed network provisioning deployment method is used, as described in the
 The following topics are covered in this section:
 
 * <<kernel-image-for-real-time,Kernel image for real time>>: Kernel image to be used by the real-time kernel.
-* <<kernel-args,Kernel arguments for low latency and high performance>>: Kernel arguments to be used by the real-time kernel for maximum performance and low latency running telco workloads.
-* <<cpu-tuned-configuration,CPU tuned configuration>>: Tuned configuration to be used by the real-time kernel.
+* <<kernel-args,Kernel arguments for low latency and high performance>>: Kernel arguments to be used for maximum performance and low latency running telco workloads.
+* <<cpu-pinning-host,CPU Pinning on Host>>: Isolating the CPUs via kernel arguments and TuneD profile.
+* <<cpu-pinning-k8s,CPU Pinning on Kubernetes>>: Isolating the CPUs on Kubernetes via Kubelet configuration.
 * <<cni-configuration,CNI configuration>>: CNI configuration to be used by the Kubernetes cluster.
 * <<sriov,SR-IOV configuration>>: SR-IOV configuration to be used by the Kubernetes workloads.
 * <<dpdk,DPDK configuration>>: DPDK configuration to be used by the system.
@@ -34,7 +35,7 @@ The following topics are covered in this section:
 * <<ptp-configuration,Precision Time Protocol configuration>>: Configuration files for running PTP telco profiles.
 
 [#kernel-image-for-real-time]
-=== Kernel image for real time
+== Kernel image for real time
 
 The real-time kernel image is not necessarily better than a standard kernel.
 It is a different kernel tuned to a specific use case. The real-time kernel is tuned for lower latency at the cost of throughput. The real-time kernel is not recommended for general purpose use, but in our case, this is the recommended kernel for Telco Workloads where latency is a key factor.
@@ -68,13 +69,15 @@ For more information about the real-time kernel, visit https://www.suse.com/prod
 [#kernel-args]
 === Kernel arguments for low latency and high performance
 
-The kernel arguments are important to be configured to enable the real-time kernel to work properly giving the best performance and low latency to run telco workloads.  There are some important concepts to keep in mind when configuring the kernel arguments for this use case:
+Configuring the appropriate kernel arguments is essential for optimizing performance, achieving low latency, and ensuring successful cluster deployment for telco workloads. While some parameters are designed specifically to enable the real-time kernel to function optimally, this section applies to both RT and default kernel configurations. Additionally, certain arguments are mandatory for Directed Network Provisioning method to successfully deploy downstream cluster nodes.
 
 * Remove `kthread_cpus` when using SUSE real-time kernel. This parameter controls on which CPUs kernel threads are created. It also controls which CPUs are allowed for PID 1 and for loading kernel modules (the kmod user-space helper). This parameter is not
 recognized and does not have any effect.
 
 * Add `domain,nohz,managed_irq` flags to `isolcpus` kernel argument. Without any flags, `isolcpus` is equivalent to specifying only the `domain` flag. This isolates the specified CPUs from scheduling, including kernel tasks. The `nohz` flag stops the scheduler tick on the specified CPUs (if only one task is runnable on a CPU), and the `managed_irq` flag avoids routing
 managed external (device) interrupts at the specified CPUs.
+
+* Enable https://documentation.suse.com/smart/network/html/network-interface-predictable-naming/index.html[Predictable Network Interface Naming] via `net.ifnames=1`. From SUSE Linux Micro 6.2 onwards, this is enabled by default and explicit configuration is not required. For versions prior to 6.2, this must be explicitly set as a kernel argument. This aligns with the `predictableNicNames` configuration in the Management Cluster's Metal^3^ Helm chart, which is required for Directed Network Provisioning to function correctly. Consistent interface naming is also critical when SR-IOV is utilized.
 
 * Remove `intel_pstate=passive`. This option configures `intel_pstate` to work with generic cpufreq governors, but to make this work, it disables hardware-managed P-states (`HWP`) as a side effect. To reduce the hardware latency, this option is not recommended for real-time workloads.
 
@@ -93,9 +96,16 @@ This is an example of the kernel argument list including the aforementioned adju
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
+$ cat /proc/cmdline
+BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll
 ----
 
+Here is another configuration example for a 64-core AMD server. Among the 128 logical processors (`0-127`), first 8 cores (`0-7`) are designated for housekeeping, while the remaining 120 cores (`8-127`) are pinned for the applications:
+[,shell]
+----
+$ cat /proc/cmdline
+BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=575291cf-74e8-42cf-8f2c-408a20dc00b8 skew_tick=1 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 amd_iommu=on iommu=pt irqaffinity=0-7 isolcpus=domain,nohz,managed_irq,8-127 nohz_full=8-127 rcu_nocbs=8-127 mce=off nohz=on nowatchdog nmi_watchdog=0 nosoftlockup quiet rcu_nocb_poll rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll
+----
 
 [#cpu-tuned-configuration]
 === CPU tuned configuration
@@ -167,7 +177,7 @@ Edit the `/etc/default/grub` file and add the parameters mentioned above:
 
 [,shell]
 ----
-GRUB_CMDLINE_LINUX="skew_tick=1 BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepages=0 hugepages=40 hugepagesz=1G hugepagesz=2M ignition.platform.id=openstack intel_iommu=on iommu=pt irqaffinity=0,19,20,39 isolcpus=domain,nohz,managed_irq,1-18,21-38 mce=off nohz=on net.ifnames=0 nmi_watchdog=0 nohz_full=1-18,21-38 nosoftlockup nowatchdog quiet rcu_nocb_poll rcu_nocbs=1-18,21-38 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1"
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
 ----
 
 Update the GRUB configuration:
@@ -1081,6 +1091,1144 @@ spec:
           cpu: "2"
 ----
 
+<<<<<<< HEAD
+=======
+
+[#cni-configuration]
+== CNI Configuration
+
+=== Cilium
+`Cilium` is the default CNI plug-in for SUSE Telco Cloud.
+To enable Cilium on RKE2 cluster as the default plug-in, the following configuration is required in the `/etc/rancher/rke2/config.yaml` file:
+
+[,yaml]
+----
+cni:
+- cilium
+----
+
+This can also be specified with command-line arguments, that is, `--cni=cilium` into the server line in `/etc/systemd/system/rke2-server` file.
+
+To use the `SR-IOV` network described in <<option2-sriov-helm>> along with Cilium, deploy `multus` meta plugin. Make sure `multus` is listed before other CNIs.
+
+[,yaml]
+----
+cni:
+- multus
+- cilium
+----
+
+=== Calico
+`Calico` is another CNI plug-in for {product} for Telco.
+To enable Calico on RKE2 cluster as the default plug-in, the following
+configuration is required in the `/etc/rancher/rke2/config.yaml` file:
+
+[,yaml]
+----
+cni:
+- calico
+----
+
+This can also be specified with command-line arguments, that is, `--cni=calico` into the server line in `/etc/systemd/system/rke2-server` file.
+
+To use the `SR-IOV` network described in <<option2-sriov-helm>> along with Calico, deploy `multus` meta plugin. Make sure `multus` is listed before other CNIs.
+
+[,yaml]
+----
+cni:
+- multus
+- calico
+----
+
+[NOTE]
+====
+For more information about CNI plug-ins, see https://docs.rke2.io/install/network_options[Network Options].
+====
+
+=== Bond CNI
+In general terms, bonding provides a method for aggregating multiple network
+interfaces into a single logical "bonded" interface. This is typically used to
+increase service availability by introducing redundant networking paths, but can
+also be used to increase bandwidth with certain bond modes.  
+The following CNI plug-ins are supported for the Bond CNI plugin in combination with multus:
+
+* MACVLAN
+* Host Device
+* SR-IOV
+
+==== Bond CNI with MACVLAN
+To use the Bond CNI plugin with MACVLAN two free interfaces are needed in the
+container. The following example uses 'enp8s0' and 'enp9s0'. Start by creating network
+attachment definitions for them: 
+
+*NetworkAttachmentDefinition enp8s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp8s0-conf
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "macvlan",
+          "capabilities": { "ips": true },
+          "master": "enp8s0",
+          "mode": "bridge",
+          "ipam": {}
+        }, {
+          "capabilities": { "mac": true },
+          "type": "tuning"
+        }
+      ]
+    }'
+----
+
+*NetworkAttachmentDefinition enp9s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp9s0-conf
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "macvlan",
+          "capabilities": { "ips": true },
+          "master": "enp9s0",
+          "mode": "bridge",
+          "ipam": {}
+        }, {
+          "capabilities": { "mac": true },
+          "type": "tuning"
+        }
+      ]
+    }'
+----
+
+After this, add a network attachment definition for the bond itself.
+
+*NetworkAttachmentDefinition bond*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: bond-net1
+spec:
+  config: '{
+  "type": "bond",
+  "cniVersion": "0.3.1",
+  "name": "bond-net1",
+  "mode": "active-backup",
+  "failOverMac": 1,
+  "linksInContainer": true,
+  "miimon": "100",
+  "mtu": 1500,
+  "links": [
+     {"name": "net1"},
+     {"name": "net2"}
+  ],
+  "ipam": {
+    "type": "static",
+    "addresses": [
+      {
+        "address": "192.168.200.100/24",
+        "gateway": "192.168.200.1"
+      }
+    ],
+    "subnet": "192.168.200.0/24",
+    "routes": [{
+      "dst": "0.0.0.0/0"
+    }]
+  }
+}'
+----
+
+The IP address assignment here is static and defines the address of the bond as
+'192.168.200.100' on a /24 network, with a gateway residing on the network's first
+available address. In the bond's network attachment we also define the type of
+bond we want. In this case it is active-backup.  
+
+To use this bond, the pod needs to know about all interfaces. An example pod
+definition might look like this:  
+
+[,shell,subs="attributes"]
+----
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod
+  annotations:
+        k8s.v1.cni.cncf.io/networks: '[
+{"name": "enp8s0-conf",
+"interface": "net1"
+},
+{"name": "enp9s0-conf",
+"interface": "net2"
+},
+{"name": "bond-net1",
+"interface": "bond0"
+}]'
+spec:
+  restartPolicy: Never
+  containers:
+  - name: bond-test
+    image: alpine:latest
+    command:
+      - /bin/sh
+      - "-c"
+      - "sleep 60m"
+    imagePullPolicy: IfNotPresent
+----
+
+Note how the annotation refers to all networks and how it defines the mapping
+between the interfaces 'enp8s0 -> net1', and 'enp9s0->net2'. 
+
+==== Bond CNI with Host Device
+To use the Bond CNI plugin with host device, two free interfaces are needed on
+the host. These interfaces are then mapped through to the container. The
+following example uses 'enp8s0' and 'enp9s0'. Start by creating network
+attachment definitions for them: 
+
+*NetworkAttachmentDefinition enp8s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp8s0-hostdev
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "host-device",
+          "name": "host0",
+          "device": "enp8s0",
+          "ipam": {}
+        }]
+    }'
+----
+
+*NetworkAttachmentDefinition enp9s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp9s0-hostdev
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "host-device",
+          "name": "host0",
+          "device": "enp9s0",
+          "ipam": {}
+        }]
+    }'
+----
+
+After this, add network attachment definition for the bond itself. This is
+similar to the MACVLAN use case.  
+
+*NetworkAttachmentDefinition bond*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: bond-net1
+spec:
+  config: '{
+  "type": "bond",
+  "cniVersion": "0.3.1",
+  "name": "bond-net1",
+  "mode": "active-backup",
+  "failOverMac": 1,
+  "linksInContainer": true,
+  "miimon": "100",
+  "mtu": 1500,
+  "links": [
+     {"name": "net1"},
+     {"name": "net2"}
+  ],
+  "ipam": {
+    "type": "static",
+    "addresses": [
+      {
+        "address": "192.168.200.100/24",
+        "gateway": "192.168.200.1"
+      }
+    ],
+    "subnet": "192.168.200.0/24",
+    "routes": [{
+      "dst": "0.0.0.0/0"
+    }]
+  }
+}'
+----
+
+The IP address assignment here is static and defines the address of the bond as
+'192.168.200.100' on a /24 network, with a gateway residing on the network's
+first available address. In the bond's network attachment, define the type of
+bond. In this case it is active-backup.  
+
+To use this bond, the pod needs to know about all interfaces. An example pod
+definition for bond with host devices might look like this:  
+
+[,shell,subs="attributes"]
+----
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod
+  annotations:
+        k8s.v1.cni.cncf.io/networks: '[
+{"name": "enp8s0-hostdev",
+"interface": "net1"
+},
+{"name": "enp9s0-hostdev",
+"interface": "net2"
+},
+{"name": "bond-net1",
+"interface": "bond0"
+}]'
+spec:
+  restartPolicy: Never
+  containers:
+  - name: bond-test
+    image: alpine:latest
+    command:
+      - /bin/sh
+      - "-c"
+      - "sleep 60m"
+    imagePullPolicy: IfNotPresent
+----
+
+==== Bond CNI with SR-IOV
+Using the Bond CNI with SR-IOV is fairly straight forward. For more details on how to set up SR-IOV, see <<sriov>>. As described there, you have to create `SriovNetworkNodePolicies` that defines `resourceNames`, as well as number of virtual functions and such. The `resourceNames` are being used by the `SriovNetwork` which is used as interfaces in the pod definition. The bond definition is exactly the same as for the MACVLAN and host device cases.
+
+[NOTE]
+====
+Bond CNI with SR-IOV is only applicable to SRIOV Virtual Functions (VF) using the kernel driver. Userspace driver VFs - such as those used in DPDK workloads - can not be bonded with the Bond CNI.
+====
+
+[#sriov]
+== SR-IOV
+
+SR-IOV (Single Root I/O Virtualization) allows a single physical device, such as a network adapter, to separate its resources across multiple `PCIe` hardware functions. This enables direct resource access for various applications.
+
+We provide two distinct methods for deploying `SR-IOV` in your cluster:
+
+* <<option1-sriov-deviceplugin>>: This method supports both network devices and vRAN accelerator.
+* <<option2-sriov-helm>>: This automated method provides simpler deployment. This method is only for network devices.
+
+In rare cases where you need both solutions - using the Network Operator for network devices and the Device Plugin for vRAN Accelerators - you must deploy them into separate Kubernetes namespaces. This separation is essential to prevent conflicts between two deployments.
+
+[#option1-sriov-deviceplugin]
+=== Option 1: SR-IOV Network Device Plugin Daemonset and configMap
+
+https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin[SR-IOV Network Device Plugin] discovers and advertises network resources, such as PCI physical functions (PFs), and their virtual functions (VFs), on a Kubernetes host.
+
+* Prepare the config map for the device plugin
+
+We need to create a config map that defines SR-IOV resource pools. Run `lspci` command to retrieve the information:
+
+[,shell]
+----
+$ lspci | grep -i acc
+8a:00.0 Processing accelerators: Intel Corporation Device 0d5c
+
+$ lspci | grep -i net
+19:00.0 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
+19:00.1 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
+19:00.2 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
+19:00.3 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
+51:00.0 Ethernet controller: Intel Corporation Ethernet Controller E810-C for QSFP (rev 02)
+51:00.1 Ethernet controller: Intel Corporation Ethernet Controller E810-C for QSFP (rev 02)
+51:01.0 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:01.1 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:01.2 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:01.3 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:11.0 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:11.1 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:11.2 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:11.3 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+----
+
+The SR-IOV Device Plugin uses a configMap containing a JSON file to define which hardware resources Kubernetes should expose. This configuration is based on two core concepts: `selectors` (for hardware discovery) and `resources` (for Kubernetes exposure).
+
+A `resource` is the named entity that pods consume (e.g. `rancher.io/intel_fec_5g`). Resources can be defined as one of two types:
+
+* `accelerator`: Used for vRAN accelerator cards (like ACC100/vRAN Boost).
+* `netdevice`: Used for standard network interfaces (NICs).
+
+You define the target devices using `selectors` to filter the hardware on the node:
+
+* `vendors`: `8086` (Intel)
+* `devices`: `0d5d` (FEC card), `1889` (NIC)
+* `drivers`: `vfio-pci`
+* `pfNames`: `p2p1` (physical interface name)
+
+For network cards, you can also select a subset of Virtual Functions (VFs) from a Physical Function:
+
+* `pfNames`: `["eth1#1,2,3,4,5,6"]` or `[eth1#1-6]`
+
+To allow pods to request the devices, each resource must have a name, which is composed of a prefix and a name:
+
+* `resourceName`: `pci_sriov_net_bh_dpdk`
+* `resourcePrefix`: `rancher.io`
+
+Pods would then request the combined resource name: `rancher.io/pci_sriov_net_bh_dpdk` .
+
+[NOTE]
+====
+This document does not list all possible selectors. Different resource types use different sets of selectors. For comprehensive details, refer to the https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin[SR-IOV Network Device Plugin repository].
+====
+
+The ConfigMap below is an example that creates three resources: one for the vRAN Accelerator card (FEC) and two for two different NIC ports.
+
+For FEC card, you must first retrieve the device ID and VFIO token. Follow the instructions in <<acceleration>> chapter for prerequisites.
+
+[,yaml]
+----
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sriovdp-config
+  namespace: kube-system
+data:
+  config.json: |
+    {
+        "resourceList": [
+            {
+            	"resourcePrefix": "rancher.io",
+                "resourceName": "intel_fec_5g",
+                "deviceType": "accelerator",
+                "selectors": {
+                    "vendors": ["8086"],
+                    "devices": ["0d5d"]
+                },
+        		"additionalInfo": {
+          			"*": {
+            			"VFIO_TOKEN": "00112233-4455-6677-8899-aabbccddeeff"
+          			}
+          		}
+            },
+            {
+            	"resourcePrefix": "rancher.io",
+                "resourceName": "intel_sriov_odu",
+                "deviceType": "netdevice",
+                "selectors": {
+                    "vendors": ["8086"],
+                    "devices": ["1889"],
+                    "drivers": ["vfio-pci"],
+                    "pfNames": ["p2p1"]
+                }
+            },
+            {
+            	"resourcePrefix": "rancher.io",
+                "resourceName": "intel_sriov_oru",
+                "deviceType": "netdevice",
+                "selectors": {
+                    "vendors": ["8086"],
+                    "devices": ["1889"],
+                    "drivers": ["vfio-pci"],
+                    "pfNames": ["p2p2"]
+                }
+            }
+        ]
+    }
+----
+
+* Prepare the `daemonset` file to deploy the device plugin.
+
+The device plugin supports several architectures (`arm`, `amd`, `ppc64le`), so the same file can be used for different architectures by deploying several `daemonset` for each architecture.
+
+[,yaml]
+----
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sriov-device-plugin
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-sriov-device-plugin-amd64
+  namespace: kube-system
+  labels:
+    tier: node
+    app: sriovdp
+spec:
+  selector:
+    matchLabels:
+      name: sriov-device-plugin
+  template:
+    metadata:
+      labels:
+        name: sriov-device-plugin
+        tier: node
+        app: sriovdp
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      serviceAccountName: sriov-device-plugin
+      containers:
+      - name: kube-sriovdp
+        image: registry.suse.com/rancher/hardened-sriov-network-device-plugin:v3.9.0-build20250425
+        imagePullPolicy: IfNotPresent
+        args:
+        - --log-dir=sriovdp
+        - --log-level=10
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "40Mi"
+          limits:
+            cpu: 1
+            memory: "200Mi"
+        volumeMounts:
+        - name: devicesock
+          mountPath: /var/lib/kubelet/
+          readOnly: false
+        - name: log
+          mountPath: /var/log
+        - name: config-volume
+          mountPath: /etc/pcidp
+        - name: device-info
+          mountPath: /var/run/k8s.cni.cncf.io/devinfo/dp
+      volumes:
+        - name: devicesock
+          hostPath:
+            path: /var/lib/kubelet/
+        - name: log
+          hostPath:
+            path: /var/log
+        - name: device-info
+          hostPath:
+            path: /var/run/k8s.cni.cncf.io/devinfo/dp
+            type: DirectoryOrCreate
+        - name: config-volume
+          configMap:
+            name: sriovdp-config
+            items:
+            - key: config.json
+              path: config.json
+----
+
+* After applying the configMap and the `daemonset`, the device plugin will be deployed and the interfaces will be discovered and available for the pods.
++
+[,shell]
+----
+$ kubectl get pods -n kube-system | grep sriov
+kube-system  kube-sriov-device-plugin-amd64-twjfl  1/1  Running  0  2m
+----
++
+* Verify all nodes if interfaces were discovered and became available for the pods:
++
+----
+$ kubectl get nodes -o json | jq '.items[] | {name: .metadata.name, allocatable: .status.allocatable}'
+{
+  "name": "node1.suse.edge.com",
+  "allocatable": {
+	  "cpu": "64",
+	  "ephemeral-storage": "256196109726",
+	  "hugepages-1Gi": "40Gi",
+	  "hugepages-2Mi": "0",
+	  "rancher.io/intel_fec_5g": "16",
+	  "rancher.io/intel_sriov_odu": "4",
+	  "rancher.io/intel_sriov_oru": "4",
+	  "memory": "221396384Ki",
+	  "pods": "110"
+  }
+}
+----
++
+* The resourceName for `FEC` accelerator is `rancher.io/intel_fec_5g` and 16 VFs are available for use.
+* The resourceName for NIC cards are `rancher.io/intel_sriov_odu` and `rancher.io/intel_sriov_oru`. Each resource provides 4 VFs.
+
+[IMPORTANT]
+====
+If no interfaces are detected as allocatable resources in the kubernetes nodes, it is essential to resolve this issue. One common cause is ill-formed configMap spec, so better review the configMap and its selectors.
+====
+
+[#option2-sriov-helm]
+=== Option 2 (Recommended): SR-IOV Network Operator 
+
+* Get Helm if not present:
+
+[,shell,subs="attributes"]
+----
+$ curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+----
+
+* Install SR-IOV Network Operator on `sriov-network-operator` namespace:
+
+[,shell,subs="attributes"]
+----
+helm install sriov-crd oci://registry.suse.com/edge/charts/sriov-crd -n sriov-network-operator
+helm install sriov-network-operator oci://registry.suse.com/edge/charts/sriov-network-operator -n sriov-network-operator
+----
+
+* Check the deployed CRDs and pods:
+
+[,shell]
+----
+$ kubectl get crd
+$ kubectl -n sriov-network-operator get pods
+----
+
+* Check if SR-IOV label is applied to the nodes.
+
+With all resources running, the label appears automatically in your node:
+
+[,shell]
+----
+$ kubectl get nodes -oyaml | grep feature.node.kubernetes.io/network-sriov.capable
+
+feature.node.kubernetes.io/network-sriov.capable: "true"
+----
+
+* Review the `daemonset` to see the new `sriov-network-config-daemon` and `sriov-rancher-nfd-worker` as active and ready:
+
+[,shell]
+----
+$ kubectl get daemonset -n sriov-network-operator
+NAMESPACE             NAME                            DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR                                           AGE
+sriov-network-operator   sriov-network-config-daemon     1         1         1       1            1           feature.node.kubernetes.io/network-sriov.capable=true   45m
+sriov-network-operator   sriov-rancher-nfd-worker        1         1         1       1            1           <none>                                                  45m
+----
+
+In a few minutes, the nodes will be detected and fully configured with `SR-IOV` capabilities. The update can sometimes take up to 10 minutes:
+
+[,shell]
+----
+$ kubectl get sriovnetworknodestates -A
+NAMESPACE             NAME     AGE
+sriov-network-operator   xr11-2   83s
+----
+
+* Check if the interfaces were detected.
+
+The interfaces discovered should be the PCI address of the network device. Check this information with the `lspci` command in the host.
+
+[,shell]
+----
+$ kubectl get sriovnetworknodestates -n sriov-network-operator -oyaml
+apiVersion: v1
+items:
+- apiVersion: sriovnetwork.openshift.io/v1
+  kind: SriovNetworkNodeState
+  metadata:
+    creationTimestamp: "2023-06-07T09:52:37Z"
+    generation: 1
+    name: xr11-2
+    namespace: sriov-network-operator
+    ownerReferences:
+    - apiVersion: sriovnetwork.openshift.io/v1
+      blockOwnerDeletion: true
+      controller: true
+      kind: SriovNetworkNodePolicy
+      name: default
+      uid: 80b72499-e26b-4072-a75c-f9a6218ec357
+    resourceVersion: "356603"
+    uid: e1f1654b-92b3-44d9-9f87-2571792cc1ad
+  spec:
+    dpConfigVersion: "356507"
+  status:
+    interfaces:
+    - deviceID: "1592"
+      driver: ice
+      eSwitchMode: legacy
+      linkType: ETH
+      mac: 40:a6:b7:9b:35:f0
+      mtu: 1500
+      name: p2p1
+      pciAddress: "0000:51:00.0"
+      totalvfs: 128
+      vendor: "8086"
+    - deviceID: "1592"
+      driver: ice
+      eSwitchMode: legacy
+      linkType: ETH
+      mac: 40:a6:b7:9b:35:f1
+      mtu: 1500
+      name: p2p2
+      pciAddress: "0000:51:00.1"
+      totalvfs: 128
+      vendor: "8086"
+    syncStatus: Succeeded
+kind: List
+metadata:
+  resourceVersion: ""
+----
+
+[NOTE]
+====
+If your interface is not detected here, ensure that it is present in the next config map:
+
+[,shell]
+----
+$ kubectl get cm supported-nic-ids -oyaml -n sriov-network-operator
+----
+
+If your device is not listed, edit the config map by adding the right values to be discovered. Then restart the `sriov-network-config-daemon` pods on each node for update to take effect.
+====
+
+* Create the `SriovNetworkNodePolicy` to configure the `VFs`
+
+This policy creates the resource `intelnicsDpdk` for pod consumption. It also binds `vfio-pci` driver to the provided PCI device and creates 8 VFs with an MTU size of 1500:
+
+[NOTE]
+====
+The `resourceName` field must not contain any special characters and must be unique across the cluster.
+The example uses the `deviceType: vfio-pci` because DPDK is used in combination with SR-IOV. If you don't use DPDK, configure `deviceType: netdevice` (default value).
+====
+
+[,yaml]
+----
+apiVersion: sriovnetwork.openshift.io/v1
+kind: SriovNetworkNodePolicy
+metadata:
+  name: policy-dpdk
+  namespace: sriov-network-operator
+spec:
+  nodeSelector:
+    feature.node.kubernetes.io/network-sriov.capable: "true"
+  resourceName: intelnicsDpdk
+  deviceType: vfio-pci
+  numVfs: 8
+  mtu: 1500
+  nicSelector:
+    deviceID: "1592"
+    vendor: "8086"
+    rootDevices:
+    - 0000:51:00.0
+----
+
+* Validate configurations on all nodes:
+
+With the predefined resourcePrefix `rancher.io`, a resource `rancher.io/intelnicsDpdk` with 8 VFs should be discovered.
+
+[,shell]
+----
+$ kubectl get nodes -o jsonpath='{"items": [ { "name": @.metadata.name, "allocatable": @.status.allocatable } ]}' | jq
+{
+  "name": "node1.suse.edge.com",
+  "allocatable": {
+	  "cpu": "64",
+	  "ephemeral-storage": "256196109726",
+	  "hugepages-1Gi": "60Gi",
+	  "hugepages-2Mi": "0",
+	  "rancher.io/intel_fec_5g": "16",
+	  "memory": "200424836Ki",
+	  "pods": "110",
+	  "rancher.io/intelnicsDpdk": "8"
+  }
+}
+----
+
+* (Optional) Create the `sriovnetwork`
+
+This step is optional and only required for custom network definitions. Specify the `resourceName` to bind to the previously created node policy.
+
+If the `networkNamespace` is set, the network is exposed to pods in that namespace. Otherwise, the network becomes available in the Network Operator's installation namespace.
+
+[,yaml]
+----
+apiVersion: sriovnetwork.openshift.io/v1
+kind: SriovNetwork
+metadata:
+  name: network-dpdk
+  namespace: sriov-network-operator		# where SRIOV Operator is installed
+spec:
+  ipam: |
+    {
+      "type": "host-local",
+      "subnet": "192.168.0.0/24",
+      "rangeStart": "192.168.0.20",
+      "rangeEnd": "192.168.0.60",
+      "routes": [{
+        "dst": "0.0.0.0/0"
+      }],
+      "gateway": "192.168.0.1"
+    }
+  vlan: 500
+  resourceName: intelnicsDpdk
+  networkNamespace: default 		# where workloads are deployed
+----
+
+* If the update is successful, a NetworkAttachmentDefinition (NAD) is created in target cluster.
+
+[,shell]
+----
+$ kubectl get net-attach-def -A -oyaml
+
+apiVersion: v1
+items:
+- apiVersion: k8s.cni.cncf.io/v1
+  kind: NetworkAttachmentDefinition
+  metadata:
+    annotations:
+      k8s.v1.cni.cncf.io/resourceName: rancher.io/intelnicsDpdk
+    creationTimestamp: "2023-06-08T11:22:27Z"
+    generation: 1
+    name: network-dpdk
+    namespace: default
+    resourceVersion: "13124"
+    uid: df7c89f5-177c-4f30-ae72-7aef3294fb15
+  spec:
+    config: '{ "cniVersion":"0.4.0", "name":"network-dpdk","type":"sriov","vlan":500,"vlanQoS":0,"ipam":{"type":"host-local","subnet":"192.168.0.0/24","rangeStart":"192.168.0.10","rangeEnd":"192.168.0.60","routes":[{"dst":"0.0.0.0/0"}],"gateway":"192.168.0.1"}
+      }'
+kind: List
+metadata:
+  resourceVersion: ""
+----
+
+The workload pods could use the resourceName `rancher.io/intelnicsDpdk` to use the VFs of the network interface.
+
+
+[#dpdk]
+== DPDK
+
+`DPDK` (Data Plane Development Kit) is a set of libraries and drivers for fast packet processing. It is used to accelerate packet processing workloads running on a wide variety of CPU architectures.
+The DPDK includes data plane libraries and optimized network interface controller (`NIC`) drivers for the following:
+
+1. A queue manager implements lockless queues.
+2. A buffer manager pre-allocates fixed size buffers.
+3. A memory manager allocates pools of objects in memory and uses a ring to store free objects; ensures that objects are spread equally on all `DRAM` channels.
+4. Poll mode drivers (`PMD`) are designed to work without asynchronous notifications, reducing overhead.
+5. A packet framework as a set of libraries that are helpers to develop packet processing.
+
+The following steps will show how to enable `DPDK` and how to create `VFs` from the `NICs` to be used by the `DPDK` interfaces:
+
+* Install the `DPDK` package:
+
+[,shell]
+----
+$ transactional-update pkg install dpdk dpdk-tools libdpdk-25
+$ reboot
+----
+
+
+* Kernel parameters:
+
+To use DPDK, employ some drivers to enable certain parameters in the kernel:
+
+|===
+| parameter | value | description
+
+| iommu
+| pt
+| This option enables the use  of the `vfio` driver for the DPDK interfaces.
+
+| intel_iommu or amd_iommu
+| on
+| This option enables the use of `vfio` for `VFs`.
+|===
+
+To enable the parameters, add them to the `/etc/default/grub` file:
+
+[,shell]
+----
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
+----
+
+Update the GRUB configuration and reboot the system to apply the changes:
+
+[,shell]
+----
+$ transactional-update grub.cfg
+$ reboot
+----
+
+* Load `vfio-pci` kernel module and enable `SR-IOV` on the NICs. First argument indicates `vfio-pci` driver to support SR-IOV, and second argument prevents the PCI device from entering a low-power state when it's idle:
+
+[,shell]
+----
+$ modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
+----
+
+* Create some virtual functions (`VFs`) from the `NICs`.
+
+To create for `VFs`, for example, for two different `NICs`, the following commands are required:
+
+[,shell]
+----
+$ echo 4 > /sys/bus/pci/devices/0000:51:00.0/sriov_numvfs
+$ echo 4 > /sys/bus/pci/devices/0000:51:00.1/sriov_numvfs
+----
+
+* Bind the new VFs with the `vfio-pci` driver:
+
+[,shell]
+----
+$ dpdk-devbind.py -b vfio-pci 0000:51:01.0 0000:51:01.1 0000:51:01.2 0000:51:01.3 \
+                              0000:51:11.0 0000:51:11.1 0000:51:11.2 0000:51:11.3
+----
+
+* Review the configuration is correctly applied:
+
+[,shell]
+----
+$ dpdk-devbind.py -s
+
+Network devices using DPDK-compatible driver
+============================================
+0000:51:01.0 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:01.1 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:01.2 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:01.3 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:01.0 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:11.1 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:21.2 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:31.3 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+
+Network devices using kernel driver
+===================================
+0000:19:00.0 'BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet 1751' if=em1 drv=bnxt_en unused=igb_uio,vfio-pci *Active*
+0000:19:00.1 'BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet 1751' if=em2 drv=bnxt_en unused=igb_uio,vfio-pci
+0000:19:00.2 'BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet 1751' if=em3 drv=bnxt_en unused=igb_uio,vfio-pci
+0000:19:00.3 'BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet 1751' if=em4 drv=bnxt_en unused=igb_uio,vfio-pci
+0000:51:00.0 'Ethernet Controller E810-C for QSFP 1592' if=eth13 drv=ice unused=igb_uio,vfio-pci
+0000:51:00.1 'Ethernet Controller E810-C for QSFP 1592' if=rename8 drv=ice unused=igb_uio,vfio-pci
+----
+
+
+[#acceleration]
+== vRAN Acceleration (`Intel ACC100/ACC200`)
+
+As communications service providers move from 4G to 5G networks, many are adopting virtualized radio access network (vRAN) architectures for higher channel capacity and easier deployment of edge-based services and applications. vRAN solutions are ideally located to deliver low-latency services with the flexibility to increase or decrease capacity based on the volume of real-time traffic and demand on the network.
+
+One of the most compute-intensive 4G and 5G workloads is RAN layer 1 (`L1`) `FEC`, which resolves data transmission errors over unreliable or noisy communication channels. `FEC` technology detects and corrects a limited number of errors in 4G or 5G data, eliminating the need for retransmission. Since the `FEC` acceleration transaction does not contain cell state information, it can be easily virtualized, enabling pooling benefits and easy cell migration.
+
+Historically, Intel provided the ACC100 vRAN Accelerator card to rapidly execute Layer 1 FEC algorithms, freeing up host processing power for the main CPU. Intel has since integrated this technology directly into newer CPUs, starting with Sapphire Rapids, under the name `Intel vRAN Boost` (also known as ACC200). Intel vRAN Boost act as an offload accelerator on the CPU itself, eliminating the need for a separate hardware card. This section details configuration of SUSE Telco Cloud for workloads to leverage ACC100 or Intel vRAN Boost.
+
+
+=== Kernel parameters
+
+To enable the `vRAN` acceleration, we need to enable the following kernel parameters (if not present yet):
+
+|===
+| parameter | value | description
+
+| iommu
+| pt
+| This option enables the use of vfio for the DPDK interfaces.
+
+| intel_iommu or amd_iommu
+| on
+| This option enables the use of vfio for VFs.
+|===
+
+Modify the GRUB file `/etc/default/grub` to add them to the kernel command line:
+
+[,shell]
+----
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
+----
+
+Update the GRUB configuration and reboot the system to apply the changes:
+
+[,shell]
+----
+$ transactional-update grub.cfg
+$ reboot
+----
+
+To verify that the parameters are applied after the reboot, check the command line:
+
+[,shell]
+----
+$ cat /proc/cmdline
+----
+
+=== Configure SR-IOV on FEC Accelerators
+
+* Load `vfio-pci` kernel module to enable vRAN acceleration. First argument indicates `vfio-pci` module to support SR-IOV, and second argument prevents the PCI device from entering a low-power state when it's idle.
+
+[,shell]
+----
+$ modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
+----
+
+* Retrieve the PCI device address of FEC accelerator:
+
+[,shell]
+----
+$ lspci | grep -i acc
+8a:00.0 Processing accelerators: Intel Corporation Device 0d5c
+----
+
+* Bind the physical interface (`PF`) with `vfio-pci` driver:
+
+[,shell]
+----
+$ dpdk-devbind.py -b vfio-pci 0000:8a:00.0
+----
+
+* Create the virtual functions (`VFs`) from the physical interface (`PF`).
+
+Check the maximum `VF` capacity of the accelerator card. Next, configure the card to expose the desired number of VFs, not exceeding the maximum number. In this example, we configure the card for its full capacity of 16 VFs:
+
+[,shell]
+----
+$ cat /sys/bus/pci/devices/0000:8a:00.0/sriov_totalvfs
+16
+$ echo 16 > /sys/bus/pci/devices/0000:8a:00.0/sriov_numvfs
+----
+
+* Configure the accelerator card and its virtual functions with a 4G or 5G profile. A unique VF token (UUID) must be provided. The workload would consume this VF token to utilize the card's FEC acceleration capabilities:
+
+[,shell]
+----
+$ pf_bb_config ACC200 -c /opt/pf-bb-config/acc200_config_vf_5g.cfg -v 00112233-4455-6677-8899-aabbccddeeff
+Tue Jun  6 10:49:20 2023:INFO:Queue Groups: 2 5GUL, 2 5GDL, 2 4GUL, 2 4GDL
+Tue Jun  6 10:49:20 2023:INFO:Configuration in VF mode
+Tue Jun  6 10:49:21 2023:INFO: ROM version MM 99AD92
+Tue Jun  6 10:49:21 2023:WARN:* Note: Not on DDR PRQ version  1302020 != 10092020
+Tue Jun  6 10:49:21 2023:INFO:PF ACC200 configuration complete
+Tue Jun  6 10:49:21 2023:INFO:ACC200 PF [0000:8a:00.0] configuration complete!
+----
+
+* Verify the new VFs created from the FEC PF. Note that the VFs got `0d5d` device ID. This information is required in next step to expose these VFs as Kubernetes resource:
+
+[,shell]
+----
+$ dpdk-devbind.py -s
+Baseband devices using DPDK-compatible driver
+=============================================
+0000:8a:00.0 'Device 0d5c' drv=vfio-pci unused=
+0000:8b:00.0 'Device 0d5d' drv=vfio-pci unused=
+
+Other Baseband devices
+======================
+0000:8b:00.1 'Device 0d5d' unused=
+----
+
+=== Configure Kubernetes for FEC Acceleration
+The final step is exposing the VFs to Kubernetes with help of SR-IOV device plugin. Create a ConfigMap using the VFs' deviceID gathered from previous step, and install SR-IOV device plugin. Once Kubernetes nodes display the FEC VFs as `Allocatable` resources, the cluster is ready for the workloads to enjoy the FEC acceleration. 
+
+Follow the steps of Option 1 in <<sriov>> chapter. SRIOV Network Operator isn't applicable for FEC Accelerator, so Option 2 is not applicable.
+
+
+[#huge-pages]
+== Huge pages
+
+When a process uses `RAM`, the `CPU` marks it as used by that process. For efficiency, the `CPU` allocates `RAM` in chunks `4K` bytes is the default value on many platforms. Those chunks are named pages. Pages can be swapped to disk, etc.
+
+Since the process address space is virtual, the `CPU` and the operating system need to remember which pages belong to which process, and where each page is stored. The greater the number of pages, the longer the search for memory mapping. When a process uses `1 GB` of memory, that is 262144 entries to look up (`1 GB` / `4 K`). If a page table entry consumes 8 bytes, that is `2 MB` (262144 * 8) to look up.
+
+Most current `CPU` architectures support larger-than-default pages, which give the `CPU/OS` fewer entries to look up.
+
+* Kernel parameters
+
+To enable the huge pages, we should add the following kernel parameters. In this example, we configure 40 1G pages, though the huge page size and exact number should be tailored to your application's memory requirements:
+
+|===
+| parameter | value | description
+
+| hugepagesz
+| 1G
+| This option allows to set the size of huge pages to 1 G
+
+| hugepages
+| 40
+| This is the number of huge pages defined before
+
+| default_hugepagesz
+| 1G
+| This is the default value to get the huge pages
+|===
+
+Modify the GRUB file `/etc/default/grub` to add these parameters in `GRUB_CMDLINE_LINUX`:
+
+[,shell]
+----
+default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0
+----
+
+Update the GRUB configuration and reboot the system to apply the changes:
+
+[,shell]
+----
+$ transactional-update grub.cfg
+$ reboot
+----
+
+To validate that the parameters are applied after the reboot, you can check the command line:
+
+[,shell]
+----
+$ cat /proc/cmdline
+----
+
+* Using huge pages
+
+To use the huge pages, we need to mount them:
+
+[,shell]
+----
+$ mkdir -p /hugepages
+$ mount -t hugetlbfs nodev /hugepages
+----
+
+Deploy a Kubernetes workload, creating the resources and the volumes:
+
+[,yaml]
+----
+...
+ resources:
+   requests:
+     memory: "24Gi"
+     hugepages-1Gi: 16Gi
+     intel.com/intel_sriov_oru: '4'
+   limits:
+     memory: "24Gi"
+     hugepages-1Gi: 16Gi
+     intel.com/intel_sriov_oru: '4'
+...
+----
+
+[,yaml]
+----
+...
+volumeMounts:
+  - name: hugepage
+    mountPath: /hugepages
+...
+volumes:
+  - name: hugepage
+    emptyDir:
+      medium: HugePages
+...
+----
+
+
+>>>>>>> a1176f0 (Clarify net.ifnames default and directed network provisioning model)
 [#numa-aware-scheduling]
 === NUMA-aware scheduling
 
