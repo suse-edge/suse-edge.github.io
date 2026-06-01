@@ -78,28 +78,36 @@ When running Edge Image Builder, a directory is mounted from the host, so it is 
 
 * `downstream-cluster-config.yaml` is the image definition file, see <<quickstart-eib>> for more details.
 * The base image folder will contain the output raw image generated following the guide <<guides-kiwi-builder-images>> with the profile `Base` (or `Base-RT` for the Real-Time kernel) must be copied/moved under the `base-images` folder.
-* The `network` folder is optional, see <<add-network-eib>> for more details.
+* The `custom/files` directory contains the `performance-settings.sh` and `sriov-auto-filler.sh` files to be copied to the image during the image creation process.
 * The `custom/scripts` directory contains scripts to be run on first-boot:
     1. `01-fix-growfs.sh` script is required to resize the OS root partition on deployment
     2. `02-performance.sh` script is optional and can be used to configure the system for performance tuning.
     3. `03-sriov.sh` script is optional and can be used to configure the system for SR-IOV.
-* The `custom/files` directory contains the `performance-settings.sh` and `sriov-auto-filler.sh` files to be copied to the image during the image creation process.
+* The `network` folder is optional, see <<add-network-eib>> for more details.
+* The `os-files` folder contains the necessary configuration files to load, at each node boot, the `sctp` and `vfio-pci` kernel modules with the required options.
 
 [,console,subs="attributes"]
 ----
 ├── downstream-cluster-config.yaml
-├── base-images/
-│   └ {micro-base-image-raw}
-├── network/
-|   └ configure-network.sh
-└── custom/
-    └ scripts/
-    |   └ 01-fix-growfs.sh
-    |   └ 02-performance.sh
-    |   └ 03-sriov.sh
-    └ files/
-        └ performance-settings.sh
-        └ sriov-auto-filler.sh
+├── base-images
+│   └── {micro-base-image-raw}
+├── custom
+│   ├── files
+│   │   ├── performance-settings.sh
+│   │   └── sriov-auto-filler.sh
+│   └── scripts
+│       ├── 01-fix-growfs.sh
+│       ├── 02-performance.sh
+│       └── 03-sriov.sh
+├── network
+│   └── configure-network.sh
+├── os-files
+│   └── etc
+│       ├── modprobe.d
+│       │   └── vfio-pci-options.conf
+│       └── modules-load.d
+│           ├── sctp.conf
+│           └── vfio-pci.conf
 ----
 
 ==== Downstream cluster image definition file
@@ -270,7 +278,6 @@ Where `$SCC_REGISTRATION_CODE` is the registration code copied from https://scc.
 
 [#add-network-eib]
 ==== Additional script for Advanced Network Configuration
-
 If you need to configure static IPs or more advanced networking scenarios as described in <<advanced-network-configuration>>, the following additional configuration is required.
 
 In the `network` folder, create the following `configure-network.sh` file - this consumes configuration drive data on first-boot, and configures the
@@ -317,6 +324,41 @@ umount /mnt
 
 ./nmc generate --config-dir /tmp/nmc/desired --output-dir /tmp/nmc/generated
 ./nmc apply --config-dir /tmp/nmc/generated
+----
+
+[#add-kernel-modules-eib]
+==== Telco required kernel modules
+To ensure that the kernel modules required for telecom workloads are loaded on each node boot, the following configuration files must be added to the `os-files` EIB folder:
+
+===== sctp.conf
+To be placed in the `os-files/etc/modules-load.d/` path, instructing the https://www.freedesktop.org/software/systemd/man/latest/modules-load.d.html[systemd-modules-load.service] to load the `sctp` kernel module at node boot.
+
+[,shell]
+----
+$ cat os-files/etc/modules-load.d/sctp.conf 
+# Request "systemd-modules-load.service" to load sctp module at boot time
+sctp
+----
+
+===== vfio-pci.conf
+To be placed in the `os-files/etc/modules-load.d/` path, instructing the https://www.freedesktop.org/software/systemd/man/latest/modules-load.d.html[systemd-modules-load.service] to load the `vfio-pci` kernel module at node boot.
+
+[,shell]
+----
+$ cat os-files/etc/modules-load.d/vfio-pci.conf 
+# Request "systemd-modules-load.service" to load vfio-pci module at boot time
+# NOTE: The (SRIOV & DPDK related) required load-module options settings are defined in related "/etc/modprobe.d/vfio-pci-options.conf" file
+vfio_pci
+----
+
+===== vfio-pci-options.conf
+To be placed in the `os-files/etc/modprobe.d/` path, setting the required `vfio-pci` kernel module parameters to be applied when the kernel module is loaded.
+
+[,shell]
+----
+$ cat os-files/etc/modprobe.d/vfio-pci-options.conf 
+# Enable SR-IOV and disable idle D3 state for vfio-pci driver
+options vfio_pci enable_sriov=1 disable_idle_d3=1
 ----
 
 === Image creation
@@ -366,31 +408,39 @@ When running Edge Image Builder, a directory is mounted from the host, so it is 
     3. `03-performance.sh` script is optional and can be used to configure the system for performance tuning.
     4. `04-sriov.sh` script is optional and can be used to configure the system for SR-IOV.
 * The `custom/files` directory contains the `rke2` and the `cni` images to be copied to the image during the image creation process. Also, the optional `performance-settings.sh` and `sriov-auto-filler.sh` files can be included.
+* The `os-files` folder contains the necessary configuration files to load, at each node boot, the `sctp` and `vfio-pci` kernel modules with the required options.
 
 [,console,subs="attributes"]
 ----
 ├── downstream-cluster-airgap-config.yaml
-├── base-images/
-│   └ {micro-base-image-raw}
-├── network/
-|   └ configure-network.sh
-└── custom/
-    └ files/
-    |   └ install.sh
-    |   └ rke2-images-cilium.linux-amd64.tar.zst
-    |   └ rke2-images-core.linux-amd64.tar.zst
-    |   └ rke2-images-multus.linux-amd64.tar.zst
-    |   └ rke2-images.linux-amd64.tar.zst
-    |   └ rke2-images-traefik.linux-amd64.tar.zst
-    |   └ rke2.linux-amd64.tar.zst
-    |   └ sha256sum-amd64.txt
-    |   └ performance-settings.sh
-    |   └ sriov-auto-filler.sh
-    └ scripts/
-        └ 01-fix-growfs.sh
-        └ 02-airgap.sh
-        └ 03-performance.sh
-        └ 04-sriov.sh
+├── base-images
+│   └── {micro-base-image-raw}
+├── custom
+│   ├── files
+│   │   ├── install.sh
+│   │   ├── rke2-images-cilium.linux-amd64.tar.zst
+│   │   ├── rke2-images-core.linux-amd64.tar.zst
+│   │   ├── rke2-images-multus.linux-amd64.tar.zst
+│   │   ├── rke2-images.linux-amd64.tar.zst
+│   │   ├── rke2-images-traefik.linux-amd64.tar.zst
+│   │   ├── rke2.linux-amd64.tar.zst
+│   │   ├── sha256sum-amd64.txt
+│   │   ├── performance-settings.sh
+│   │   └── sriov-auto-filler.sh
+│   └── scripts
+│       ├── 01-fix-growfs.sh
+│       ├── 02-airgap.sh
+│       ├── 03-performance.sh
+│       └── 04-sriov.sh
+├── network
+│   └── configure-network.sh
+├── os-files
+│   └── etc
+│       ├── modprobe.d
+│       │   └── vfio-pci-options.conf
+│       └── modules-load.d
+│           ├── sctp.conf
+│           └── vfio-pci.conf
 ----
 
 ==== Downstream cluster image definition file
@@ -470,6 +520,10 @@ cp sriov-auto-filler.sh /opt/sriov/sriov-auto-filler.sh
 ----
 
 The content of `custom/files/sriov-auto-filler.sh` is a script that can be used to configure the system for SR-IOV and can be downloaded from the following https://github.com/suse-edge/telco-cloud-examples/blob/{release-tag-telco-cloud}/telco-examples/downstream-clusters/dhcp/eib/custom/files/sriov-auto-filler.sh[link].
+
+[#add-kernel-modules-eib-airgap]
+==== Telco required kernel modules
+As described for the non-airgap scenario in xref:add-kernel-modules-eib[section].
 
 ==== Preparing the air-gap artifacts
 
@@ -1700,7 +1754,6 @@ The changes required to enable the Telco features shown above are all inside the
 
 To make the process clear, the changes required on that block (`RKE2ControlPlane`) to enable the Telco features are the following:
 
-* The `preRKE2Commands` to be used to execute the commands before the `RKE2` installation process. In this case, use the `modprobe` command to enable the `vfio-pci` and the `SR-IOV` kernel modules.
 * The ignition file `/var/lib/rancher/rke2/server/manifests/configmap-sriov-custom-auto.yaml` to be used to define the interfaces, drivers and the number of `VFs` to be created and exposed to the workloads.
     ** The values inside the config map `sriov-custom-auto-config` are the only values to be replaced with real values.
         *** `$\{RESOURCE_NAME1\}` — The resource name to be used for the first `PF` interface (for example, `sriov-resource-du1`). It is added to the prefix `rancher.io` to be used as a label to be used by the workloads (for example, `rancher.io/sriov-resource-du1`).
@@ -1760,8 +1813,6 @@ spec:
   serverConfig:
     cni: calico
     cniMultusEnable: true
-  preRKE2Commands:
-  - modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
   agentConfig:
     format: ignition
     additionalUserData:
@@ -2186,8 +2237,6 @@ spec:
   serverConfig:
     cni: calico
     cniMultusEnable: true
-  preRKE2Commands:
-    - modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
   agentConfig:
     airGapped: true       # Airgap true to enable airgap mode
     format: ignition
