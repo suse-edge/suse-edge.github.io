@@ -707,7 +707,24 @@ We need to create a config map that defines SR-IOV resource pools. Run `lspci` c
 [,shell]
 ----
 $ lspci | grep -i acc
-8a:00.0 Processing accelerators: Intel Corporation Device 0d5c
+07:00.0 Processing accelerators: Intel Corporation Device 57c2
+07:00.1 Processing accelerators: Intel Corporation Device 57c3
+07:00.2 Processing accelerators: Intel Corporation Device 57c3
+07:00.3 Processing accelerators: Intel Corporation Device 57c3
+07:00.4 Processing accelerators: Intel Corporation Device 57c3
+07:00.5 Processing accelerators: Intel Corporation Device 57c3
+07:00.6 Processing accelerators: Intel Corporation Device 57c3
+07:00.7 Processing accelerators: Intel Corporation Device 57c3
+07:01.0 Processing accelerators: Intel Corporation Device 57c3
+07:01.1 Processing accelerators: Intel Corporation Device 57c3
+07:01.2 Processing accelerators: Intel Corporation Device 57c3
+07:01.3 Processing accelerators: Intel Corporation Device 57c3
+07:01.4 Processing accelerators: Intel Corporation Device 57c3
+07:01.5 Processing accelerators: Intel Corporation Device 57c3
+07:01.6 Processing accelerators: Intel Corporation Device 57c3
+07:01.7 Processing accelerators: Intel Corporation Device 57c3
+07:02.0 Processing accelerators: Intel Corporation Device 57c3
+0a:00.0 Processing accelerators: Intel Corporation Device 57c2
 
 $ lspci | grep -i net
 19:00.0 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
@@ -736,7 +753,7 @@ A `resource` is the named entity that pods consume (e.g. `rancher.io/intel_fec_5
 You define the target devices using `selectors` to filter the hardware on the node:
 
 * `vendors`: `8086` (Intel)
-* `devices`: `0d5d` (FEC card), `1889` (NIC)
+* `devices`: `57c3` (FEC VF), `1889` (NIC VF)
 * `drivers`: `vfio-pci`
 * `pfNames`: `p2p1` (physical interface name)
 
@@ -777,7 +794,7 @@ data:
                 "deviceType": "accelerator",
                 "selectors": {
                     "vendors": ["8086"],
-                    "devices": ["0d5d"]
+                    "devices": ["57c3"]
                 },
         		"additionalInfo": {
           			"*": {
@@ -1275,13 +1292,13 @@ Network devices using kernel driver
 
 
 [#acceleration]
-== vRAN Acceleration (`Intel ACC100/ACC200`)
+== vRAN Acceleration (`Intel ACC100/VRB1/VRB2`)
 
 As communications service providers move from 4G to 5G networks, many are adopting virtualized radio access network (vRAN) architectures for higher channel capacity and easier deployment of edge-based services and applications. vRAN solutions are ideally located to deliver low-latency services with the flexibility to increase or decrease capacity based on the volume of real-time traffic and demand on the network.
 
 One of the most compute-intensive 4G and 5G workloads is RAN layer 1 (`L1`) `FEC`, which resolves data transmission errors over unreliable or noisy communication channels. `FEC` technology detects and corrects a limited number of errors in 4G or 5G data, eliminating the need for retransmission. Since the `FEC` acceleration transaction does not contain cell state information, it can be easily virtualized, enabling pooling benefits and easy cell migration.
 
-Historically, Intel provided the ACC100 vRAN Accelerator card to rapidly execute Layer 1 FEC algorithms, freeing up host processing power for the main CPU. Intel has since integrated this technology directly into newer CPUs, starting with Sapphire Rapids, under the name `Intel vRAN Boost` (also known as ACC200). Intel vRAN Boost act as an offload accelerator on the CPU itself, eliminating the need for a separate hardware card. This section details configuration of SUSE Telco Cloud for workloads to leverage ACC100 or Intel vRAN Boost.
+Historically, Intel provided the ACC100 vRAN Accelerator card to rapidly execute Layer 1 FEC algorithms, freeing up host processing power for the main CPU. Intel has since integrated this technology directly into newer CPUs, starting with Sapphire Rapids, under the name `Intel vRAN Boost` (VRB). Intel vRAN Boost acts as an offload accelerator on the CPU itself, eliminating the need for a separate hardware card. This section details configuration of SUSE Telco Cloud for workloads to leverage ACC100 or Intel vRAN Boost.
 
 
 === Kernel parameters
@@ -1335,15 +1352,17 @@ $ modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
 
 [,shell]
 ----
-$ lspci | grep -i acc
-8a:00.0 Processing accelerators: Intel Corporation Device 0d5c
+$ lspci -DPPnn | grep -i acc
+0000:07:00.0 Processing accelerators [1200]: Intel Corporation Device [8086:57c2]
+0000:0a:00.0 Processing accelerators [1200]: Intel Corporation Device [8086:57c2]
+
 ----
 
 * Bind the physical interface (`PF`) with `vfio-pci` driver:
 
 [,shell]
 ----
-$ dpdk-devbind.py -b vfio-pci 0000:8a:00.0
+$ dpdk-devbind.py -b vfio-pci 0000:07:00.0
 ----
 
 * Create the virtual functions (`VFs`) from the physical interface (`PF`).
@@ -1352,37 +1371,70 @@ Check the maximum `VF` capacity of the accelerator card. Next, configure the car
 
 [,shell]
 ----
-$ cat /sys/bus/pci/devices/0000:8a:00.0/sriov_totalvfs
-16
-$ echo 16 > /sys/bus/pci/devices/0000:8a:00.0/sriov_numvfs
+$ cat /sys/bus/pci/devices/0000:07:00.0/sriov_totalvfs
+64
+$ echo 16 > /sys/bus/pci/devices/0000:07:00.0/sriov_numvfs
 ----
 
-* Configure the accelerator card and its virtual functions with a 4G or 5G profile. A unique VF token (UUID) must be provided. The workload would consume this VF token to utilize the card's FEC acceleration capabilities:
+* Configure the accelerator card and its virtual functions with a 4G or 5G profile, selecting the right `vRAN Boost` device type depending on the exact Intel processor generation: `VRB1` (formerly known as ACC200) if Sapphire Rapids Edge Enhanced (SPR-EE), `VRB2` for Granite Rapids-D (GNR-D). A unique VF token (UUID) must be provided (the workload will consume this VF token to utilize the card's FEC acceleration capabilities).
+
+[WARNING]
+====
+Deprecation from `pf-bb-config`: new rpm release supporting VRB2 device type is now installing the configuration example files in `/usr/share/pf-bb-config/examples` location; the old `/opt/pf-bb-config/` path is still supported but to be removed in future releases. Please, update your scripts and documentation to reflect the new path (as done in the example below).
+====
 
 [,shell]
 ----
-$ pf_bb_config ACC200 -c /opt/pf-bb-config/acc200_config_vf_5g.cfg -v 00112233-4455-6677-8899-aabbccddeeff
-Tue Jun  6 10:49:20 2023:INFO:Queue Groups: 2 5GUL, 2 5GDL, 2 4GUL, 2 4GDL
-Tue Jun  6 10:49:20 2023:INFO:Configuration in VF mode
-Tue Jun  6 10:49:21 2023:INFO: ROM version MM 99AD92
-Tue Jun  6 10:49:21 2023:WARN:* Note: Not on DDR PRQ version  1302020 != 10092020
-Tue Jun  6 10:49:21 2023:INFO:PF ACC200 configuration complete
-Tue Jun  6 10:49:21 2023:INFO:ACC200 PF [0000:8a:00.0] configuration complete!
+$ pf_bb_config VRB2 -c /usr/share/pf-bb-config/examples/vrb2/vrb2_config_vf_5g.cfg -f /usr/share/pf-bb-config/examples/vrb2/srs_fft_windows_coefficient.bin -v 00112233-4455-6677-8899-aabbccddeeff -p 0000:07:00.0
+== pf_bb_config Version 25.11 ==
+VRB2 PF [0000:07:00.0] configuration complete!
+Log file = /var/log/pf_bb_cfg_0000:07:00.0.log
 ----
 
 * Verify the new VFs created from the FEC PF. Note that the VFs got `0d5d` device ID. This information is required in next step to expose these VFs as Kubernetes resource:
 
 [,shell]
 ----
-$ dpdk-devbind.py -s
+$ # dpdk-devbind.py -s | grep -A18 Baseband 
 Baseband devices using DPDK-compatible driver
 =============================================
-0000:8a:00.0 'Device 0d5c' drv=vfio-pci unused=
-0000:8b:00.0 'Device 0d5d' drv=vfio-pci unused=
-
+0000:07:00.0 'Device 57c2' numa_node=0 drv=vfio-pci unused=
+0000:07:00.1 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.2 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.3 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.4 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.5 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.6 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.7 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.0 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.1 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.2 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.3 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.4 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.5 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.6 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.7 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:02.0 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+--
 Other Baseband devices
 ======================
-0000:8b:00.1 'Device 0d5d' unused=
+0000:0a:00.0 'Device 57c2' numa_node=0 unused=vfio-pci
+
+Other Crypto devices
+====================
+0000:01:00.0 '420xx Series QAT 4946' numa_node=0 unused=vfio-pci
+0000:03:00.0 'Device 2714' numa_node=0 unused=vfio-pci
+
+DMA devices using kernel driver
+===============================
+0000:00:01.0 'Device 11fb' numa_node=0 drv=idxd unused=vfio-pci 
+
+Other Eventdev devices
+======================
+0000:03:00.0 'Device 2714' numa_node=0 unused=vfio-pci
+
+No 'Mempool' devices detected
+=============================
 ----
 
 === Configure Kubernetes for FEC Acceleration
