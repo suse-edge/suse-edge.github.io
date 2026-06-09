@@ -4,6 +4,7 @@ Generate versions.adoc from release manifest in container image.
 Uses ORAS library for OCI registry interaction.
 """
 
+import oras
 import oras.client
 import requests
 import tempfile
@@ -20,6 +21,19 @@ import platform
 from datetime import date
 from jinja2 import Environment, FileSystemLoader
 from pathlib import Path
+
+
+# 0.2.41 is the first release where client.get_manifest() both accepts
+# manifest-list / image-index media types by default and makes schema
+# validation opt-in. Earlier versions reject multi-platform manifests
+# with a 400 "Schema 2 manifest not supported by client" from registries
+# such as registry.suse.com.
+_MIN_ORAS = (0, 2, 41)
+if tuple(int(p) for p in oras.__version__.split('.')[:3]) < _MIN_ORAS:
+    raise SystemExit(
+        f"versions_update.py requires oras>=0.2.41 (installed: {oras.__version__}). "
+        f"Upgrade with: pip install --upgrade 'oras>=0.2.41'"
+    )
 
 
 def parse_version(version_str):
@@ -101,38 +115,6 @@ def find_file_in_layer(layer_path, target_file):
     return None
 
 
-def get_manifest_with_fallback(client, image_ref):
-    """Get manifest with proper Accept headers for manifest lists."""
-    # Parse the image reference
-    if '@' in image_ref:
-        repo, ref = image_ref.rsplit('@', 1)
-    elif ':' in image_ref:
-        repo, ref = image_ref.rsplit(':', 1)
-    else:
-        repo = image_ref
-        ref = 'latest'
-
-    # Build the manifest URL
-    registry = repo.split('/')[0]
-    repository_path = '/'.join(repo.split('/')[1:])
-    manifest_url = f"https://{registry}/v2/{repository_path}/manifests/{ref}"
-
-    # Try to get manifest with proper Accept headers
-    # We need to accept both manifest lists and regular manifests
-    headers = {
-        'Accept': ', '.join([
-            'application/vnd.docker.distribution.manifest.list.v2+json',
-            'application/vnd.oci.image.index.v1+json',
-            'application/vnd.docker.distribution.manifest.v2+json',
-            'application/vnd.oci.image.manifest.v1+json',
-        ])
-    }
-
-    response = requests.get(manifest_url, headers=headers)
-    response.raise_for_status()
-    return response.json()
-
-
 def fetch_release_manifest(image_ref):
     """Fetch release manifest from container image using ORAS."""
     print(f"Fetching release manifest from {image_ref}")
@@ -141,13 +123,12 @@ def fetch_release_manifest(image_ref):
     image_digest = None
     client = oras.client.OrasClient()
 
-    # Get the manifest to check if it's a manifest list
-    # Use our custom function to ensure proper Accept headers
-    try:
-        manifest = get_manifest_with_fallback(client, image_ref)
-    except Exception as e:
-        print(f"  ⚠ Warning: Failed to get manifest with custom headers, trying ORAS client: {e}")
-        manifest = client.get_manifest(image_ref)
+    # client.get_manifest already accepts both manifest-list and
+    # single-image media types, and ORAS handles the bearer-token
+    # challenge that registries such as registry.suse.com issue even
+    # for anonymous pulls.
+    container = client.get_container(image_ref)
+    manifest = client.get_manifest(container)
 
     # If it's a manifest list (multi-platform image), resolve to a specific platform
     if manifest.get('mediaType') in [
@@ -193,7 +174,8 @@ def fetch_release_manifest(image_ref):
         print(f"✓ Resolved to {digest}")
 
         # Get the platform-specific manifest to extract config
-        manifest = get_manifest_with_fallback(client, image_ref)
+        container = client.get_container(image_ref)
+        manifest = client.get_manifest(container)
     else:
         # For single-platform images, compute digest from manifest
         manifest_json = json.dumps(manifest, separators=(',', ':'), sort_keys=True)
@@ -204,20 +186,7 @@ def fetch_release_manifest(image_ref):
     config_digest = manifest.get('config', {}).get('digest')
     if config_digest:
         try:
-            # Parse the image reference
-            if '@' in image_ref:
-                repo, _ = image_ref.rsplit('@', 1)
-            elif ':' in image_ref:
-                repo, _ = image_ref.rsplit(':', 1)
-            else:
-                repo = image_ref
-
-            # Build the config blob URL
-            registry = repo.split('/')[0]
-            repository_path = '/'.join(repo.split('/')[1:])
-            config_url = f"https://{registry}/v2/{repository_path}/blobs/{config_digest}"
-
-            response = requests.get(config_url)
+            response = client.get_blob(container, config_digest)
             response.raise_for_status()
             config = response.json()
 

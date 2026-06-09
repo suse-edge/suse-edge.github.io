@@ -11,3 +11,9 @@ The `versions_update.py` script updates the `versions.adoc` using data from the 
 ```bash
 ./versions_update.py
 ```
+
+Requires `oras>=0.2.41`, `requests`, `pyyaml`, and `jinja2`:
+
+```bash
+pip install --upgrade 'oras>=0.2.41' requests pyyaml jinja2
+```
