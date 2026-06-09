@@ -23,6 +23,7 @@ The following topics are covered in this section:
 * <<kernel-args,Kernel arguments for low latency and high performance>>: Kernel arguments to be used for maximum performance and low latency running telco workloads.
 * <<cpu-pinning-host,CPU Pinning on Host>>: Isolating the CPUs via kernel arguments and TuneD profile.
 * <<cpu-pinning-k8s,CPU Pinning on Kubernetes>>: Isolating the CPUs on Kubernetes via Kubelet configuration.
+* <<network-parameters,Network Parameters>>: Network tuning parameters for optimal performance and low latency.
 * <<cni-configuration,CNI configuration>>: CNI configuration to be used by the Kubernetes cluster.
 * <<sriov,SR-IOV configuration>>: SR-IOV configuration to be used by the Kubernetes workloads.
 * <<dpdk,DPDK configuration>>: DPDK configuration to be used by the system.
@@ -230,13 +231,14 @@ To validate that the parameters are applied after the reboot, the following comm
 $ cat /proc/cmdline
 ----
 
-There is another script that can be used to tune the CPU configuration, which basically is doing the following steps:
+There is another script that can be used to tune the CPU configuration and network parameters, which basically is doing the following steps:
 
 * Set the CPU governor to `performance`.
 * Unset the timer migration to the isolated CPUs.
 * Migrate the kdaemon threads to the housekeeping CPUs.
 * Set the isolated CPUs latency to the lowest possible value.
 * Delay the vmstat updates to 300 seconds.
+* Configure network tuning parameters for optimal performance.
 
 The script is available at https://raw.githubusercontent.com/suse-edge/telco-cloud-examples/refs/heads/{release-tag-telco-cloud}/telco-examples/downstream-clusters/dhcp-less/eib/custom/files/performance-settings.sh[SUSE Telco Cloud Examples repository].
 
@@ -348,6 +350,55 @@ spec:
           memory: "200Mi"
           cpu: "2"
 ----
+
+
+[#network-parameters]
+== Network Parameters
+
+Network tuning is essential for achieving optimal performance in telco workloads. The performance-settings.sh script includes a `configure_network_tuning` function that sets various kernel network parameters to optimize buffer sizes, packet processing, and UDP performance.
+
+[NOTE]
+====
+The network tuning values provided are examples that have been tested and validated. However, they should be adapted to your specific use case, workload requirements, and hardware configuration.
+====
+
+The following network parameters are configured by the script:
+
+=== Core Network Parameters
+
+* `net.core.rmem_max` (1342177280 bytes): Maximum receive socket buffer size. This parameter sets the maximum amount of memory that can be allocated for receiving data on any socket.
+
+* `net.core.wmem_max` (516777216 bytes): Maximum send socket buffer size. This parameter sets the maximum amount of memory that can be allocated for sending data on any socket.
+
+* `net.core.rmem_default` (10000000 bytes): Default receive socket buffer size. This is the initial buffer size for receiving data on new sockets.
+
+* `net.core.wmem_default` (10000000 bytes): Default send socket buffer size. This is the initial buffer size for sending data on new sockets.
+
+* `net.core.netdev_max_backlog` (416384 packets): Maximum number of packets queued on the input side when the interface receives packets faster than the kernel can process them. Increasing this value helps prevent packet drops during traffic bursts.
+
+* `net.core.optmem_max` (25165824 bytes): Maximum ancillary buffer size allowed per socket. This affects the size of option memory buffers.
+
+* `net.core.netdev_budget` (1024 packets): Maximum number of packets that can be processed in one softirq run. This helps control CPU utilization during packet processing.
+
+=== UDP-Specific Parameters
+
+* `net.ipv4.udp_mem` (11416320 15221760 22832640 pages): Controls the amount of memory (in pages) used by UDP. The three values represent:
+** Minimum threshold: Below this, UDP is not pressured
+** Pressure threshold: UDP starts applying memory pressure
+** Maximum threshold: Maximum pages of memory for UDP
+
+* `net.ipv4.udp_rmem_min` (16384 bytes): Minimum receive buffer size for UDP sockets. Ensures a baseline buffer size for UDP reception.
+
+* `net.ipv4.udp_wmem_min` (16384 bytes): Minimum send buffer size for UDP sockets. Ensures a baseline buffer size for UDP transmission.
+
+=== Real-Time Scheduling
+
+* `kernel.sched_rt_runtime_us` (-1): Disables the real-time throttling mechanism. Setting this to -1 allows real-time tasks unlimited CPU time, which is essential for telco workloads requiring deterministic latency.
+
+[IMPORTANT]
+====
+These parameters are automatically configured when using the performance-settings.sh script from the SUSE Telco Cloud Examples repository. The script should be integrated into your image build process as described in the <<atip-automated-provisioning,Automated Provisioning>> section.
+====
 
 
 [#cni-configuration]
