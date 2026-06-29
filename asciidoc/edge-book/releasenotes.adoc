@@ -1,7 +1,7 @@
 [#release-notes]
 
 = Abstract
-:revdate: 2026-01-20
+:revdate: 2026-06-29
 :page-revdate: {revdate}
 ifdef::env-github[]
 :imagesdir: ../images/
@@ -31,6 +31,148 @@ Entries are only listed once, but they can be referenced in several places if th
 However, repeated entries are provided as a courtesy only. Therefore, if you are skipping one or more releases, check the release notes of the skipped releases also. If you are only reading the release notes of the current release, you could miss important changes that may affect system behavior. {product} versions are defined as x.y.z, where 'x' denotes the major version, 'y' denotes the minor, and 'z' denotes the patch version, also known as the "z-stream". {product} product lifecycles are defined based around a given minor release, e.g. "3.6", but ship with subsequent patch updates through its lifecycle, e.g. "3.6.1".
 
 NOTE: {product} z-stream releases are tightly integrated and thoroughly tested as a versioned stack. Upgrade of any individual components to a different versions to those listed above is likely to result in system downtime. While it's possible to run Edge clusters in untested configurations, it is not recommended, and it may take longer to provide resolution through the support channels.
+
+[#release-notes-3-6-1]
+= Release 3.6.1
+
+Availability Date: 26th June 2026
+
+Full Support End Date: 27th November 2026
+
+Maintenance Support End Date: 27th May 2028
+
+EOL: 28th May 2028
+
+Summary: {product} 3.6.1 is the first z-stream release in the {product} 3.6 release stream.
+
+== New Features
+
+* Updated to Kubernetes 1.35.4 and Rancher Prime 2.14.2
+* Updated to SUSE Security (NeuVector) 5.5.2 https://open-docs.neuvector.com/releasenotes/5x[NeuVector Release Notes]
+* Updated to SUSE Storage (Longhorn) 1.11.2 https://longhorn.io/docs/1.11.1/[Upstream Longhorn Release Notes]
+* Updated to Rancher Turtles (CAPI) 0.26.2 https://turtles.docs.rancher.com/[Rancher Turtles Documentation]
+* Updated Metal3/Ironic to 0.15.0 with Ironic 35.0.0.2
+
+== Bug & Security Fixes
+
+* Kubernetes 1.35.4 contains several bugfixes and security updates https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.35.md[Kubernetes Changelog]
+* Rancher Prime 2.14.2 contains several bugfixes https://github.com/rancher/rancher/releases/tag/v2.14.1[Upstream Rancher Release Notes]
+* SUSE Storage (Longhorn) 1.11.2 contains several bugfixes https://github.com/longhorn/longhorn/releases/tag/v1.11.1[Upstream Longhorn Bug Fixes]
+* NeuVector 5.5.2 contains new features and several bugfixes https://open-docs.neuvector.com/releasenotes/5x[NeuVector Release Notes]
+
+== Known Issues
+
+[WARNING]
+====
+If deploying new clusters, please follow <<guides-kiwi-builder-images>> to build fresh images first.  This is suggested for management and downstream clusters to ensure the images contain the latest security and bug fixes.
+====
+
+* When deploying via Edge Image Builder, `HelmChartConfigs` manifests may fail if they are put in the `kubernetes/manifests` configuration directory. Instead it is recommended to place any `HelmChartConfigs` in `/var/lib/rancher/{rke2/k3s}/server/manifests/` using the EIB os-files interface.
+ifeval::["{flavor}" == "telco"]
+See <<mgmt-cluster-directory-structure>> for an example.
+endif::[]
+Failure to do this may cause nodes to stay in `NotReady` state on initial startup, as discussed in https://github.com/rancher/rke2/issues/8357[#8357 RKE2 issue].
+
+* On RKE2/K3s 1.34 and 1.35 versions, the directory `/etc/cni` being used to store CNI configurations may not trigger a notification of the files being written there to `containerd` due to certain conditions related to `overlayfs` (see the https://github.com/rancher/rke2/issues/8356[#8356 RKE2 issue]). This in turn results in the deployment of RKE2/K3s to get stuck waiting for the CNI to start, and the RKE2/K3s nodes to stay in `NotReady` state. This can be seen at node level with `kubectl describe node <affected_node>`:
+
+[,bash]
+----
+Conditions:
+  Type   Status  LastHeartbeatTime                LastTransitionTime               Reason           Message
+  ----   ------  -----------------                ------------------               ------           -------
+  Ready  False   Thu, 05 Jun 2025 17:41:28 +0000  Thu, 05 Jun 2025 14:38:16 +0000  KubeletNotReady  container runtime network not ready: NetworkReady=false reason:NetworkPluginNotReady message:Network plugin returns error: cni plugin not initialized
+----
+
+As a workaround, a tmpfs volume can be mounted at the `/etc/cni` directory before RKE2 starts. It avoids the usage of overlayfs which results in containerd missing notifications and the configs should get rewritten every time the node is restarted and the pods initcontainers run again. If using EIB, this can be a `04-tmpfs-cni.sh` script in the `custom/scripts` directory (as explained https://github.com/suse-edge/edge-image-builder/blob/release-1.3/docs/building-images.md#custom[here]) that looks like:
+
+[,bash]
+----
+#!/bin/bash
+mkdir -p /etc/cni
+mount -t tmpfs -o mode=0700,size=5M tmpfs /etc/cni
+echo "tmpfs /etc/cni tmpfs defaults,size=5M,mode=0700 0 0" >> /etc/fstab
+----
+
+* No official documentation or examples to configure SyncE via synce4l and GNSS via gpsd are available at this stage, these topics will be covered by future releases.
+
+* Some container repositories are currently reachable via IPv4 only, for this this reason a local registry on the Management Cluster is required for an IPv6 only downstream cluster.
+
+== Component Versions
+
+The following table describes the individual components that make up the 3.6.1 release, including the version, the Helm chart version (if applicable), and from where the released artifact can be pulled in the binary format. Please follow the associated documentation for usage and deployment examples.
+
+|======
+| Name | Version | Helm Chart Version | Artifact Location (URL/Image)
+| SUSE Linux Micro | 6.2 (latest) | N/A | https://www.suse.com/download/sle-micro/[SUSE Linux Micro Download Page] +
+| SUSE Linux Micro | 6.2 (latest) | N/A |Checksums and signatures are available for download at https://www.suse.com/download/sle-micro/[SUSE Linux Micro Download Page] +
+SL-Micro.x86_64-6.2-Base-SelfInstall-GM.install.iso +
+SL-Micro.x86_64-6.2-Base-RT-SelfInstall-GM.install.iso +
+SL-Micro.x86_64-6.2-Base-GM.raw.xz +
+SL-Micro.x86_64-6.2-Base-RT-GM.raw.xz +
+| SUSE Multi-Linux Manager | 5.1 | N/A | https://www.suse.com/download/suse-manager/[SUSE Multi-Linux Manager Download Page]
+s| K3s s| 1.35.4 s| N/A s| https://github.com/k3s-io/k3s/releases/tag/v1.35.4%2Bk3s1[Upstream K3s Release]
+s| RKE2 s| 1.35.4 s| N/A s| https://github.com/rancher/rke2/releases/tag/v1.35.4%2Brke2r1[Upstream RKE2 Release]
+s| SUSE Rancher Prime s| 2.14.2 s| 2.14.2 s| https://charts.rancher.com/server-charts/prime/index.yaml[Rancher Prime Helm Repository] +
+https://prime.ribs.rancher.io/rancher/v2.14.2/rancher-images.txt[Rancher 2.14.2 Container Images]
+s| SUSE Storage (Longhorn) s| 1.11.2 s| 1.11.2 s| https://apps.rancher.io/applications/suse-storage[SUSE Storage Helm Repository] +
+https://apps.rancher.io/applications/suse-storage/components[SUSE Storage Container Images]
+s| SUSE Security (NeuVector) s| 5.5.2 s| 109.0.2+up2.10.2 s| https://charts.rancher.io/index.yaml[Rancher Charts Helm Repository] +
+registry.rancher.com/rancher/neuvector-controller:5.5.2 +
+registry.rancher.com/rancher/neuvector-enforcer:5.5.2 +
+registry.suse.com/rancher/neuvector-compliance-config:1.0.12
+s| Rancher Turtles Providers (CAPI) s| 0.26.2 s| 306.0.7+up0.26.2 s| registry.suse.com/edge/3.6/rancher-turtles-providers-chart:306.0.7+up0.26.2 +
+registry.rancher.com/rancher/cluster-api-controller:v1.12.2 +
+registry.rancher.com/rancher/turtles:v0.26.2 +
+registry.suse.com/rancher/cluster-api-provider-rke2-bootstrap:v0.24.3 +
+registry.suse.com/rancher/cluster-api-provider-rke2-controlplane:v0.24.3
+s| Metal^3^ s| 0.15.0 s| 306.0.29+up0.15.0 s| registry.suse.com/edge/3.6/metal3-chart:306.0.29+up0.15.0 +
+registry.suse.com/edge/3.6/baremetal-operator:0.12.3.0 +
+registry.suse.com/edge/3.6/ironic:35.0.0.2 +
+registry.suse.com/edge/3.6/ironic-ipa-downloader:3.1.1 +
+registry.suse.com/edge/3.6/ironic-python-agent:3.0.9
+| MetalLB | 0.15.3 | 306.0.2+up0.15.3 | registry.suse.com/edge/3.6/metallb-chart:306.0.2+up0.15.3 +
+registry.suse.com/edge/3.6/metallb-controller:v0.15.3 +
+registry.suse.com/edge/3.6/metallb-speaker:v0.15.3
+| Elemental | 1.9.0 | 1.9.0 | registry.suse.com/rancher/elemental-operator-chart:1.9.0 +
+registry.suse.com/rancher/elemental-operator-crds-chart:1.9.0 +
+registry.suse.com/rancher/elemental-operator:1.9.0
+| Elemental Dashboard Extension | 3.0.1 | 3.0.1 | link:https://github.com/rancher/ui-plugin-charts/tree/main/charts/elemental/3.0.1[Elemental Extension Helm Chart]
+| Edge Image Builder | 1.3.3.1 | N/A | registry.suse.com/edge/3.6/edge-image-builder:1.3.3.1
+| KubeVirt | 1.7.0 | 306.0.2+up0.7.0 | registry.suse.com/edge/3.6/kubevirt-chart:306.0.2+up0.7.0 +
+registry.suse.com/suse/sles/15.7/virt-operator:1.7.0-150700.3.16.2 +
+registry.suse.com/suse/sles/15.7/virt-api:1.7.0-150700.3.16.2 +
+registry.suse.com/suse/sles/15.7/virt-controller:1.7.0-150700.3.16.2 +
+registry.suse.com/suse/sles/15.7/virt-handler:1.7.0-150700.3.16.2 +
+registry.suse.com/suse/sles/15.7/virt-launcher:1.7.0-150700.3.16.2
+| KubeVirt Dashboard Extension | 1.3.3 | 306.0.4+up1.3.3 | registry.suse.com/edge/3.6/kubevirt-dashboard-extension-chart:306.0.4+up1.3.3
+| Containerized Data Importer (CDI) | 1.64.0 | 306.0.2+up0.7.0 | registry.suse.com/edge/3.6/cdi-chart:306.0.2+up0.7.0 +
+registry.suse.com/suse/sles/15.7/cdi-operator:1.64.0-150700.9.6.1 +
+registry.suse.com/suse/sles/15.7/cdi-controller:1.64.0-150700.9.6.1 +
+registry.suse.com/suse/sles/15.7/cdi-apiserver:1.64.0-150700.9.6.1 +
+registry.suse.com/suse/sles/15.7/cdi-uploadproxy:1.64.0-150700.9.6.1
+| Endpoint Copier Operator | 0.3.0 | 306.0.1+up0.3.0 | registry.suse.com/edge/3.6/endpoint-copier-operator-chart:306.0.1+up0.3.0 +
+registry.suse.com/edge/3.6/endpoint-copier-operator:0.3.0
+| SR-IOV Network Operator | 1.6.0 | 306.0.4+up1.6.0 | registry.suse.com/edge/3.6/sriov-network-operator-chart:306.0.4+up1.6.0 +
+registry.suse.com/edge/3.6/sriov-crd-chart:306.0.4+up1.6.0
+| System Upgrade Controller | 0.19.1 | 109.0.1 | https://charts.rancher.io/index.yaml[Rancher Charts Helm Repository] +
+registry.rancher.com/rancher/system-upgrade-controller:v0.19.1
+s| Upgrade Controller s| 0.1.3 s| 306.0.4+up0.1.3 s| registry.suse.com/edge/3.6/upgrade-controller-chart:306.0.4+up0.1.3 +
+registry.suse.com/edge/3.6/upgrade-controller:0.1.3 +
+registry.rancher.com/rancher/kubectl:v1.35.2 +
+registry.suse.com/edge/3.6/release-manifest:3.6.1
+| SUSE Private Registry | 1.1.1 | 1.1.1 | oci://registry.suse.com/private-registry/private-registry-helm[SUSE Private Registry Helm Repository] +
+registry.suse.com/private-registry/harbor-core:1.1.1-1.19 +
+registry.suse.com/private-registry/harbor-jobservice:1.1.1-1.19 +
+registry.suse.com/private-registry/harbor-portal:1.1.1-1.20 +
+registry.suse.com/private-registry/harbor-registry:1.1.1-1.19 +
+registry.suse.com/private-registry/harbor-registryctl:1.1.1-1.19 +
+registry.suse.com/private-registry/harbor-trivy-adapter:1.1.1-1.24
+| Kiwi Builder | 10.2.29.1 | N/A | registry.suse.com/edge/3.6/kiwi-builder:10.2.29.1
+| Cert-Manager | 1.20.1 | 1.20.1 | https://charts.jetstack.io[Jetstack Helm Repository] +
+quay.io/jetstack/cert-manager-controller:v1.20.1 +
+quay.io/jetstack/cert-manager-webhook:v1.20.1 +
+quay.io/jetstack/cert-manager-cainjector:v1.20.1
+|======
 
 [#release-notes-3-6-0]
 = Release 3.6.0
