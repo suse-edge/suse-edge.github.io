@@ -181,3 +181,8 @@ git commit -m "Update documentation for release 3.6.1"
 **Issue:** Docker credential helper warnings
 - **Impact:** These are warnings only and don't affect the script functionality
 - **Cause:** The ORAS library tries to use Docker credentials but falls back to anonymous access for public registries
+Requires `oras>=0.2.41`, `requests`, `pyyaml`, and `jinja2`:
+
+```bash
+pip install --upgrade 'oras>=0.2.41' requests pyyaml jinja2
+```
