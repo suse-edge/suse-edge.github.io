@@ -58,10 +58,10 @@ The implementation requires:
 
 The complete cleanup solution consists of four Kubernetes manifests deployed to the `longhorn-system` namespace.
 
-==== Step 1: Create ServiceAccount
-
+. **Create ServiceAccount**
++
 Create a dedicated ServiceAccount for the cleanup CronJob:
-
++
 [source,yaml]
 ----
 apiVersion: v1
@@ -73,10 +73,10 @@ metadata:
     app: longhorn-engineimage-cleanup
 ----
 
-==== Step 2: Configure RBAC permissions
-
+. **Configure RBAC permissions**
++
 Define a Role with minimal required permissions:
-
++
 [source,yaml]
 ----
 apiVersion: rbac.authorization.k8s.io/v1
@@ -91,9 +91,9 @@ rules:
   resources: [engineimages]
   verbs: [get, list, delete]
 ----
-
++
 Bind the Role to the ServiceAccount:
-
++
 [source,yaml]
 ----
 apiVersion: rbac.authorization.k8s.io/v1
@@ -113,10 +113,10 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ----
 
-==== Step 3: Deploy cleanup CronJob
-
+. **Deploy cleanup CronJob**
++
 Deploy the automated cleanup CronJob:
-
++
 [source,yaml]
 ----
 apiVersion: batch/v1
@@ -130,7 +130,7 @@ metadata:
     description: "Cleanup old Longhorn engine images left over after upgrades"
     source: "SUSE Edge Telco Cloud - Day 2 Operations"
 spec:
-  # Execute weekly on Sunday at 2:00 AM
+  # Execute weekly on Sunday at 2:00 AM UTC
   schedule: "0 2 * * 0"
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
@@ -242,24 +242,24 @@ spec:
               echo "Cleanup completed successfully"
 ----
 
-==== Step 4: Apply the configuration
-
-Deploy all manifests to the cluster:
-
+. **Apply the configuration**
++
+Save all four manifests to a single file (e.g. `longhorn-engine-cleanup.yaml`), then deploy them to the cluster:
++
 [source,bash]
 ----
-# Save all four manifests to a single file
 kubectl apply -f longhorn-engine-cleanup.yaml
 ----
-
++
 Verify the CronJob was created:
-
++
 [source,bash]
 ----
 kubectl get cronjob -n longhorn-system longhorn-engineimage-cleanup
 ----
-
++
 Expected output:
++
 [source,text]
 ----
 NAME                            SCHEDULE     SUSPEND   ACTIVE   LAST SCHEDULE   AGE
@@ -268,9 +268,11 @@ longhorn-engineimage-cleanup    0 2 * * 0    False     0        <none>          
 
 === Operational procedures
 
+This section describes the day-to-day operational tasks for managing the Longhorn engine image cleanup CronJob, including manual execution, schedule customization, monitoring, and verification.
+
 ==== Manual execution
 
-To execute cleanup immediately without waiting for the scheduled time:
+To execute cleanup immediately without waiting for the scheduled time, run the following command:
 
 [source,bash]
 ----
@@ -281,18 +283,23 @@ kubectl create job --from=cronjob/longhorn-engineimage-cleanup \
 
 Monitor manual execution:
 
+. Watch job status:
++
 [source,bash]
 ----
-# Watch job status
 kubectl get jobs -n longhorn-system -w
+----
 
-# View job logs
+. View job logs:
++
+[source,bash]
+----
 kubectl logs -n longhorn-system -l app=longhorn-engineimage-cleanup --tail=100
 ----
 
 ==== Schedule configuration
 
-The default schedule executes cleanup weekly on Sunday at 2:00 AM:
+The default schedule executes cleanup weekly on Sunday at 2:00 AM UTC:
 
 [source,yaml]
 ----
@@ -305,7 +312,7 @@ Common schedule alternatives:
 * **Monthly on the 1st at 4:00 AM**: `"0 4 1 * *"`
 * **Every 6 hours**: `"0 */6 * * *"`
 
-Modify the schedule using:
+Modify the schedule:
 
 [source,bash]
 ----
@@ -319,12 +326,17 @@ kubectl patch cronjob longhorn-engineimage-cleanup \
 
 View cleanup history:
 
+* List completed jobs:
++
 [source,bash]
 ----
-# List completed jobs
 kubectl get jobs -n longhorn-system -l app=longhorn-engineimage-cleanup
+----
 
-# View logs from last successful run
+* View logs from last successful run:
++
+[source,bash]
+----
 kubectl logs -n longhorn-system \
   -l app=longhorn-engineimage-cleanup \
   --tail=200 \
@@ -352,12 +364,17 @@ kubectl logs job/$JOB_NAME -n longhorn-system
 
 After cleanup execution, verify that only current engine images remain:
 
+. List all engine images:
++
 [source,bash]
 ----
-# List all engine images
 kubectl get engineimages.longhorn.io -n longhorn-system
+----
 
-# Check reference counts
+. Check reference counts:
++
+[source,bash]
+----
 kubectl get engineimages.longhorn.io -n longhorn-system \
   -o custom-columns=NAME:.metadata.name,VERSION:.status.version,REFCOUNT:.status.refCount
 ----
