@@ -1,0 +1,485 @@
+[#guides-longhorn-encryption]
+= Longhorn Volume Encryption
+:revdate: 2026-07-03
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Longhorn is a distributed block storage system for Kubernetes that provides persistent storage with replication and high availability capabilities. This guide demonstrates how to configure Longhorn with LUKS/AES-256 encryption to ensure data protection at rest.
+
+== Introduction
+
+Data security is a critical requirement for modern cloud-native applications, particularly in environments handling sensitive information. Volume encryption provides a fundamental security layer that protects data stored on physical media from unauthorized access, even in scenarios where physical security has been compromised.
+
+Longhorn implements volume-level encryption using industry-standard cryptographic technologies:
+
+* **LUKS (Linux Unified Key Setup)**: A specification for block device encryption that provides a platform-independent standard on-disk format
+* **AES-256**: Advanced Encryption Standard with 256-bit keys, providing robust cryptographic protection
+
+== Why implement volume encryption
+
+Volume encryption addresses several security and compliance requirements:
+
+* **Data Protection at Rest**: Encrypted data on physical storage media remains protected against unauthorized access, even if disks are physically removed or stolen.
+* **Regulatory Compliance**: Industry regulations such as GDPR, HIPAA, and PCI-DSS mandate encryption for sensitive data, making volume encryption essential for compliance.
+* **Defense in Depth**: Encryption provides an additional security layer that complements Kubernetes RBAC and network policies.
+* **Secure Data Disposal**: Encrypted volumes can be securely decommissioned by simply destroying the encryption keys, ensuring data is rendered permanently inaccessible.
+
+[NOTE]
+====
+Encryption is applied transparently at the volume level. Applications interact with encrypted volumes through standard Kubernetes persistent volume claims without requiring code modifications.
+====
+
+== Architecture overview
+
+Longhorn encryption integrates with the Kubernetes Container Storage Interface (CSI) to provide transparent volume encryption. The encryption process occurs during volume provisioning and is managed through the following components:
+
+* **Kubernetes Secrets**: Encryption keys are stored securely as Kubernetes Secret resources
+* **StorageClass Parameters**: Encryption configuration is specified through CSI-specific parameters
+* **LUKS Device Mapper**: Each encrypted volume is backed by a LUKS-encrypted device mapper target
+* **CSI Driver**: The Longhorn CSI driver manages encryption key retrieval and volume staging
+
+The encryption workflow operates as follows:
+
+. When a PersistentVolumeClaim (PVC) requests storage from an encrypted StorageClass, the Longhorn CSI driver retrieves the encryption key from the designated Secret
+. A LUKS-encrypted device mapper target is created using the encryption key
+. All data written to the volume is encrypted before being committed to the underlying storage
+. When the volume is mounted, the CSI driver stages the volume by unlocking the LUKS device using the stored encryption key
+
+== Prerequisites
+
+Before implementing Longhorn volume encryption, ensure the following prerequisites are met:
+
+* A functional Kubernetes cluster with Longhorn version 1.11.1 or higher installed
+* Cluster administrative access with appropriate RBAC permissions
+* `kubectl` command-line tool configured for cluster access
+* `openssl` utility for cryptographic key generation
+
+== Implementation
+
+. **Generate the encryption key**
++
+Encryption key generation must be performed using cryptographically secure random number generation. Run the following command to generate a 256-bit encryption key encoded in `base64` format:
++
+[source,bash]
+----
+openssl rand -base64 32
+----
++
+Example output:
++
+[source,text]
+----
+Kq8Xh2vN9pL3mZ1wR4tY6uI0oP5aS7dF8gH9jK1lM2n=
+----
++
+[WARNING]
+====
+**Key Management Critical Requirements**
+
+* **Never commit encryption keys to version control systems**
+* Loss of the encryption key results in **permanent and irreversible data loss**
+====
+
+. **Create the encryption key Secret**
++
+Once generated, the encryption key must be stored as a Kubernetes Secret in the `longhorn-system` namespace:
++
+[source,bash]
+----
+CRYPTO_KEY_VALUE="Kq8Xh2vN9pL3mZ1wR4tY6uI0oP5aS7dF8gH9jK1lM2n="
+
+kubectl create secret generic longhorn-crypto \
+  --from-literal=CRYPTO_KEY_VALUE="${CRYPTO_KEY_VALUE}" \
+  -n longhorn-system
+----
++
+Verify successful Secret creation:
++
+[source,bash]
+----
+kubectl get secret longhorn-crypto -n longhorn-system
+----
++
+[TIP]
+====
+In production environments, consider using external secret management solutions that integrate with Kubernetes, such as the External Secrets Operator or sealed-secrets, to avoid storing sensitive data directly in the cluster's etcd.
+====
+
+. **Configure the encrypted StorageClass**
++
+.. Define a `StorageClass` that specifies encryption parameters for the Longhorn CSI driver:
++
+[source,yaml]
+----
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-encrypted
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+parameters:
+  numberOfReplicas: "3"
+  staleReplicaTimeout: "2880"
+  fromBackup: ""
+  fsType: "ext4"
+  dataLocality: "disabled"
+  # Encryption configuration
+  encrypted: "true"
+  csi.storage.k8s.io/provisioner-secret-name: "longhorn-crypto"
+  csi.storage.k8s.io/provisioner-secret-namespace: "longhorn-system"
+  csi.storage.k8s.io/node-publish-secret-name: "longhorn-crypto"
+  csi.storage.k8s.io/node-publish-secret-namespace: "longhorn-system"
+  csi.storage.k8s.io/node-stage-secret-name: "longhorn-crypto"
+  csi.storage.k8s.io/node-stage-secret-namespace: "longhorn-system"
+----
++
+The encryption-specific parameters configure CSI secret references:
++
+* `encrypted: "true"` - Enables LUKS encryption for all volumes provisioned from this StorageClass
+* `csi.storage.k8s.io/provisioner-secret-name` - Specifies the Secret containing the encryption key used during volume provisioning
+* `csi.storage.k8s.io/node-publish-secret-name` - Identifies the Secret used when mounting volumes to pods
+* `csi.storage.k8s.io/node-stage-secret-name` - References the Secret used during volume staging operations
++
+.. Apply the StorageClass definition:
++
+[source,bash]
+----
+kubectl apply -f longhorn-encrypted-storageclass.yaml
+----
++
+.. Verify StorageClass creation and configuration:
++
+[source,bash]
+----
+kubectl get storageclass longhorn-encrypted
+kubectl get storageclass longhorn-encrypted -o yaml
+----
+
+. **Deploy a test workload**
++
+To validate the encryption implementation, deploy a test pod that writes data to an encrypted volume.
++
+.. Create the following manifest (`test-encryption.yaml`):
++
+[source,yaml]
+----
+# Test Longhorn Encryption
+# Deploys a simple pod that writes data to an encrypted volume
+
+---
+# PVC using the encrypted StorageClass
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-encrypted-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn-encrypted
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# Pod that writes sensitive data to the volume
+apiVersion: v1
+kind: Pod
+metadata:
+  name: encryption-test-pod
+  namespace: default
+  labels:
+    app: encryption-test
+spec:
+  containers:
+  - name: writer
+    image: busybox
+    command:
+      - sh
+      - -c
+      - |
+        echo "=== Writing sensitive data to encrypted volume ==="
+        echo "SECRET DATA: Credit Card 4111-1111-1111-1111" > /data/secret.txt
+        echo "SECRET DATA: Password MySuperSecret123!" >> /data/secret.txt
+        echo "SECRET DATA: API Key sk-1234567890abcdef" >> /data/secret.txt
+        date >> /data/secret.txt
+        echo "=== Data written successfully ==="
+        echo "Content of /data/secret.txt:"
+        cat /data/secret.txt
+        echo "=== Sleeping forever (use 'kubectl exec' to verify) ==="
+        sleep infinity
+    volumeMounts:
+    - name: encrypted-storage
+      mountPath: /data
+  volumes:
+  - name: encrypted-storage
+    persistentVolumeClaim:
+      claimName: test-encrypted-pvc
+----
++
+This manifest defines:
++
+* A `PersistentVolumeClaim` requesting 1Gi of storage from the `longhorn-encrypted` StorageClass
+* A Pod that writes test data to the encrypted volume and remains running for verification
++
+.. Deploy the test workload:
++
+[source,bash]
+----
+kubectl apply -f test-encryption.yaml
+----
++
+.. Monitor pod startup:
++
+[source,bash]
+----
+kubectl get pod encryption-test-pod -w
+----
+
+. **Verify volume functionality**
++
+Once the pod reaches `Running` state, verify that data operations complete successfully:
++
+.. View pod logs:
++
+[source,bash]
+----
+kubectl logs encryption-test-pod
+----
+
+.. Run a shell inside the pod:
++
+[source,bash]
+----
+kubectl exec -it encryption-test-pod -- sh
+----
+
+.. Inside the pod, verify the content:
++
+[source,bash]
+----
+cat /data/secret.txt
+ls -lh /data/
+----
++
+Expected output:
++
+[source,text]
+----
+SECRET DATA: Credit Card 4111-1111-1111-1111
+SECRET DATA: Password MySuperSecret123!
+SECRET DATA: API Key sk-1234567890abcdef
+Thu Jul 03 10:30:45 UTC 2026
+----
++
+[NOTE]
+====
+Successful data operations confirm volume provisioning and mounting functionality. However, this verification alone does not validate encryption. The following steps provide cryptographic verification.
+====
+
+. **Cryptographic verification**
++
+To conclusively verify that encryption is active, direct inspection of the underlying storage device is required.
++
+.. **Identify the volume location**
++
+Determine which node hosts the volume replica:
++
+[source,bash]
+----
+# Get the PVC details
+kubectl get pvc test-encrypted-pvc
+
+# Get the associated PersistentVolume
+kubectl get pv | grep test-encrypted
+
+# View Longhorn volume details
+kubectl get volumes -n longhorn-system | grep test-encrypted
+----
+
+.. **Access the node and locate volume files**
++
+SSH to the node hosting the volume (identified from the previous output):
++
+[source,bash]
+----
+# Connect to the node
+ssh root@<node-ip>
+
+# Locate the volume image file
+find /var/lib/longhorn -name "*.img*" -type f | grep -i test
+----
++
+Typical volume path:
++
+[source,text]
+----
+/var/lib/longhorn/replicas/pvc-abc12345-r-6789/volume-head-001.img
+----
+
+.. **Attempt plaintext data extraction**
++
+Run the following command to search for unencrypted data:
++
+[source,bash]
+----
+# Attempt to find plaintext strings in the volume file
+strings /var/lib/longhorn/replicas/pvc-*/volume-head-*.img | grep -i "credit card"
+----
++
+**Verification results:**
++
+* **Encryption active**: No plaintext strings found (data is encrypted)
+* **Encryption inactive**: Plaintext strings detected (data is unencrypted)
+
+.. **Hexadecimal inspection**
++
+Examine the raw byte content of the volume:
++
+[source,bash]
+----
+# Navigate to the replica directory
+cd /var/lib/longhorn/replicas/pvc-XXXXX-r-YYYY/
+
+# Display raw volume content
+hexdump -C volume-head-*.img | head -100
+----
++
+**Encrypted volume output (random bytes):**
++
+[source,text]
+----
+00000000  a3 7f 2c d9 8b 4e f1 2a  9c 5d 8e 6b 4f 1d 3c 7a  |..,..N.*.[.kO.<z|
+00000010  d2 9f 4a 8c 3b e7 6d 1e  5f 0c b8 a4 7d 2f 9e 6c  |..J.;.m._...}/.l|
+----
++
+**Unencrypted volume output (readable ASCII):**
++
+[source,text]
+----
+00000000  53 45 43 52 45 54 20 44  41 54 41 3a 20 43 72 65  |SECRET DATA: Cre|
+00000010  64 69 74 20 43 61 72 64  20 34 31 31 31 2d 31 31  |dit Card 4111-11|
+----
+
+. **LUKS device verification**
++
+Longhorn implements encryption using the Linux LUKS subsystem. Verify LUKS device mapper targets:
++
+[source,bash]
+----
+# List block devices with encryption type
+lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT | grep -i crypt
+
+# List device mapper crypt targets
+dmsetup ls --target crypt
+----
++
+The presence of `crypto_LUKS` filesystem types or device mapper crypt targets confirms active LUKS encryption.
+
+. **Data persistence verification**
++
+Verify that encrypted volumes maintain data integrity across pod lifecycle events:
++
+[source,bash]
+----
+# Delete the pod (volume persists)
+kubectl delete pod encryption-test-pod
+
+# Recreate the pod
+kubectl apply -f test-encryption.yaml
+
+# Wait for Running state
+kubectl get pod encryption-test-pod -w
+
+# Verify data persistence
+kubectl exec -it encryption-test-pod -- cat /data/secret.txt
+----
++
+Data should remain intact, demonstrating proper volume persistence.
+
+== Encryption verification summary
+
+The following table summarizes encryption verification indicators:
+
+|===
+|Verification Method | Encrypted | Not Encrypted
+
+|`strings` output
+|No plaintext found
+|Plaintext strings visible
+
+|`hexdump` output
+|Random binary data
+|Readable ASCII text
+
+|`lsblk` output
+|`crypto_LUKS` type present
+|No `crypto_LUKS` type
+
+|`dmsetup ls --target crypt`
+|Lists crypt devices
+|No crypt devices listed
+|===
+
+== Test environment cleanup
+
+Remove test resources:
+
+[source,bash]
+----
+# Delete the test pod
+kubectl delete -f test-encryption.yaml
+
+# Delete the PVC and volume
+kubectl delete pvc test-encrypted-pvc
+----
+
+== CAPI integration
+
+When deploying clusters using Cluster API (CAPI) with Metal^3^, encryption configuration can be embedded in cluster provisioning manifests, enabling encrypted storage from initial cluster bootstrap.
+
+A complete reference implementation is available in the https://github.com/suse-edge/telco-cloud-examples/tree/main/telco-examples/downstream-clusters/longhorn/longhorn-with-encryption[SUSE Edge telco-cloud-examples repository].
+
+This reference implementation includes:
+
+* **BareMetalHost** definitions for multi-node control plane deployment
+* **CAPI cluster manifests** with integrated Longhorn encryption configuration
+* **Automatic Secret provisioning** during cluster initialization
+* **Pre-configured encrypted StorageClass** set as default
+* **MetalLB** configuration for VIP management
+* **Endpoint Copier Operator** for control plane endpoint synchronization
+
+In CAPI-based deployments, the encryption key is typically provided through cluster provisioning variables:
+
+[source,yaml]
+----
+# Example variable reference from CAPI manifest
+# Full manifests available in the repository
+CRYPTO_KEY_VALUE: "YOUR_GENERATED_KEY_HERE"
+----
+
+This variable is consumed during cluster provisioning to automatically create the `longhorn-crypto` Secret in the downstream cluster's `longhorn-system` namespace.
+
+[CAUTION]
+====
+**CAPI encryption deployment considerations:**
+
+* Generate encryption keys using `openssl rand -base64 32` before cluster provisioning
+* Replace placeholder values in manifests with actual encryption keys
+* **Never commit manifests containing real encryption keys to version control**
+* Implement GitOps workflows with secret management solutions
+* Maintain encryption keys in enterprise secret management systems for disaster recovery
+* Use unique encryption keys per cluster to limit blast radius in case of key compromise
+====
+
+
+
