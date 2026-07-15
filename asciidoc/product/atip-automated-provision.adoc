@@ -1997,6 +1997,179 @@ Once the file is created by joining the previous blocks, the following command m
 $ kubectl apply -f capi-provisioning-example.yaml
 ----
 
+[#add-telco-ptp]
+=== Precision Time Protocol (PTP)
+
+PTP synchronization is enabled at provisioning time in two steps: enabling the
+daemons in the EIB image and deploying the configuration files through Cluster API.
+Only the configuration files change between the different PTP scenarios, so a single
+generic example is used here and each scenario provides its specific values.
+
+*Enable the daemons in the EIB image*
+
+The `linuxptp` package is already part of the Telco package list (see
+xref:add-telco-feature-eib[Additional configuration for Telco workloads]). However,
+the `ptp4l` and `phc2sys` daemons are not enabled by default, so they must be added
+to the `systemd.enable` list of the same EIB image definition file:
+
+[,yaml,subs="attributes"]
+----
+operatingSystem:
+  systemd:
+    enable:
+      - ptp4l
+      - phc2sys
+  packages:
+    packageList:
+      - linuxptp      # already present in the Telco package list
+    sccRegistrationCode: $SCC_REGISTRATION_CODE
+----
+
+With the daemons enabled at image-build time, both services start automatically once
+their configuration files are present on the host.
+
+*Deploy the configuration files through Cluster API*
+
+The PTP configuration is deployed through a modified `RKE2ControlPlane` object that
+writes the `ptp4l` profile file and the two `/etc/sysconfig` files that control the
+`ptp4l` and `phc2sys` daemons. The rest of the object is the same as the one described
+in the xref:single-node-provision[provisioning section]; complete it with the other
+Cluster API objects and replace the placeholders with the values of the chosen
+scenario:
+
+[,yaml]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  replicas: 1
+  version: ${RKE2_VERSION}
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  registrationMethod: "control-plane-endpoint"
+  serverConfig:
+    cni: canal
+  agentConfig:
+    format: ignition
+    cisProfile: cis
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+            - name: rke2-preinstall.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=rke2-preinstall
+                Wants=network-online.target
+                Before=rke2-install.service
+                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStartPost=/bin/sh -c "umount /mnt"
+                [Install]
+                WantedBy=multi-user.target
+        storage:
+          files:
+            - path: ${PTP4L_CONF_PATH}
+              overwrite: true
+              contents:
+                inline: |
+                  ${PTP4L_CONF_CONTENTS}
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /etc/sysconfig/ptp4l
+              overwrite: true
+              contents:
+                inline: |
+                  ## Path:           Network/LinuxPTP
+                  ## Description:    Precision Time Protocol (PTP): ptp4l settings
+                  ## Type:           string
+                  ## Default:        "-i eth0 -f /etc/ptp4l.conf"
+                  ## ServiceRestart: ptp4l
+                  #
+                  # Arguments when starting ptp4l(8).
+                  #
+                  OPTIONS="${PTP4L_OPTIONS}"
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /etc/sysconfig/phc2sys
+              overwrite: true
+              contents:
+                inline: |
+                  ## Path:           Network/LinuxPTP
+                  ## Description:    Precision Time Protocol (PTP): phc2sys settings
+                  ## Type:           string
+                  ## Default:        "-s eth0 -w"
+                  ## ServiceRestart: phc2sys
+                  #
+                  # Arguments when starting phc2sys(8).
+                  #
+                  OPTIONS="${PHC2SYS_OPTIONS}"
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+    kubelet:
+      extraArgs:
+        - provider-id=metal3://BAREMETALHOST_UUID
+    nodeName: "localhost.localdomain"
+----
+
+The placeholders are provided by each scenario:
+
+[cols="1,2"]
+|===
+| Placeholder | Description
+
+| `$\{PTP4L_CONF_PATH\}`
+| Path of the `ptp4l` profile file, for example `/etc/ptp4l-G.8275.1.conf`.
+
+| `$\{PTP4L_CONF_CONTENTS\}`
+| Contents of that `ptp4l` file, taken from the chosen scenario.
+
+| `$\{PTP4L_OPTIONS\}`
+| Value of the `OPTIONS=` line in `/etc/sysconfig/ptp4l`.
+
+| `$\{PHC2SYS_OPTIONS\}`
+| Value of the `OPTIONS=` line in `/etc/sysconfig/phc2sys`.
+|===
+
+For the specific values to substitute in each case, see the *CAPI automation* of the
+corresponding scenario in <<ptp-scenarios,the PTP scenarios>> of the PTP documentation.
+
+[NOTE]
+====
+This approach is convenient only if the hardware in the cluster is uniform and the
+same PTP configuration is needed on all hosts, interface name included. The Boundary
+Clock scenarios that rely on `ts2phc` or on-board DPLL routing require additional
+files and services on top of this base example.
+====
+
 [#atip-private-registry]
 == Private registry
 
