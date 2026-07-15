@@ -1881,8 +1881,8 @@ The following scenarios are covered in this guide. Each scenario includes a
 link to its Cluster API (CAPI) automation.
 
 * <<ptp-scenario-oc,Scenario 1 - Ordinary Clock (PTP-only)>>
-* <<ptp-scenario-oc-synce,OC with PTP + SyncE>>
-* <<ptp-scenario-bc-single-nic,BC with PTP + propagation (single NIC)>>
+* <<ptp-scenario-oc-synce,Scenario 2 - Ordinary Clock (PTP & SyncE)>>
+* <<ptp-scenario-bc-single-nic,Scenario 3 - Boundary Clock (PTP-only) with Multiport Single NIC including propagation to Ordinary Clock server>>
 * <<ptp-scenario-bc-multi-nic-dpll,BC with PTP + propagation (multi-NIC, DPLL)>>
 * <<ptp-scenario-bc-synce-multi-nic-dpll,BC with PTP + SyncE + propagation (multi-NIC, DPLL)>>
 
@@ -1982,10 +1982,9 @@ segments that are not timing-aware and the switches do not need PTP configuratio
 at the cost of lower accuracy.
 
 [#ptp-scenarios]
-=== PTP Scenarios
 
 [#ptp-scenario-oc]
-==== Scenario 1 - Ordinary Clock (PTP-only)
+=== Scenario 1 - Ordinary Clock (PTP-only)
 
 *Explanation*
 
@@ -2067,6 +2066,9 @@ In this example the PHC of `em2` is `/dev/ptp1`.
 . Create the `ptp4l` configuration file `/etc/ptp4l-G.8275.1.conf`. The interface is
 declared as a section (`[em2]`), so the daemon does not need the `-i` flag:
 +
+[#ptp-conf-oc-g8275-1]
+.Ordinary Clock configuration — ITU-T G.8275.1
+====
 [source,]
 ----
 # Telecom G.8275.1 — Ordinary Clock (Time Receiver)
@@ -2091,6 +2093,7 @@ uds_ro_address                  /var/run/ptp4lro
 
 [em2]
 ----
+====
 +
 The `ptp_dst_mac` value is fixed for G.8275.1: it is the non-forwardable multicast
 address `01:80:C2:00:00:0E` that confines PTP to a single link and is the reason why
@@ -2179,6 +2182,9 @@ example the PHC of `em2` is `/dev/ptp1`.
 `ptp_dst_mac`, because the master is reached by IP through the `unicast_master_table`.
 Replace `$MASTER_IP_ADDRESS` with the IP address of the upstream master:
 +
+[#ptp-conf-oc-g8275-2]
+.Ordinary Clock configuration — ITU-T G.8275.2
+====
 [source,]
 ----
 # Telecom G.8275.2 — Ordinary Clock (Time Receiver)
@@ -2211,6 +2217,7 @@ UDPv4                           $MASTER_IP_ADDRESS
 [em2]
 unicast_master_table            1
 ----
+====
 
 . Point `ptp4l` at this file in `/etc/sysconfig/ptp4l`:
 +
@@ -2254,7 +2261,7 @@ below.
 | `/etc/ptp4l-G.8275.1.conf`
 
 | `$\{PTP4L_CONF_CONTENTS\}`
-| The `ptp4l` file shown in <<ptp-scenario-oc-model1,Model 1>>.
+| Copy the content from <<ptp-conf-oc-g8275-1,the G.8275.1 configuration above>>.
 
 | `$\{PTP4L_OPTIONS\}`
 | `-f /etc/ptp4l-G.8275.1.conf`
@@ -2272,7 +2279,7 @@ below.
 | `/etc/ptp4l-G.8275.2.conf`
 
 | `$\{PTP4L_CONF_CONTENTS\}`
-| The `ptp4l` file shown in <<ptp-scenario-oc-model2,Model 2>>.
+| Copy the content from <<ptp-conf-oc-g8275-2,the G.8275.2 configuration above>>.
 
 | `$\{PTP4L_OPTIONS\}`
 | `-f /etc/ptp4l-G.8275.2.conf`
@@ -2282,7 +2289,7 @@ below.
 |===
 
 [#ptp-scenario-oc-synce]
-==== OC with PTP + SyncE
+=== Scenario 2 - Ordinary Clock (PTP & SyncE)
 
 *Explanation*
 
@@ -2290,33 +2297,294 @@ below.
 
 *Diagram*
 
-// TODO: image::<path>[OC with PTP + SyncE]
+// TODO: image::<path>[Scenario 2 - Ordinary Clock (PTP & SyncE)]
 
 *Configuration*
 
 // TODO
 
-*CAPI automation*: see <<ptp-capi-oc-synce,the CAPI automation for this scenario>>.
+*CAPI automation*: see <<add-telco-ptp,Fully automated directed network provisioning>>.
 
 [#ptp-scenario-bc-single-nic]
-==== BC with PTP + propagation (single NIC)
+=== Scenario 3 - Boundary Clock (PTP-only) with Multiport Single NIC including propagation to Ordinary Clock server
 
 *Explanation*
 
-// TODO
+This scenario extends the timing chain with a Boundary Clock (BC) that regenerates
+PTP towards a downstream Ordinary Clock (OC), entirely over ITU-T G.8275.1 (PTP-only,
+Layer 2). The BC uses a single multi-port NIC: one `ptp4l` instance manages several
+ports on the same NIC, so neither `ts2phc` nor DPLL routing is required (unlike the
+multi-NIC scenarios).
+
+The scenario involves the following components:
+
+* *Grand Master (GM)*: the reference for the PTP domain (domain `24`), normally locked
+to a GNSS/PRTC source (the test bench used here has no GNSS, hence the degraded
+`gm.ClockClass` shown later). It sends time on the upstream segment.
+* *PTP-aware switch*: acts as a Boundary Clock (T-BC) on the timing path; every port
+carrying PTP has `ptp enable`.
+* *Boundary Clock (BC server)*: a multi-port node on a single NIC that bridges two PTP
+segments. Its `em2` port faces the *upstream* segment as a Time Receiver (SLAVE) and
+disciplines the NIC's PHC; `em3` (and `em4`) face the *downstream* segment as Time
+Transmitters that regenerate PTP. The BC terminates the upstream timing chain and
+starts a new one downstream.
+* *Ordinary Clock (OC server)*: a single-port node (`ens6f0np0`) on the *downstream*
+segment, where its only PTP master is the BC. It disciplines its local clocks from the
+time the BC regenerates.
+
+The timing is handled by the `linuxptp` daemons on each node:
+
+* On the *BC server*, a single `ptp4l` instance manages all its ports. The BMCA
+selects the GM as master on `em2`, which moves to `SLAVE` and disciplines the PHC.
+`em3` and `em4` are forced to `serverOnly 1`, so they act only as Time Transmitters.
+Because all ports share the same NIC PHC, the received time is directly available to
+the transmit ports; a Boundary Clock is implied automatically when more than one port
+is configured, so no `clock_type` or `ts2phc` setting is needed.
+* On the *OC server*, `ptp4l` runs with `clientOnly 1` on `ens6f0np0`, so the port
+only ever acts as a Time Receiver. `phc2sys` aligns the system clock to the PHC.
+* On the OC server, `clientOnly 1` is what guarantees it never becomes a master. The
+`localPriority` attribute — used by the G.8275.x BMCA only as a tie-breaker, when
+clockClass, clockAccuracy, variance and priority2 are equal, where a lower value is
+preferred — reinforces this ordering: the BC server keeps the default `128`, while the
+OC server uses the lower-preference `250`.
+
+The BC bridges two separate PTP segments: an *upstream* segment between the GM and its
+`em2` port, and a *downstream* segment between its `em3` port and the OC. These are kept
+apart, for example on different VLANs of the switch or on separate networks. Because the
+BC is the only master on the downstream segment, the OC synchronizes from the BC and
+never directly from the GM.
+
+As in <<ptp-scenario-oc,Scenario 1>>, this scenario uses the non-forwardable multicast
+MAC `01:80:C2:00:00:0E`; standard bridges do not forward it, so every PTP-aware device
+terminates and regenerates PTP. The same address must be set on every node of the
+timing path.
 
 *Diagram*
 
-// TODO: image::<path>[BC with PTP + propagation (single NIC)]
+.Boundary Clock (PTP-only), single NIC, with propagation to an Ordinary Clock
+image::product-atip-ptp-scenario-bc-single-nic.png[Scenario 3 - Boundary Clock (PTP-only) with Multiport Single NIC including propagation to Ordinary Clock server,scaledwidth=100%]
 
 *Configuration*
 
-// TODO
+Every switch port on the timing path (towards the GM, the BC and the OC) must have PTP
+enabled. The two cluster nodes are then configured as follows.
 
-*CAPI automation*: see <<ptp-capi-bc-single-nic,the CAPI automation for this scenario>>.
+*Boundary Clock (BC server)*
+
+. Identify the PHC of the PTP NIC (`ethtool -T em2`); on a single NIC all ports share
+the same PHC. In this example it is `/dev/ptp1`.
+
+. Create `/etc/ptp4l-G.8275.1.conf`. The receiving port `[em2]` has no role flag, so
+the BMCA selects it as Time Receiver; `[em3]` and `[em4]` are set to `serverOnly 1` to
+act as Time Transmitters. Declaring more than one port implies a Boundary Clock:
++
+[#ptp-conf-bc-single-nic-bc]
+.Boundary Clock configuration
+====
+[source,]
+----
+# Telecom G.8275.1 — Boundary Clock (multi-port, single NIC)
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l"
+uds_address                     /var/run/ptp4l
+uds_ro_address                  /var/run/ptp4lro
+
+[em2]
+
+[em3]
+serverOnly                      1
+
+[em4]
+serverOnly                      1
+----
+====
+
+. Point `ptp4l` at this file in `/etc/sysconfig/ptp4l`:
++
+[source,]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf"
+----
+
+. Optionally align the system clock with `phc2sys` in `/etc/sysconfig/phc2sys`, using
+the shared NIC PHC as source:
++
+[source,]
+----
+OPTIONS="-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 24"
+----
+
+. Enable and start the services and verify that `em2` is locked to the GM. The
+receiver port moves to `SLAVE` and the offset (`rms`) converges to a low value:
++
+[,console]
+----
+# systemctl enable --now ptp4l phc2sys
+# journalctl -u ptp4l -f
+ptp4l[...]: "ptp4l" selected best master clock d0460c.ffff.05c130
+ptp4l[...]: "ptp4l" port 1 (em2): UNCALIBRATED to SLAVE on MASTER_CLOCK_SELECTED
+ptp4l[...]: "ptp4l" rms    8 max   24 freq +10092 +/-  18 delay   211 +/-   2
+ptp4l[...]: "ptp4l" rms    4 max   11 freq +10069 +/-   7 delay   210 +/-   2
+ptp4l[...]: "ptp4l" rms    3 max    9 freq +10070 +/-   6 delay   213 +/-   3
+----
+
+*Ordinary Clock (OC server)*
+
+. Identify the PHC of the PTP interface (`ethtool -T ens6f0np0`); in this example it
+is `/dev/ptp1`.
+
+. Create `/etc/ptp4l-G.8275.1.conf` with a single port and `clientOnly 1`, so the
+node only ever acts as a Time Receiver. The higher `localPriority` (`250`) keeps it
+below the BC in the BMCA:
++
+[#ptp-conf-bc-single-nic-oc]
+.Ordinary Clock configuration
+====
+[source,]
+----
+# Telecom G.8275.1 — Ordinary Clock (Time Receiver)
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     250
+G.8275.defaultDS.localPriority  250
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+clientOnly                      1
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l"
+uds_address                     /var/run/ptp4l
+uds_ro_address                  /var/run/ptp4lro
+
+[ens6f0np0]
+----
+====
+
+. Configure `/etc/sysconfig/ptp4l` and `/etc/sysconfig/phc2sys` as for the BC (the
+`phc2sys` source is the PHC of `ens6f0np0`), then enable and start the services:
++
+[source,]
+----
+# /etc/sysconfig/ptp4l
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf"
+
+# /etc/sysconfig/phc2sys
+OPTIONS="-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 24"
+----
+
+. Verify that `ens6f0np0` locks to the time regenerated by the BC. The port moves to
+`SLAVE` and the offset (`rms`) stabilizes:
++
+[,console]
+----
+# journalctl -u ptp4l -f
+ptp4l[...]: "ptp4l" selected best master clock d0460c.ffff.05c130
+ptp4l[...]: "ptp4l" port 1 (ens6f0np0): UNCALIBRATED to SLAVE on MASTER_CLOCK_SELECTED
+ptp4l[...]: "ptp4l" rms   15 max   34 freq +11699 +/-  25 delay   468 +/-   5
+ptp4l[...]: "ptp4l" rms   13 max   30 freq +11701 +/-  23 delay   468 +/-   4
+ptp4l[...]: "ptp4l" rms   14 max   30 freq +11697 +/-  24 delay   467 +/-   4
+----
++
+The OC takes its time from the upstream Boundary Clock, which is its immediate master.
+The `selected best master clock` line, however, reports the *grandmaster* identity
+(`d0460c.ffff.05c130`, the GM) and not the Boundary Clock's: a Boundary Clock forwards
+the grandmaster identity unchanged while advertising its own port as the parent, so the
+chain stays traceable to the Grand Master. To see both identities explicitly, query the
+parent data set on the OC (example output):
++
+[,console]
+----
+# pmc -f /etc/ptp4l-G.8275.1.conf -u -b 0 'GET PARENT_DATA_SET'
+sending: GET PARENT_DATA_SET
+	507c6f.fffe.4ae178-0 seq 0 RESPONSE MANAGEMENT PARENT_DATA_SET
+		parentPortIdentity                    000000.fffe.001101-2
+		parentStats                           0
+		observedParentOffsetScaledLogVariance 0xffff
+		observedParentClockPhaseChangeRate    0x7fffffff
+		grandmasterPriority1                  128
+		gm.ClockClass                         165
+		gm.ClockAccuracy                      0xfe
+		gm.OffsetScaledLogVariance            0xffff
+		grandmasterPriority2                  120
+		grandmasterIdentity                   d0460c.ffff.05c130
+----
++
+The two identities differ, which is exactly what a Boundary Clock deployment should
+show:
++
+* `parentPortIdentity` (`000000.fffe.001101-2`) — the *immediate master*: the Boundary
+Clock's transmit port, the clock the OC actually receives time from.
+* `grandmasterIdentity` (`d0460c.ffff.05c130`) — the *root of the timing tree*: the
+Grand Master, forwarded unchanged through the Boundary Clock.
++
+The `gm.ClockClass`, `gm.ClockAccuracy` and `grandmasterPriority` values carry the
+grandmaster's advertised quality used by the BMCA. If the two identities were equal, the
+OC would be synchronizing directly from a Grand Master, with no Boundary Clock in the
+path.
+
+*CAPI automation*
+
+To deploy this scenario using the automated provisioning workflow, use the generic
+Cluster API template described in <<add-telco-ptp,Fully automated directed network
+provisioning>> on each node, overriding its placeholders with the values below.
+
+.Boundary Clock (BC server)
+[cols="1,2"]
+|===
+| Placeholder | Value
+
+| `$\{PTP4L_CONF_PATH\}`
+| `/etc/ptp4l-G.8275.1.conf`
+
+| `$\{PTP4L_CONF_CONTENTS\}`
+| Copy the content from <<ptp-conf-bc-single-nic-bc,the Boundary Clock configuration above>>.
+
+| `$\{PTP4L_OPTIONS\}`
+| `-f /etc/ptp4l-G.8275.1.conf`
+
+| `$\{PHC2SYS_OPTIONS\}`
+| `-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 24`
+|===
+
+.Ordinary Clock (OC server)
+[cols="1,2"]
+|===
+| Placeholder | Value
+
+| `$\{PTP4L_CONF_PATH\}`
+| `/etc/ptp4l-G.8275.1.conf`
+
+| `$\{PTP4L_CONF_CONTENTS\}`
+| Copy the content from <<ptp-conf-bc-single-nic-oc,the Ordinary Clock configuration above>>.
+
+| `$\{PTP4L_OPTIONS\}`
+| `-f /etc/ptp4l-G.8275.1.conf`
+
+| `$\{PHC2SYS_OPTIONS\}`
+| `-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 24`
+|===
 
 [#ptp-scenario-bc-multi-nic-dpll]
-==== BC with PTP + propagation (multi-NIC, DPLL)
+=== BC with PTP + propagation (multi-NIC, DPLL)
 
 *Explanation*
 
@@ -2342,10 +2610,10 @@ fronthaul ports.
 
 // TODO
 
-*CAPI automation*: see <<ptp-capi-bc-multi-nic-dpll,the CAPI automation for this scenario>>.
+*CAPI automation*: see <<add-telco-ptp,Fully automated directed network provisioning>>.
 
 [#ptp-scenario-bc-synce-multi-nic-dpll]
-==== BC with PTP + SyncE + propagation (multi-NIC, DPLL)
+=== BC with PTP + SyncE + propagation (multi-NIC, DPLL)
 
 *Explanation*
 
@@ -2359,39 +2627,7 @@ fronthaul ports.
 
 // TODO
 
-*CAPI automation*: see <<ptp-capi-bc-synce-multi-nic-dpll,the CAPI automation for this scenario>>.
-
-[#ptp-cluster-api]
-=== Cluster API integration
-
-// TODO: Describe how the scenarios above are applied automatically at
-// provisioning time through Cluster API (registration/config files,
-// systemd units, etc.).
-
-[#ptp-capi-oc]
-==== Scenario 1 - Ordinary Clock (PTP-only)
-
-// TODO: CAPI automation for <<ptp-scenario-oc>>.
-
-[#ptp-capi-oc-synce]
-==== OC with PTP + SyncE
-
-// TODO: CAPI automation for <<ptp-scenario-oc-synce>>.
-
-[#ptp-capi-bc-single-nic]
-==== BC with PTP + propagation (single NIC)
-
-// TODO: CAPI automation for <<ptp-scenario-bc-single-nic>>.
-
-[#ptp-capi-bc-multi-nic-dpll]
-==== BC with PTP + propagation (multi-NIC, DPLL)
-
-// TODO: CAPI automation for <<ptp-scenario-bc-multi-nic-dpll>>.
-
-[#ptp-capi-bc-synce-multi-nic-dpll]
-==== BC with PTP + SyncE + propagation (multi-NIC, DPLL)
-
-// TODO: CAPI automation for <<ptp-scenario-bc-synce-multi-nic-dpll>>.
+*CAPI automation*: see <<add-telco-ptp,Fully automated directed network provisioning>>.
 
 //
 // ============================================================
