@@ -1829,8 +1829,8 @@ clock to the PHC. On a Grandmaster, `ts2phc` additionally steers the PHC from th
 GNSS reference. Their roles and installation are covered in <<ptp-prerequisites>>.
 
 The hardware clock itself is handled by the Linux kernel DPLL subsystem together
-with the network driver. The degree of timing control depends on whether the NIC
-integrates a manageable DPLL:
+with the network driver. The degree of timing control, and how timing is
+distributed within a multi-NIC node, depends on where the manageable DPLL sits:
 
 * *NIC with an integrated DPLL*: the DPLL is embedded in the NIC and is configured
 through the Linux DPLL subsystem. It selects and locks to the chosen reference and
@@ -1838,12 +1838,20 @@ disciplines the PHC, giving full control over frequency and holdover.
 * *NIC without an integrated DPLL*: the NIC exposes no configurable DPLL. `ptp4l`
 disciplines the PHC directly, and the subsystem can at most report the lock status
 (read-only); advanced frequency handling then relies on an external timing source.
+* *On-board DPLL shared across several NICs*: the DPLL is not embedded in a single
+NIC but sits on the platform, external to the NICs. It disciplines and keeps the
+PHCs of several NICs aligned from a common reference, so every NIC in the node
+shares the same time. This arrangement is used on multi-NIC platforms that
+distribute timing internally instead of relying on external cabling.
 
 .PTP software on a node whose NIC integrates a manageable DPLL
 image::product-atip-ptp-node-with-dpll.png[Node whose NIC integrates a manageable DPLL,scaledwidth=100%]
 
 .PTP software on a node whose NIC has no manageable DPLL
 image::product-atip-ptp-node-without-dpll.png[Node whose NIC has no manageable DPLL,scaledwidth=100%]
+
+.PTP software on a node with an on-board DPLL shared across NICs
+image::product-atip-ptp-node-onboard-dpll.png[Node with an on-board DPLL shared across NICs,scaledwidth=100%]
 
 Telco networks standardize on two ITU-T profiles, which differ mainly in the
 transport used and in how much of the underlying network must be PTP-aware:
@@ -1876,6 +1884,14 @@ link to its Cluster API (CAPI) automation.
 * <<ptp-scenario-bc-single-nic,Scenario 3 - Boundary Clock (PTP-only) with Multiport Single NIC including propagation to Ordinary Clock server>>
 * <<ptp-scenario-bc-multi-nic-dpll,Scenario 4 - Boundary Clock (PTP-only) Multi-NIC with internal timing module (DPLL GNR-D based)>>
 * <<ptp-scenario-bc-synce-multi-nic-dpll,BC with PTP + SyncE + propagation (multi-NIC, DPLL)>>
+
+[NOTE]
+====
+Only <<ptp-scenario-oc,Scenario 1>> shows the configuration for both telco profiles,
+ITU-T G.8275.1 and ITU-T G.8275.2. The remaining scenarios show only the ITU-T G.8275.1
+case for brevity: the deployment is identical and only the `ptp4l` configuration file
+changes between the two profiles.
+====
 
 [#ptp-prerequisites]
 === Prerequisites
@@ -2778,7 +2794,23 @@ reference is the integrated PHC (`/dev/ptp1`, already disciplined by the GM thro
 `ptp4l` instance), passed on the command line with `-s /dev/ptp1`. The on-board DPLL
 delivers the 1PPS derived from that reference to each add-in card on its `SDP1` pin;
 `ts2phc` timestamps those input pulses (EXTTS) and steps each add-in PHC accordingly, so
-every PHC in the node ends up sharing the same time. Create its configuration file:
+every PHC in the node ends up sharing the same time.
++
+[NOTE]
+====
+Aligning the add-in PHCs takes two complementary settings, at different levels:
+
+* *Hardware*: the `SDP1` input pin of each add-in PHC must be enabled so the on-board DPLL
+can deliver the 1PPS pulse to it. This is done in the DPLL setup script of the previous step
+(`echo 1 1 > /sys/class/ptp/ptpN/pins/SDP1`).
+* *Software*: `ts2phc` must be told to timestamp that input and step the PHC. This is what the
+configuration below does (`ts2phc.channel`, `ts2phc.pin_index`, `ts2phc.extts_polarity`).
+
+Without the pin enablement the pulse never reaches the PHC; without the `ts2phc` configuration
+the pulse is never applied to it. Both are required.
+====
++
+Create its configuration file:
 +
 [#gnrd-ts2phc-config]
 .`/etc/ts2phc-cf-all.cfg` — `ts2phc` configuration file
@@ -2852,23 +2884,18 @@ uds_address                     /var/run/ptp4l-nac
 uds_ro_address                  /var/run/ptp4lro-nac
 
 [em2]
-
-[em3]
-
-[em4]
 ----
 ====
 +
-The integrated instance sets no `serverOnly` or `clientOnly` on its ports: it relies on the
-BMCA to assign each role. With a GM reachable through one of them, the BMCA selects that port
-(`em2`) as the Time Receiver (`SLAVE`) and disciplines `/dev/ptp1`, while the remaining ports
-follow the BMCA outcome. This is what makes the node a Boundary Clock rather than a plain
-receiver, so the ports must stay unconstrained: forcing `clientOnly` would stop it from
-forwarding time, and forcing `serverOnly` would stop it from locking to the GM. The add-in
-cards, in contrast, force `serverOnly 1` because they must always be Time Transmitters — they
-take their time from the DPLL and `ts2phc`, not by receiving PTP, so they must never be
-elected as receivers. If tighter control is needed, add the `serverOnly` or `clientOnly` flag
-explicitly under each interface.
+The integrated instance declares only `em2`, the port that receives PTP from the GM, and sets
+no `serverOnly` or `clientOnly` on it: it relies on the BMCA to assign the role. With a GM
+reachable on `em2`, the BMCA selects it as the Time Receiver (`SLAVE`) and disciplines
+`/dev/ptp1`. The other ports of the integrated controller are not declared, because on this
+node the downstream regeneration is performed by the add-in cards rather than by the
+integrated controller. The add-in cards, in contrast, force `serverOnly 1` because they must
+always be Time Transmitters — they take their time from the DPLL and `ts2phc`, not by
+receiving PTP, so they must never be elected as receivers. If tighter control is needed, add
+the `serverOnly` or `clientOnly` flag explicitly under the interface.
 +
 The `G.8275.portDS.localPriority` and `G.8275.defaultDS.localPriority` values (`128` on the
 integrated instance, `250` on the add-in cards) act as a G.8275.x BMCA tie-breaker: they are
