@@ -1,6 +1,6 @@
 [#guides-metallb-k3s-frr-k8s]
-= MetalLB on K3s (using FRR-K8s Mode)
-:revdate: 2026-05-04
+= Learning External Routes with MetalLB BGP
+:revdate: 2026-07-22
 :revnumber: 3.7
 :page-revdate: {revdate}
 :experimental:
@@ -16,20 +16,19 @@ endif::[]
 
 MetalLB is a load-balancer implementation for bare-metal Kubernetes clusters, using standard routing protocols.
 
-In this guide, we demonstrate how to deploy MetalLB in layer 3 FRR-K8s BGP mode.
+In this guide, we demonstrate how to use MetalLB to learn routes from external
+routers via BGP.
 
-== MetalLB on K3s (using FRR-K8s)
+== Learning External Routes with MetalLB BGP
 [NOTE]
 ====
-FRR-K8s is currently a Technology Preview feature. Community documentation of
+FRR-K8s is now the default backend for BGP. Community documentation of
 FRR-K8s is https://github.com/metallb/frr-k8s/[here].
 ====
 
-In this quick start, FRR-K8s mode is used.
-
 == Prerequisites
 
-* All prerequisites for FRR-K8s are the same as for <<guides-metallb-k3s-l3>>
+* All prerequisites here are the same as for <<guides-metallb-k3s-l3>>
 apart from the need for a free IP address.
 +
 [NOTE]
@@ -38,11 +37,11 @@ The example here does not include setting up a service so there is no need for
 an IP address. 
 ====
 
-* A K3s cluster where MetalLB is going to be deployed.
+* A K3s cluster with MetalLB already deployed.
 * Router(s) on the network that support the BGP protocol.
 
 
-== Configuration to Accept Incoming Route
+== Configuration to Accept Incoming Routes
 Out of the box MetalLB BGP advertises a Service IP address to all the BGP peers
 that are configured. These peers, which are usually routers, will receive a
 route for each Service IP address with a 32 bit network mask. When using FRR-K8s
@@ -55,29 +54,8 @@ through the default gateway.
 
 == Deployment
 
-We will be using the MetalLB Helm chart published as part of the SUSE Edge
-solution. Note that the FRR-K8s is a sub-chart of MetalLB, and to enable it,
-set `frrk8s.enabled` to `true`. FRR-K8s also requires some elevated
-privileges on the namespace. 
-
-[,bash,subs="attributes"]
-----
-kubectl create namespace metallb-system
-kubectl label namespace metallb-system pod-security.kubernetes.io/enforce=privileged
-kubectl label namespace metallb-system pod-security.kubernetes.io/audit=privileged
-kubectl label namespace metallb-system pod-security.kubernetes.io/warn=privileged
-helm install metallb \
-  oci://registry.suse.com/edge/charts/metallb \
-  --namespace metallb-system \
-  --set frrk8s.enabled=true --set frrk8s.external=false
-
-
-while ! kubectl wait --for condition=ready -n metallb-system $(kubectl get\
- pods -n metallb-system -l app.kubernetes.io/component=controller -o name)\
- --timeout=10s; do
- sleep 2
-done
-----
+MetalLB is deployed by default for L2 VIP functionality, so there is no need to
+install it separately.
 
 Verify that you have 4 pods in the `metallb-system` namespace and that they are
 all running without a problem: 
@@ -91,11 +69,10 @@ metallb-metallb-frr-k8s-9w7wl                             6/6     Running   0   
 metallb-metallb-frr-k8s-webhook-server-5d9d67ffd6-8jqnc   1/1     Running   1 (6s ago)   46s
 metallb-speaker-qx8bl                                     1/1     Running   0            46s
 ----
-At this point, the installation of MetalLB and FRR-K8s is complete.
 
 == Configuration
 
-. Create an `FRRConfiguration` for FRR-K8s:
+. Create an `FRRConfiguration` for the FRR-K8s based BGP backend:
 +
 [,bash]
 ----
