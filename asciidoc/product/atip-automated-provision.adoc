@@ -1998,6 +1998,405 @@ Once the file is created by joining the previous blocks, the following command m
 $ kubectl apply -f capi-provisioning-example.yaml
 ----
 
+[#add-telco-ptp]
+=== Precision Time Protocol (PTP)
+
+PTP synchronization is enabled at provisioning time in two steps: enabling the daemons
+in the EIB image and deploying the configuration files through Cluster API. Two
+provisioning models are documented, depending on the target platform:
+
+* <<add-telco-ptp-standard,Standard scenarios>>: a single `ptp4l` instance and, optionally,
+`phc2sys`. Covers <<ptp-scenario-oc,Scenario 1>> through
+<<ptp-scenario-bc-single-nic,Scenario 3>>.
+* <<add-telco-ptp-gnrd,GNR-D multi-NIC scenarios>>: several `ptp4l` instances, `ts2phc` and
+on-board DPLL setup, which require additional files and services. Covers
+<<ptp-scenario-bc-multi-nic-dpll,Scenario 4>> (and the SyncE-enhanced Scenario 5).
+
+[#add-telco-ptp-standard]
+==== Standard scenarios (single ptp4l + phc2sys)
+
+Since only the configuration files change between these PTP scenarios, this section
+provides a single generic template followed by the specific values for each scenario.
+
+*Enable the daemons in the EIB image*
+
+The `linuxptp` package is already part of the Telco package list (see
+xref:add-telco-feature-eib[Additional configuration for Telco workloads]). However,
+the `ptp4l` and `phc2sys` daemons are not enabled by default, so they must be added
+to the `systemd.enable` list of the same EIB image definition file:
+
+[,yaml,subs="attributes"]
+----
+operatingSystem:
+  systemd:
+    enable:
+      - ptp4l
+      - phc2sys
+  packages:
+    packageList:
+      - linuxptp      # already present in the Telco package list
+    sccRegistrationCode: $SCC_REGISTRATION_CODE
+----
+
+With the daemons enabled at image-build time, both services start automatically once
+their configuration files are present on the host.
+
+*Deploy the configuration files through Cluster API*
+
+The PTP configuration is deployed through a modified `RKE2ControlPlane` object that
+writes the `ptp4l` profile file and the two `/etc/sysconfig` files that control the
+`ptp4l` and `phc2sys` daemons. The rest of the object is the same as the one described
+in the xref:single-node-provision[provisioning section]; complete it with the other
+Cluster API objects and replace the placeholders with the values of the chosen
+scenario:
+
+[,yaml]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  replicas: 1
+  version: ${RKE2_VERSION}
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  registrationMethod: "control-plane-endpoint"
+  serverConfig:
+    cni: canal
+  agentConfig:
+    format: ignition
+    cisProfile: cis
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+            - name: rke2-preinstall.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=rke2-preinstall
+                Wants=network-online.target
+                Before=rke2-install.service
+                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStartPost=/bin/sh -c "umount /mnt"
+                [Install]
+                WantedBy=multi-user.target
+        storage:
+          files:
+            - path: ${PTP4L_CONF_PATH}
+              overwrite: true
+              contents:
+                inline: |
+                  ## Replace ${PTP4L_CONF_CONTENTS} with the ptp4l configuration content of the PTP scenario to deploy
+                  ${PTP4L_CONF_CONTENTS}
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /etc/sysconfig/ptp4l
+              overwrite: true
+              contents:
+                inline: |
+                  ## Path:           Network/LinuxPTP
+                  ## Description:    Precision Time Protocol (PTP): ptp4l settings
+                  ## Replace ${PTP4L_OPTIONS} with the ptp4l OPTIONS value of the PTP scenario to deploy
+                  OPTIONS="${PTP4L_OPTIONS}"
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /etc/sysconfig/phc2sys
+              overwrite: true
+              contents:
+                inline: |
+                  ## Path:           Network/LinuxPTP
+                  ## Description:    Precision Time Protocol (PTP): phc2sys settings
+                  ## Replace ${PHC2SYS_OPTIONS} with the phc2sys OPTIONS value of the PTP scenario to deploy
+                  OPTIONS="${PHC2SYS_OPTIONS}"
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+    kubelet:
+      extraArgs:
+        - provider-id=metal3://BAREMETALHOST_UUID
+    nodeName: "localhost.localdomain"
+----
+
+The placeholders are provided by each scenario:
+
+[cols="1,2"]
+|===
+| Placeholder | Description
+
+| `$\{PTP4L_CONF_PATH\}`
+| Path of the `ptp4l` profile file, for example `/etc/ptp4l-G.8275.1.conf`.
+
+| `$\{PTP4L_CONF_CONTENTS\}`
+| Contents of that `ptp4l` file, taken from the chosen scenario.
+
+| `$\{PTP4L_OPTIONS\}`
+| Value of the `OPTIONS=` line in `/etc/sysconfig/ptp4l`.
+
+| `$\{PHC2SYS_OPTIONS\}`
+| Value of the `OPTIONS=` line in `/etc/sysconfig/phc2sys`.
+|===
+
+For the specific values to substitute in each case, see the *CAPI automation* of the
+corresponding scenario in <<ptp-scenarios,the PTP scenarios>> of the PTP documentation.
+
+[NOTE]
+====
+This approach is convenient only if the hardware in the cluster is uniform and the
+same PTP configuration is needed on all hosts, interface name included. The Boundary
+Clock scenarios that rely on `ts2phc` or on-board DPLL routing require additional
+files and services in addition to the base example, which are described in the next section.
+====
+
+[#add-telco-ptp-gnrd]
+==== GNR-D multi-NIC scenarios (DPLL)
+
+The GNR-D Boundary Clock (<<ptp-scenario-bc-multi-nic-dpll,Scenario 4>>) cannot be
+described with a single `ptp4l` profile: it runs one `ptp4l` instance per PHC, aligns the
+add-in cards with `ts2phc`, wires the on-board DPLL at boot and forwards the Grandmaster
+parameters periodically. The provisioning therefore extends the base example with several
+configuration files, scripts and `systemd` units, all deployed through the same
+`RKE2ControlPlane` Ignition block. The contents of every file and unit are the ones listed in
+<<ptp-scenario-bc-multi-nic-dpll,Scenario 4>>.
+
+*Enable the daemons in the EIB image*
+
+The GNR-D units require a custom setup: a DPLL service, one templated `ptp4l` instance per
+PHC, and a Grandmaster forwarding timer. Consequently, you must deploy and enable them via
+the Ignition block below instead of using the EIB `systemd.enable` list. The EIB image only
+needs the `linuxptp` package, which provides the `ptp4l`, `ts2phc` and `pmc` binaries:
+
+[,yaml,subs="attributes"]
+----
+operatingSystem:
+  packages:
+    packageList:
+      - linuxptp      # already present in the Telco package list
+    sccRegistrationCode: $SCC_REGISTRATION_CODE
+----
+
+*Deploy the files and units through Cluster API*
+
+The `RKE2ControlPlane` object below deploys the GNR-D files and units. It follows the same
+approach as the standard example: the file contents are provided as placeholders and taken from
+<<ptp-scenario-bc-multi-nic-dpll,Scenario 4>>, while the `systemd` units (constant for this
+scenario) are shown inline. Complete it with the other Cluster API objects as in the standard
+example, and replace the placeholders with the values of the scenario:
+
+[,yaml]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  replicas: 1
+  version: ${RKE2_VERSION}
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  registrationMethod: "control-plane-endpoint"
+  serverConfig:
+    cni: canal
+  agentConfig:
+    format: ignition
+    cisProfile: cis
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+            - name: rke2-preinstall.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=rke2-preinstall
+                Wants=network-online.target
+                Before=rke2-install.service
+                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStartPost=/bin/sh -c "umount /mnt"
+                [Install]
+                WantedBy=multi-user.target
+            - name: gnrd-ptp-dpll-setup.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=GNR-D PTP DPLL and internal signal setup
+                Before=ts2phc.service ptp4l@nac.service ptp4l@aic1.service ptp4l@aic2.service
+                [Service]
+                Type=oneshot
+                RemainAfterExit=yes
+                ExecStart=/usr/local/bin/01-gnrd-startup-setup.sh
+                [Install]
+                WantedBy=multi-user.target
+            - name: ptp4l@.service
+              contents: |
+                [Unit]
+                Description=PTP Boundary Clock instance %i
+                After=gnrd-ptp-dpll-setup.service
+                Requires=gnrd-ptp-dpll-setup.service
+                [Service]
+                ExecStart=/usr/sbin/ptp4l -f /etc/ptp4l-%i.conf
+                [Install]
+                WantedBy=multi-user.target
+            - name: ptp4l@nac.service
+              enabled: true
+            - name: ptp4l@aic1.service
+              enabled: true
+            - name: ptp4l@aic2.service
+              enabled: true
+            - name: ts2phc.service
+              enabled: true
+            - name: ptp-forward-gm.service
+              contents: |
+                [Unit]
+                Description=Forward Grandmaster parameters to the add-in ptp4l instances
+                After=ptp4l@nac.service ptp4l@aic1.service ptp4l@aic2.service
+                [Service]
+                Type=oneshot
+                ExecStart=/usr/local/bin/04-ptp-forward-GM.sh
+            - name: ptp-forward-gm.timer
+              enabled: true
+              contents: |
+                [Unit]
+                Description=Refresh forwarded Grandmaster parameters
+                [Timer]
+                OnBootSec=2min
+                OnUnitActiveSec=5min
+                [Install]
+                WantedBy=timers.target
+        storage:
+          files:
+            - path: /usr/local/bin/01-gnrd-startup-setup.sh
+              mode: 0755
+              overwrite: true
+              contents:
+                inline: |
+                  ${GNRD_DPLL_SETUP_CONTENTS}
+            - path: /usr/local/bin/04-ptp-forward-GM.sh
+              mode: 0755
+              overwrite: true
+              contents:
+                inline: |
+                  ${GNRD_FORWARD_GM_CONTENTS}
+            - path: /etc/ts2phc-cf-all.cfg
+              mode: 0644
+              overwrite: true
+              contents:
+                inline: |
+                  ${TS2PHC_CONF_CONTENTS}
+            - path: /etc/sysconfig/ts2phc
+              mode: 0644
+              overwrite: true
+              contents:
+                inline: |
+                  OPTIONS="${TS2PHC_OPTIONS}"
+            - path: /etc/ptp4l-nac.conf
+              mode: 0644
+              overwrite: true
+              contents:
+                inline: |
+                  ${PTP4L_NAC_CONTENTS}
+            - path: /etc/ptp4l-aic1.conf
+              mode: 0644
+              overwrite: true
+              contents:
+                inline: |
+                  ${PTP4L_AIC1_CONTENTS}
+            - path: /etc/ptp4l-aic2.conf
+              mode: 0644
+              overwrite: true
+              contents:
+                inline: |
+                  ${PTP4L_AIC2_CONTENTS}
+    kubelet:
+      extraArgs:
+        - provider-id=metal3://BAREMETALHOST_UUID
+    nodeName: "localhost.localdomain"
+----
+
+The placeholders are provided by the GNR-D scenario:
+
+[cols="1,2"]
+|===
+| Placeholder | Description
+
+| `$\{GNRD_DPLL_SETUP_CONTENTS\}`
+| Contents of the DPLL boot-time setup script (`01-gnrd-startup-setup.sh`).
+
+| `$\{GNRD_FORWARD_GM_CONTENTS\}`
+| Contents of the Grandmaster forwarding script (`04-ptp-forward-GM.sh`).
+
+| `$\{TS2PHC_CONF_CONTENTS\}`
+| Contents of the `ts2phc` configuration file (`/etc/ts2phc-cf-all.cfg`).
+
+| `$\{TS2PHC_OPTIONS\}`
+| Value of the `OPTIONS=` line in `/etc/sysconfig/ts2phc`.
+
+| `$\{PTP4L_NAC_CONTENTS\}`
+| Contents of the integrated-controller `ptp4l` file (`/etc/ptp4l-nac.conf`).
+
+| `$\{PTP4L_AIC1_CONTENTS\}`
+| Contents of the add-in card 1 `ptp4l` file (`/etc/ptp4l-aic1.conf`).
+
+| `$\{PTP4L_AIC2_CONTENTS\}`
+| Contents of the add-in card 2 `ptp4l` file (`/etc/ptp4l-aic2.conf`).
+|===
+
+For the specific values to substitute, see the *CAPI automation* of
+<<ptp-scenario-bc-multi-nic-dpll,Scenario 4>>.
+
+[NOTE]
+====
+The `ptp4l@.service` template is deployed without `enabled`; the instances are created by
+enabling `ptp4l@nac`, `ptp4l@aic1` and `ptp4l@aic2`. `ptp-forward-gm.service` is triggered by
+its timer, so only the timer is enabled. `ts2phc.service` is shipped by the `linuxptp` package
+and reads `/etc/sysconfig/ts2phc`; the boot ordering is enforced by the `Before=` directive of
+`gnrd-ptp-dpll-setup.service`. Adjust the device names (`em5`, `ptpN`, `p1p1`, `p2p1`) and the
+number of add-in cards to match the target hardware.
+====
+
 [#atip-private-registry]
 == Private registry
 

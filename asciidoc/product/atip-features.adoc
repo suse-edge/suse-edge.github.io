@@ -14,6 +14,11 @@ ifdef::env-github[]
 :warning-caption: :warning:
 endif::[]
 
+// TEMP (preview only): resolve images locally in the AsciiDoc preview. REMOVE before commit.
+ifndef::env-github[]
+:imagesdir: ../images/
+endif::[]
+
 This section documents and explains the configuration of Telco-specific features on clusters deployed via SUSE Telco Cloud.
 
 The directed network provisioning deployment method is used, as described in the <<atip-automated-provisioning,Automated Provisioning>> section.
@@ -1765,9 +1770,137 @@ For more information about this, please check https://documentation.suse.com/clo
 [#ptp-configuration]
 == Precision Time Protocol
 
-Precision Time Protocol (PTP) is a network protocol developed by the Institute of Electrical and Electronics Engineers (IEEE) to enable sub-microsecond time synchronization in a computer network. Since its inception and for a couple of decades now, PTP has been in use in many industries. It has recently seen a growing adoption in the telecommunication networks as a vital element to 5G networks. While being a relatively simple protocol, its configuration can change significantly depending on the application. For this reason, multiple profiles have been defined and standardized.
+[#ptp-introduction]
+=== Introduction
 
-In this section, only telco-specific profiles will be covered. Consequently time-stamping capability and a PTP hardware clock (PHC) in the NIC will be assumed. Nowadays, all telco-grade network adapters come with PTP support in hardware, but you can verify such capabilities with the following command:
+Precision Time Protocol (PTP), defined by the IEEE 1588 standard, distributes
+highly accurate time across a packet network. When the network interface cards
+(NICs) timestamp PTP packets in hardware, it reaches sub-microsecond accuracy,
+well beyond what NTP can offer. In telco environments PTP is a core building
+block of 5G radio access networks (RAN), where the radio units require tight
+phase and time alignment to transmit correctly. SUSE Telco Cloud implements PTP
+through the `linuxptp` package and targets the telco profiles ITU-T G.8275.1 and
+ITU-T G.8275.2 described below.
+
+A PTP domain is built from a small set of clock roles:
+
+* *Grandmaster (GM)*: the primary source of time for the domain. It is normally
+locked to a Primary Reference Time Clock (PRTC), usually driven by a GNSS
+receiver, and transmits time towards the downstream nodes. The accuracy of the GM
+sets the quality ceiling for the whole domain.
+* *Ordinary Clock (OC)*: an end node with a single PTP port. In a telco deployment
+it acts as a Time Receiver, disciplining its local clock from an upstream Grand
+Master or Boundary Clock. A compute node running a radio workload is a typical OC.
+* *Boundary Clock (BC)*: a multi-port node that receives time on one port (Time
+Receiver) and regenerates it towards other nodes on its remaining ports (Time
+Transmitter). Inserting Boundary Clocks along the path shortens the chain between
+each OC and the reference, limiting the error the network would otherwise
+accumulate hop after hop.
+
+The distinction between an Ordinary Clock and a Boundary Clock is central when
+designing the topology:
+
+* An *Ordinary Clock* has a *single* PTP port and sits at the edge of the domain.
+It only consumes time to discipline its own clock and never forwards time to other
+nodes.
+* A *Boundary Clock* has *multiple* PTP ports. It consumes time on its Time
+Receiver port and *regenerates* it on its Time Transmitter ports, terminating the
+upstream timing chain and starting a new one downstream. This regeneration is what
+prevents error from accumulating across a long chain of nodes.
+
+The following hardware and signalling elements support these roles:
+
+* *PTP Hardware Clock (PHC)*: the clock built into the NIC that PTP actually
+synchronizes. Aligning the operating system clock to the PHC is a separate step
+handled by a dedicated daemon.
+* *Synchronous Ethernet (SyncE)*: physical-layer frequency synchronization. PTP
+carries phase and time inside packets, whereas SyncE recovers a stable frequency
+directly from the Ethernet signal. SyncE is an *optional enhancement*: PTP on its
+own already delivers phase and time, and SyncE is added only when a node needs
+stronger frequency stability and longer holdover should the PTP time source be
+temporarily lost.
+* *Digital Phase-Locked Loop (DPLL)*: a hardware timing block that locks onto a
+reference signal and filters it to output a stable, clean clock. It is what
+disciplines the PHC from the available inputs and, on platforms with more than one
+NIC, keeps the different NIC clocks aligned.
+
+On each node these functions are carried out by the `linuxptp` daemons: `ptp4l`
+runs the PTP protocol and disciplines the PHC, and `phc2sys` aligns the system
+clock to the PHC. On a Grandmaster, `ts2phc` additionally steers the PHC from the
+GNSS reference. Their roles and installation are covered in <<ptp-prerequisites>>.
+
+The hardware clock itself is handled by the Linux kernel DPLL subsystem together
+with the network driver. The degree of timing control, and how timing is
+distributed within a multi-NIC node, depends on where the manageable DPLL sits:
+
+* *NIC with an integrated DPLL*: the DPLL is embedded in the NIC and is configured
+through the Linux DPLL subsystem. It selects and locks to the chosen reference and
+disciplines the PHC, giving full control over frequency and holdover.
+* *NIC without an integrated DPLL*: the NIC exposes no configurable DPLL. `ptp4l`
+disciplines the PHC directly, and the subsystem can at most report the lock status
+(read-only); advanced frequency handling then relies on an external timing source.
+* *On-board DPLL shared across several NICs*: the DPLL is not embedded in a single
+NIC but sits on the platform, external to the NICs. It disciplines and keeps the
+PHCs of several NICs aligned from a common reference, so every NIC in the node
+shares the same time. This arrangement is used on multi-NIC platforms that
+distribute timing internally instead of relying on external cabling.
+
+.PTP software on a node whose NIC integrates a manageable DPLL
+image::product-atip-ptp-node-with-dpll.png[Node whose NIC integrates a manageable DPLL,scaledwidth=100%]
+
+.PTP software on a node whose NIC has no manageable DPLL
+image::product-atip-ptp-node-without-dpll.png[Node whose NIC has no manageable DPLL,scaledwidth=100%]
+
+.PTP software on a node with an on-board DPLL shared across NICs
+image::product-atip-ptp-node-onboard-dpll.png[Node with an on-board DPLL shared across NICs,scaledwidth=100%]
+
+Telco networks standardize on two ITU-T profiles, which differ mainly in the
+transport used and in how much of the underlying network must be PTP-aware:
+
+* *ITU-T G.8275.1* (full timing support): runs directly over Ethernet (Layer 2)
+using multicast. Every node along the path must be PTP-aware and act as a Boundary
+Clock, which yields the highest accuracy. Unless stated otherwise, the scenarios
+in this guide use this profile.
+* *ITU-T G.8275.2* (partial timing support): runs over IP (Layer 3) using unicast.
+Intermediate nodes are not required to support PTP, so timing can cross network
+segments that are not timing-aware, at the cost of lower accuracy.
+
+The following figures show time distribution with PTP only and with SyncE added
+as an optional frequency enhancement. In both cases the Grandmaster derives its
+reference from a PRTC/GNSS source and the Boundary Clock regenerates timing
+towards the endpoints.
+
+.Time distribution with PTP only
+image::product-atip-ptp-overview.png[PTP-only distribution with Grandmaster, Boundary Clock and Ordinary Clocks,scaledwidth=100%]
+
+.Time and frequency distribution with PTP and SyncE (optional enhancement)
+image::product-atip-ptp-synce-overview.png[PTP and SyncE distribution with Grandmaster, Boundary Clock and Ordinary Clocks,scaledwidth=100%]
+
+[#ptp-scenarios]
+The following scenarios are covered in this guide. Each scenario includes a
+link to its Cluster API (CAPI) automation.
+
+* <<ptp-scenario-oc,Scenario 1 - Ordinary Clock (PTP-only)>>
+* <<ptp-scenario-oc-synce,Scenario 2 - Ordinary Clock (PTP & SyncE)>>
+* <<ptp-scenario-bc-single-nic,Scenario 3 - Boundary Clock (PTP-only) with Multiport Single NIC including propagation to Ordinary Clock server>>
+* <<ptp-scenario-bc-multi-nic-dpll,Scenario 4 - Boundary Clock (PTP-only) Multi-NIC with internal timing module (DPLL GNR-D based)>>
+* <<ptp-scenario-bc-synce-multi-nic-dpll,BC with PTP + SyncE + propagation (multi-NIC, DPLL)>>
+
+[NOTE]
+====
+Only <<ptp-scenario-oc,Scenario 1>> shows the configuration for both telco profiles,
+ITU-T G.8275.1 and ITU-T G.8275.2. The remaining scenarios show only the ITU-T G.8275.1
+case for brevity: the deployment is identical and only the `ptp4l` configuration file
+changes between the two profiles.
+====
+
+[#ptp-prerequisites]
+=== Prerequisites
+
+This guide covers only telco-specific profiles, so hardware time-stamping and a PTP
+hardware clock (PHC) in the NIC are assumed. Telco-grade network adapters provide
+PTP support in hardware; you can confirm the capabilities of a given interface with
+`ethtool -T`:
 
 [,console]
 ----
@@ -1789,22 +1922,33 @@ Hardware Receive Filter Modes:
         all
 ----
 
-Replace `p1p1` with name of the interface to be used for PTP.
+Check for the `hardware-transmit`, `hardware-receive` and `hardware-raw-clock`
+capabilities and a `PTP Hardware Clock` index of 0 or higher (a value of `-1` means
+the interface has no PHC). Replace `p1p1` with the interface you intend to use for
+PTP.
 
-The following sections will provide guidance on how to install and configure PTP on SUSE Telco Cloud specifically, but familiarity with basic PTP concepts is expected. For a brief overview of PTP and the implementation included in SUSE Telco Cloud, refer to the https://documentation.suse.com/sles/15-SP7/html/SLES-all/cha-tuning-ptp.html[SLES Precision Time Protocol documentation].
+PTP is provided by the `linuxptp` package. It ships three user-space programs —
+`ptp4l`, `phc2sys` and `ts2phc` — that run as long-running daemons managed by
+`systemd` (a dedicated service each: `ptp4l.service`, `phc2sys.service`, and
+`ts2phc.service`). Collectively, they execute the protocol and keep the clocks
+synchronized:
 
-=== Install PTP software components
+* `ptp4l`: the PTP daemon. It runs the IEEE 1588 protocol on the configured
+interfaces, applies the Best Master Clock Algorithm (BMCA) to determine the role
+of each port, and disciplines the NIC's PHC. A single `ptp4l` instance can manage
+several ports, which is what allows a node to act as a Boundary Clock.
+* `phc2sys`: synchronizes two clocks. It is typically used to align the system
+(operating system) clock to the PHC that `ptp4l` keeps synchronized, so that the
+system time also follows PTP.
+* `ts2phc`: "time stamp to PHC". It disciplines the PHC from an external time
+signal, such as the PPS delivered by a GNSS receiver. It is used on a Grandmaster
+and to keep multiple PHCs aligned within the same node.
 
-In SUSE Telco Cloud, the PTP implementation is provided by the `linuxptp` package, which includes two components:
-
-- `ptp4l`: a daemon that controls the PHC on the NIC and runs the PTP protocol
-- `phc2sys`: a daemon that keeps the system clock in sync with the PTP-synchronized PHC on the NIC
-
-Both daemons are required for the system synchronization to fully work and must be correctly configured according to your setup. This is covered in <<ptp-telco-config>>.
-
-The easiest and best way to integrate PTP in your downstream cluster is to add the `linuxptp` package under `packageList` in the Edge Image Builder (EIB) definition file. This way the PTP control plane software will be installed automatically during the cluster provisioning. See the xref:../quickstart/eib.adoc#eib-configuring-rpm-packages[EIB documentation] for more information on installing packages.
-
-Below find a sample EIB manifest with `linuxptp`:
+The recommended way to install PTP on a downstream cluster is to add the
+`linuxptp` package to the `packageList` of the Edge Image Builder (EIB) definition
+file, so that it is deployed automatically during provisioning. See the
+xref:../quickstart/eib.adoc#eib-configuring-rpm-packages[EIB documentation] for
+more information on installing packages.
 
 [,yaml,subs="attributes"]
 ----
@@ -1815,76 +1959,128 @@ image:
   baseImage: {micro-base-rt-image-raw}
   outputImageName: eibimage-slmicrort-telco.raw
 operatingSystem:
-  time:
-    timezone: America/New_York
-  kernelArgs:
-    - ignition.platform.id=openstack
   systemd:
-    disable:
-      - rebootmgr
-      - transactional-update.timer
-      - transactional-update-cleanup.timer
-      - fstrim
-      - time-sync.target
     enable:
       - ptp4l
       - phc2sys
-  users:
-    - username: root
-      encryptedPassword: $ROOT_PASSWORD
   packages:
     packageList:
-      - jq            # Non Telco specific - category: testing/utils
-      - dpdk          # TelCo Core-Network UserPlane (5G UPF) and RAN UserPlane (gNB: DU and CU-UP) - category: runtime
-      - dpdk-tools    # TelCo Core-Network UserPlane (5G UPF) and RAN UserPlane (gNB: DU and CU-UP) - category: testing/utils
-      - libdpdk-25    # TelCo Core-Network UserPlane (5G UPF) and RAN UserPlane (gNB: DU and CU-UP) - category: runtime
-      - pf-bb-config  # TelCo RAN (gNB: DU) - category: config.
-      - open-iscsi    # Non Telco specific (required by SUSE Storage/Longhorn) - category: runtime
-      - tuned         # Non Telco specific (linux tuning) - category: config.
-      - cpupower      # Non Telco specific (linux tuning - CPU power related settings) - category: config.
-      - rt-tests      # Non Telco specific (RT scheduler-latency testing) - category: testing/utils
-      - linuxptp      # TelCo RAN; time sync (gNB: DU) - category: runtime
-      - synce4l       # TelCo RAN; time sync (gNN: DU) - category: runtime
-      - pciutils      # Non Telco specific (provides "lspci" command) - category: testing/utils
-      - numactl       # Non Telco specific (provides "numatcl" command) - category: testing/utils
+      - linuxptp
     sccRegistrationCode: $SCC_REGISTRATION_CODE
 ----
 
 [NOTE]
 ====
-The `linuxptp` package included in SUSE Telco Cloud does not enable `ptp4l` and `phc2sys` by default. If their system-specific configuration files are deployed at provisioning time (see <<ptp-capi>>), they should be enabled. Do so by adding them to the `systemd` section of the manifest, as in the example above.
+The `linuxptp` package does not enable `ptp4l`, `phc2sys`, or `ts2phc` by default.
+After deploying the configuration files, use the `systemd` section of the manifest
+to enable the required node daemons (see the scenarios below).
 ====
 
-Follow the usual process to build the image as described in the xref:../quickstart/eib.adoc#eib-how-to-build-image[EIB Documentation] and use it to deploy your cluster. If you are new to EIB, start from xref:../components/edge-image-builder.adoc#components-eib[] instead.
+Finally, the PTP profile in use determines whether the network switches between
+nodes must be configured as PTP-aware devices:
 
-[#ptp-telco-config]
-=== Configure PTP for telco deployments
+* *ITU-T G.8275.1 (full timing support)*: runs directly over Ethernet (Layer 2)
+using multicast. Every node along the path must be PTP-aware and act as a Boundary
+Clock, which yields the highest accuracy; the intervening switches must therefore be
+configured for PTP. Unless stated otherwise, the scenarios in this guide use this
+profile.
+* *ITU-T G.8275.2 (partial timing support)*: runs over IP (Layer 3) using unicast.
+Intermediate nodes are not required to support PTP, so timing can cross network
+segments that are not timing-aware and the switches do not need PTP configuration,
+at the cost of lower accuracy.
 
-Many telco applications require strict phase and time synchronization with little deviance, which resulted in a definition of two telco-oriented profiles: the ITU-T G.8275.1 and ITU-T G.8275.2. They both have a high rate of sync messages and other distinctive traits, such as the use of an alternative Best Master Clock Algorithm (BMCA). Such behavior mandates specific settings in the configuration file consumed by `ptp4l`, provided in the following sections as a reference.
+[#ptp-scenario-oc]
+=== Scenario 1 - Ordinary Clock (PTP-only)
 
-[NOTE]
+*Explanation*
+
+This is the simplest PTP deployment: a single cluster node consumes time from an
+upstream source and disciplines its local clocks, without ever forwarding time to
+another node. The node runs as an Ordinary Clock (OC) with a single PTP port in the
+Time Receiver role.
+
+On the OC node the timing is handled entirely by the `linuxptp` daemons, regardless
+of the profile in use. No DPLL configuration or `ts2phc` is required, because the
+node uses a single NIC and `ptp4l` disciplines its PHC directly:
+
+* `ptp4l` runs the PTP protocol on the receiving interface. The Best Master Clock
+Algorithm (BMCA) selects the upstream node as the master, the local port transitions
+to the `SLAVE` state and `ptp4l` disciplines the NIC's PTP Hardware Clock (PHC).
+Setting `clientOnly 1` restricts the node to the Time Receiver role, so it can never
+be selected as a master.
+* `phc2sys` aligns the system clock (`CLOCK_REALTIME`) to the PHC that `ptp4l` keeps
+synchronized, so the operating-system time also follows PTP.
+
+The scenario can be implemented with either telco profile. They differ in transport
+and in what the intervening network must provide, and are documented below as two
+independent models:
+
+* *<<ptp-scenario-oc-model1,Model 1 — ITU-T G.8275.1>>* (Layer 2 multicast): use it
+when every hop between the master and the OC is PTP-aware. It provides the highest
+accuracy and is the default for telco deployments.
+* *<<ptp-scenario-oc-model2,Model 2 — ITU-T G.8275.2>>* (Layer 3 unicast): use it
+when the OC must reach the master across a network that is not PTP-aware, at the cost
+of lower accuracy.
+
+[IMPORTANT]
 ====
-* Both sections only cover the case of an ordinary clock in Time Receiver configuration.
-* Any such profile must be used in a well-planned PTP infrastructure.
-* Your specific PTP network may require additional configuration tuning, make sure to review and adapt the provided examples if needed.
+An Ordinary Clock runs a single PTP profile at a time. The two models are mutually
+exclusive: configure only one of them on a given node. Create only the configuration
+file of the chosen profile and reference only that file in `/etc/sysconfig/ptp4l`. Do
+not create both `/etc/ptp4l-G.8275.1.conf` and `/etc/ptp4l-G.8275.2.conf`, and never
+pass both files to the `OPTIONS=` line.
 ====
 
-==== PTP profile ITU-T G.8275.1
+[[ptp-scenario-oc-model1]]
+*Model 1 — ITU-T G.8275.1 (Layer 2 multicast)*
 
-The G.8275.1 profile has the following specifics:
+G.8275.1 runs directly over Ethernet and addresses its messages to the
+non-forwardable multicast MAC `01:80:C2:00:00:0E`, which standard bridges do not
+forward, so every device on the path must terminate and regenerate PTP. The
+components are:
 
-* Runs directly on Ethernet and requires full network support (adjacent nodes/switches must support PTP).
-* The default domain setting is 24.
-* Dataset comparison is based on the G.8275.x algorithm and its `localPriority` values after `priority2`.
+* *Grandmaster (GM)*: the upstream reference for the PTP domain (domain `24` for
+G.8275.1), typically locked to a GNSS/PRTC source.
+* *PTP-aware switch*: acts as a Boundary Clock. Its port towards the GM is a Time
+Receiver and its port towards the OC is a Time Transmitter. Both ports must have PTP
+enabled.
+* *Ordinary Clock (OC)*: the cluster node, receiving time on its single PTP port.
 
-Copy the following content to a file named `/etc/ptp4l-G.8275.1.conf`:
+.Ordinary Clock (OC) — G.8275.1 (Layer 2 multicast)
+image::product-atip-ptp-scenario-oc.png[Scenario 1 - Ordinary Clock (PTP-only) with G.8275.1,scaledwidth=100%]
 
+Configure the node as follows:
+
+. Identify the PHC index of the interface used for PTP (here `em2`). The
+`PTP Hardware Clock` value is the `/dev/ptpN` device that `ptp4l` disciplines and
+that `phc2sys` reads as its source:
++
+[,console]
+----
+# ethtool -T em2
+Time stamping parameters for em2:
+Capabilities:
+        hardware-transmit
+        hardware-receive
+        hardware-raw-clock
+PTP Hardware Clock: 1
+...
+----
++
+In this example the PHC of `em2` is `/dev/ptp1`.
+
+. Create the `ptp4l` configuration file `/etc/ptp4l-G.8275.1.conf`. The interface is
+declared as a section (`[em2]`), so the daemon does not need the `-i` flag:
++
+[#ptp-conf-oc-g8275-1]
+.Ordinary Clock configuration — ITU-T G.8275.1
+====
 [source,]
 ----
-# Telecom G.8275.1 example configuration
+# Telecom G.8275.1 — Ordinary Clock (Time Receiver)
 [global]
 domainNumber                    24
-priority2			255
+priority2                       255
 dataset_comparison              G.8275.x
 G.8275.portDS.localPriority     128
 G.8275.defaultDS.localPriority  128
@@ -1892,136 +2088,308 @@ maxStepsRemoved                 255
 logAnnounceInterval             -3
 logSyncInterval                 -4
 logMinDelayReqInterval          -4
-announceReceiptTimeout		3
-serverOnly                      0
+announceReceiptTimeout          3
+clientOnly                      1
 ptp_dst_mac                     01:80:C2:00:00:0E
 network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l"
+uds_address                     /var/run/ptp4l
+uds_ro_address                  /var/run/ptp4lro
+
+[em2]
 ----
+====
++
+The `ptp_dst_mac` value is fixed for G.8275.1: it is the non-forwardable multicast
+address `01:80:C2:00:00:0E` that confines PTP to a single link and is the reason why
+every device on the path must be PTP-aware. The `uds_address` exposes a management
+socket that `phc2sys` uses to follow the port state.
 
-Once the file has been created, it must be referenced in `/etc/sysconfig/ptp4l` for the daemon to start correctly. This can be done by changing the `OPTIONS=` line to:
-
+. Point `ptp4l` at this file in `/etc/sysconfig/ptp4l`:
++
 [source,]
 ----
-OPTIONS="-f /etc/ptp4l-G.8275.1.conf -i $IFNAME --message_tag ptp-8275.1"
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf"
 ----
 
-More precisely:
-
-- `-f` requires the file name of the configuration file to use; `/etc/ptp4l-G.8275.1.conf` in this case
-- `-i` requires the name of the interface to use, replace `$IFNAME` with a real interface name.
-- `--message_tag` allows to better identify the ptp4l output in the system logs and is optional.
-
-Once the steps above are complete, the `ptp4l` daemon must be (re)started:
-
-[,console]
-----
-# systemctl restart ptp4l
-----
-
-Check the synchronization status by observing the logs with:
-
-[,console]
-----
-# journalctl -e -u ptp4l
-----
-
-==== PTP profile ITU-T G.8275.2
-
-The G.8275.2 profile has the following specifics:
-
-* Runs on IP and does not require full network support (adjacent nodes/switches may not support PTP).
-* The default domain setting is 44.
-* Dataset comparison is based on the G.8275.x algorithm and its `localPriority` values after `priority2`.
-
-Copy the following content to a file named `/etc/ptp4l-G.8275.2.conf`:
-
+. Configure `phc2sys` in `/etc/sysconfig/phc2sys` to discipline the system clock
+from the PHC of the PTP interface (`/dev/ptp1`). The `--uds_address` and
+`--domainNumber` values must match the `ptp4l` configuration:
++
 [source,]
 ----
-# Telecom G.8275.2 example configuration
+OPTIONS="-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 24"
+----
++
+`-s /dev/ptp1` selects the PHC as the source clock, `-w` waits for `ptp4l` to
+synchronize before stepping the system clock, and `-m` prints the servo status to
+the log.
+
+. Enable and start both services:
++
+[,console]
+----
+# systemctl enable --now ptp4l phc2sys
+----
+
+. Verify that `ptp4l` has locked to the upstream master. The port moves to `SLAVE`
+and the reported offset (`rms`) converges to a low, stable value:
++
+[,console]
+----
+# journalctl -u ptp4l -f
+ptp4l[...]: "ptp4l" port 1 (em2): UNCALIBRATED to SLAVE on MASTER_CLOCK_SELECTED
+ptp4l[...]: "ptp4l" rms 1502498567 max 8499416372 freq  -3977 +/- 43609 delay  11 +/- 607
+ptp4l[...]: "ptp4l" rms   40 max   99 freq +10129 +/-   30 delay 211 +/-   3
+ptp4l[...]: "ptp4l" rms    7 max   15 freq +10125 +/-   13 delay 211 +/-   2
+ptp4l[...]: "ptp4l" rms    6 max   16 freq +10118 +/-   12 delay 213 +/-   2
+----
+
+. Verify that `phc2sys` is disciplining the system clock. The servo state progresses
+from `s0` (unlocked) through `s1` (initial step) to `s2` (locked), and the offset
+settles around zero:
++
+[,console]
+----
+# journalctl -u phc2sys -f
+phc2sys[...]: CLOCK_REALTIME phc offset 45583145631 s0 freq   -1673 delay   0
+phc2sys[...]: CLOCK_REALTIME phc offset 45583157513 s1 freq  +10207 delay   0
+phc2sys[...]: CLOCK_REALTIME phc offset          4 s2 freq  +10211 delay   0
+phc2sys[...]: CLOCK_REALTIME phc offset         13 s2 freq  +10221 delay   0
+----
++
+A steady `s2` state with a small offset confirms that the node is locked and the
+system clock is following PTP.
+
+[[ptp-scenario-oc-model2]]
+*Model 2 — ITU-T G.8275.2 (Layer 3 unicast)*
+
+G.8275.2 runs over IP (Layer 3) using unicast: the OC exchanges messages directly
+with the master's IP address, so the intervening network does not need to be
+PTP-aware and no PTP-enabled switch is required. The components are:
+
+* *Master (GM or Boundary Clock)*: the upstream master, reachable by IP on the
+G.8275.2 domain (domain `44`).
+* *IP network*: a standard routed or switched network. It forwards the unicast PTP
+packets without any PTP configuration.
+* *Ordinary Clock (OC)*: the cluster node, sending unicast requests to the master
+from its single PTP port.
+
+.Ordinary Clock (OC) — G.8275.2 (Layer 3 unicast)
+image::product-atip-ptp-scenario-oc-g8275-2.png[Scenario 1 - Ordinary Clock (PTP-only) with G.8275.2,scaledwidth=100%]
+
+Configure the node as follows:
+
+. Identify the PHC of the PTP interface as in Model 1 (`ethtool -T em2`); in this
+example the PHC of `em2` is `/dev/ptp1`.
+
+. Create the `ptp4l` configuration file `/etc/ptp4l-G.8275.2.conf`. There is no
+`ptp_dst_mac`, because the master is reached by IP through the `unicast_master_table`.
+Replace `$MASTER_IP_ADDRESS` with the IP address of the upstream master:
++
+[#ptp-conf-oc-g8275-2]
+.Ordinary Clock configuration — ITU-T G.8275.2
+====
+[source,]
+----
+# Telecom G.8275.2 — Ordinary Clock (Time Receiver)
 [global]
 domainNumber                    44
-priority2			255
+priority2                       255
 dataset_comparison              G.8275.x
 G.8275.portDS.localPriority     128
 G.8275.defaultDS.localPriority  128
 maxStepsRemoved                 255
 logAnnounceInterval             0
-serverOnly                      0
+logSyncInterval                 -5
+logMinDelayReqInterval          -4
+announceReceiptTimeout          2
+clientOnly                      1
+network_transport               UDPv4
 hybrid_e2e                      1
 inhibit_multicast_service       1
 unicast_listen                  1
 unicast_req_duration            60
-logSyncInterval                 -5
-logMinDelayReqInterval          -4
-announceReceiptTimeout		2
-#
-# Customize the following for slave operation:
-#
+message_tag                     "ptp4l"
+uds_address                     /var/run/ptp4l
+uds_ro_address                  /var/run/ptp4lro
+
 [unicast_master_table]
 table_id                        1
 logQueryInterval                2
-UDPv4                           $PEER_IP_ADDRESS
-[$IFNAME]
+UDPv4                           $MASTER_IP_ADDRESS
+
+[em2]
 unicast_master_table            1
 ----
-
-Make sure to replace the following placeholders:
-
-- `$PEER_IP_ADDRESS` - the IP address of the next PTP node to communicate with, such as the master or boundary clock that will provide synchronization.
-- `$IFNAME` - tells `ptp4l` what interface to use for PTP.
-
-Once the file has been created, it must be referenced, along with the name of the interface to use for PTP, in `/etc/sysconfig/ptp4l` for the daemon to start correctly. This can be done by changing the `OPTIONS=` line to:
-
-[,shell]
-----
-OPTIONS="-f /etc/ptp4l-G.8275.2.conf --message_tag ptp-8275.2"
-----
-
-More precisely:
-
-- `-f` requires the file name of the configuration file to use. In this case, it is `/etc/ptp4l-G.8275.2.conf`.
-- `--message_tag` allows to better identify the ptp4l output in the system logs and is optional.
-
-Once the steps above are complete, the `ptp4l` daemon must be (re)started:
-
-[,console]
-----
-# systemctl restart ptp4l
-----
-
-Check the synchronization status by observing the logs with:
-
-[,console]
-----
-# journalctl -e -u ptp4l
-----
-
-[#ptp-bc-setup]
-==== PTP configuration of a Boundary Clock
-
-The previous sections covered the configuration of an Ordinary Clock, but Telco deployments can require the node to act as a Boundary Clock. In such a scenario the reference time must be propagated from a Grand Master to one or more Time Receivers downstream, which requires an NIC with two or more ports. In this case one port will take the Time Receiver role, that is driving the updates of the PTP Hardware Clock (PHC) on the NIC, while the remaining ones will work as Time Transmitters. A single instance of `ptp4l` is sufficient for a single multi-port NIC, but each kernel interface involved in the time distribution must be provided, as part of its configuration. For example, update the  `/etc/sysconfig/ptp4l` file to include four ports, just replace the variables with actual interface names or adjust it as needed:
-
-[,shell]
-----
-OPTIONS="-f /etc/ptp4l-G.8275.1.conf --message_tag ptp-8275.1 -i $IFNAME1 -i $IFNAME2 -i $IFNAME3 -i $IFNAME4"
-----
-[NOTE]
-====
-There is no need to set `clock_type` to `BC`, as it will be automatically implied if more than one port is provided.
 ====
 
-Once done, the `ptp4l` daemon can be (re)started, with:
-
-[,console]
-----
-# systemctl restart ptp4l
-----
-
-Without any specific port configuration, `ptp4l` will run the BMCA to determine through which port the GM can be reached. If a static configuration is preferred, append a section for each port with the prescribed role in the configuration file. For example:
-
+. Point `ptp4l` at this file in `/etc/sysconfig/ptp4l`:
++
 [source,]
 ----
-# Telecom G.8275.1 example configuration
+OPTIONS="-f /etc/ptp4l-G.8275.2.conf"
+----
+
+. Configure `phc2sys` in `/etc/sysconfig/phc2sys` with the G.8275.2 domain number
+(`44`); the source PHC and `--uds_address` are unchanged:
++
+[source,]
+----
+OPTIONS="-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 44"
+----
+
+. Enable and start both services:
++
+[,console]
+----
+# systemctl enable --now ptp4l phc2sys
+----
+
+. Verify synchronization as in Model 1: `ptp4l` moves the port to `SLAVE`
+(`journalctl -u ptp4l`) and `phc2sys` reaches the `s2` (locked) state with an offset
+near zero (`journalctl -u phc2sys`).
+
+*CAPI automation*
+
+To deploy this scenario using the automated provisioning workflow, use the generic
+Cluster API template described in <<add-telco-ptp,Fully automated directed network
+provisioning>>, overriding its placeholders with the values for this scenario shown
+below.
+
+.Model 1 — ITU-T G.8275.1
+[cols="1,2"]
+|===
+| Placeholder | Value
+
+| `$\{PTP4L_CONF_PATH\}`
+| `/etc/ptp4l-G.8275.1.conf`
+
+| `$\{PTP4L_CONF_CONTENTS\}`
+| Copy the content from <<ptp-conf-oc-g8275-1,the G.8275.1 configuration above>>.
+
+| `$\{PTP4L_OPTIONS\}`
+| `-f /etc/ptp4l-G.8275.1.conf`
+
+| `$\{PHC2SYS_OPTIONS\}`
+| `-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 24`
+|===
+
+.Model 2 — ITU-T G.8275.2
+[cols="1,2"]
+|===
+| Placeholder | Value
+
+| `$\{PTP4L_CONF_PATH\}`
+| `/etc/ptp4l-G.8275.2.conf`
+
+| `$\{PTP4L_CONF_CONTENTS\}`
+| Copy the content from <<ptp-conf-oc-g8275-2,the G.8275.2 configuration above>>.
+
+| `$\{PTP4L_OPTIONS\}`
+| `-f /etc/ptp4l-G.8275.2.conf`
+
+| `$\{PHC2SYS_OPTIONS\}`
+| `-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 44`
+|===
+
+[#ptp-scenario-oc-synce]
+=== Scenario 2 - Ordinary Clock (PTP & SyncE)
+
+*Explanation*
+
+// TODO
+
+*Diagram*
+
+// TODO: image::<path>[Scenario 2 - Ordinary Clock (PTP & SyncE)]
+
+*Configuration*
+
+// TODO
+
+*CAPI automation*: see <<add-telco-ptp,Fully automated directed network provisioning>>.
+
+[#ptp-scenario-bc-single-nic]
+=== Scenario 3 - Boundary Clock (PTP-only) with Multiport Single NIC including propagation to Ordinary Clock server
+
+*Explanation*
+
+This scenario extends the timing chain with a Boundary Clock (BC) that regenerates
+PTP towards a downstream Ordinary Clock (OC), entirely over ITU-T G.8275.1 (PTP-only,
+Layer 2). The BC uses a single multi-port NIC: one `ptp4l` instance manages several
+ports on the same NIC, so neither `ts2phc` nor DPLL routing is required (unlike the
+multi-NIC scenarios).
+
+The scenario involves the following components:
+
+* *Grandmaster (GM)*: the reference for the PTP domain (domain `24`), normally locked
+to a GNSS/PRTC source (the test bench used here has no GNSS, hence the degraded
+`gm.ClockClass` shown later). It sends time on the upstream segment.
+* *PTP-aware switch*: acts as a Boundary Clock (T-BC) on the timing path; every port
+carrying PTP has `ptp enable`.
+* *Boundary Clock (BC server)*: a multi-port node on a single NIC that bridges two PTP
+segments. Its `em2` port faces the *upstream* segment as a Time Receiver (SLAVE) and
+disciplines the NIC's PHC; `em3` (and `em4`) face the *downstream* segment as Time
+Transmitters that regenerate PTP. The BC terminates the upstream timing chain and
+starts a new one downstream.
+* *Ordinary Clock (OC server)*: a single-port node (`ens6f0np0`) on the *downstream*
+segment, where its only PTP master is the BC. It disciplines its local clocks from the
+time the BC regenerates.
+
+The timing is handled by the `linuxptp` daemons on each node:
+
+* On the *BC server*, a single `ptp4l` instance manages all its ports. The BMCA
+selects the GM as master on `em2`, which moves to `SLAVE` and disciplines the PHC.
+`em3` and `em4` are forced to `serverOnly 1`, so they act only as Time Transmitters.
+Because all ports share the same NIC PHC, the received time is directly available to
+the transmit ports; a Boundary Clock is implied automatically when more than one port
+is configured, so no `clock_type` or `ts2phc` setting is needed.
+* On the *OC server*, `ptp4l` runs with `clientOnly 1` on `ens6f0np0`, so the port
+only ever acts as a Time Receiver. `phc2sys` aligns the system clock to the PHC.
+* On the OC server, `clientOnly 1` is what guarantees it never becomes a master. The
+`localPriority` attribute — used by the G.8275.x BMCA only as a tie-breaker, when
+clockClass, clockAccuracy, variance and priority2 are equal, where a lower value is
+preferred — reinforces this ordering: the BC server keeps the default `128`, while the
+OC server uses the lower-preference `250`.
+
+The BC bridges two separate PTP segments: an *upstream* segment between the GM and its
+`em2` port, and a *downstream* segment between its `em3` port and the OC. These are kept
+apart, for example on different VLANs of the switch or on separate networks. Because the
+BC is the only master on the downstream segment, the OC synchronizes from the BC and
+never directly from the GM.
+
+As in <<ptp-scenario-oc,Scenario 1>>, this scenario uses the non-forwardable multicast
+MAC `01:80:C2:00:00:0E`; standard bridges do not forward it, so every PTP-aware device
+terminates and regenerates PTP. The same address must be set on every node of the
+timing path.
+
+*Diagram*
+
+.Boundary Clock (PTP-only), single NIC, with propagation to an Ordinary Clock
+image::product-atip-ptp-scenario-bc-single-nic.png[Scenario 3 - Boundary Clock (PTP-only) with Multiport Single NIC including propagation to Ordinary Clock server,scaledwidth=100%]
+
+*Configuration*
+
+Every switch port on the timing path (towards the GM, the BC and the OC) must have PTP
+enabled. The two cluster nodes are then configured as follows.
+
+*Boundary Clock (BC server)*
+
+. Identify the PHC of the PTP NIC (`ethtool -T em2`); on a single NIC all ports share
+the same PHC. In this example it is `/dev/ptp1`.
+
+. Create `/etc/ptp4l-G.8275.1.conf`. The receiving port `[em2]` has no role flag, so
+the BMCA selects it as Time Receiver; `[em3]` and `[em4]` are set to `serverOnly 1` to
+act as Time Transmitters. Declaring more than one port implies a Boundary Clock:
++
+[#ptp-conf-bc-single-nic-bc]
+.Boundary Clock configuration
+====
+[source,]
+----
+# Telecom G.8275.1 — Boundary Clock (multi-port, single NIC)
 [global]
 domainNumber                    24
 priority2                       255
@@ -2035,412 +2403,65 @@ logMinDelayReqInterval          -4
 announceReceiptTimeout          3
 ptp_dst_mac                     01:80:C2:00:00:0E
 network_transport               L2
-
-[$IFNAME1]
-# Time Receiver by default
-
-[$IFNAME2]
-serverOnly                      1
-
-[$IFNAME3]
-serverOnly                      1
-
-[$IFNAME4]
-serverOnly                      1
-----
-
-However, make sure to determine the correct connection to the GM before starting the daemon.
-
-[#ptp-phc2sys-setup]
-==== Synchronization of the system clock from PTP
-
-It is important to keep in mind that PTP works by synchronizing NIC local hardware clocks. This does not automatically align the system clock with the GM, as the system clock is derived from a different hardware clock.
-In order to keep the system clock in sync with PTP, `phc2sys` must be run. It is recommended that you fully complete the configuration of `ptp4l` before moving to `phc2sys`.
-`phc2sys` does not require a configuration file by default and its execution parameters can be solely controlled through the `OPTIONS=` variable present in `/etc/sysconfig/ptp4l`, in a similar fashion to `ptp4l`:
-
-[source,]
-----
-OPTIONS="-s $IFNAME -w"
-----
-
-Where `$IFNAME` is the name of the interface already set up in ptp4l that will be used as the source for the system clock. This is used to identify the source PHC.
-
-However, if a specific PTP profile or domain number is used, `phc2sys` might require to be provided with a configuration file in accordance with the one provided to `ptp4l`. In most cases it can also be directly reused with phc2sys:
-
-[source,]
-----
-OPTIONS="-f /etc/ptp4l-G.8275.1.conf -s $IFNAME -w"
-----
-
-[#ptp-capi]
-=== Cluster API integration
-
-Whenever a cluster is deployed through a management cluster and directed network provisioning, both the configuration file and the two configuration variables in `/etc/sysconfig` can be deployed on the host at provisioning time. Below is an excerpt from a cluster definition, focusing on a modified `RKE2ControlPlane` object that deploys the same G.8275.1 configuration file on all hosts:
-
-[,yaml]
-----
-apiVersion: controlplane.cluster.x-k8s.io/v1beta2
-kind: RKE2ControlPlane
-metadata:
-  name: single-node-cluster
-  namespace: default
-spec:
-  infrastructureRef:
-    apiGroup: infrastructure.cluster.x-k8s.io
-    kind: Metal3MachineTemplate
-    name: single-node-cluster-controlplane
-  replicas: 1
-  version: ${RKE2_VERSION}
-  rolloutStrategy:
-    type: "RollingUpdate"
-    rollingUpdate:
-      maxSurge: 0
-  registrationMethod: "control-plane-endpoint"
-  serverConfig:
-    cni: canal
-  agentConfig:
-    format: ignition
-    cisProfile: cis
-    additionalUserData:
-      config: |
-        variant: fcos
-        version: 1.4.0
-        systemd:
-          units:
-            - name: rke2-preinstall.service
-              enabled: true
-              contents: |
-                [Unit]
-                Description=rke2-preinstall
-                Wants=network-online.target
-                Before=rke2-install.service
-                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
-                [Service]
-                Type=oneshot
-                User=root
-                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
-                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
-                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
-                ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
-                ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
-                ExecStartPost=/bin/sh -c "umount /mnt"
-                [Install]
-                WantedBy=multi-user.target
-        storage:
-          files:
-            - path: /etc/ptp4l-G.8275.1.conf
-              overwrite: true
-              contents:
-                inline: |
-                  # Telecom G.8275.1 example configuration
-                  [global]
-                  domainNumber                    24
-                  priority2                       255
-                  dataset_comparison              G.8275.x
-                  G.8275.portDS.localPriority     128
-                  G.8275.defaultDS.localPriority  128
-                  maxStepsRemoved                 255
-                  logAnnounceInterval             -3
-                  logSyncInterval                 -4
-                  logMinDelayReqInterval          -4
-                  announceReceiptTimeout          3
-                  serverOnly                      0
-                  ptp_dst_mac                     01:80:C2:00:00:0E
-                  network_transport               L2
-              mode: 0644
-              user:
-                name: root
-              group:
-                name: root
-            - path: /etc/sysconfig/ptp4l
-              overwrite: true
-              contents:
-                inline: |
-                  ## Path:           Network/LinuxPTP
-                  ## Description:    Precision Time Protocol (PTP): ptp4l settings
-                  ## Type:           string
-                  ## Default:        "-i eth0 -f /etc/ptp4l.conf"
-                  ## ServiceRestart: ptp4l
-                  #
-                  # Arguments when starting ptp4l(8).
-                  #
-                  OPTIONS="-f /etc/ptp4l-G.8275.1.conf -i $IFNAME --message_tag ptp-8275.1"
-              mode: 0644
-              user:
-                name: root
-              group:
-                name: root
-            - path: /etc/sysconfig/phc2sys
-              overwrite: true
-              contents:
-                inline: |
-                  ## Path:           Network/LinuxPTP
-                  ## Description:    Precision Time Protocol (PTP): phc2sys settings
-                  ## Type:           string
-                  ## Default:        "-s eth0 -w"
-                  ## ServiceRestart: phc2sys
-                  #
-                  # Arguments when starting phc2sys(8).
-                  #
-                  OPTIONS="-s $IFNAME -w"
-              mode: 0644
-              user:
-                name: root
-              group:
-                name: root
-    kubelet:
-      extraArgs:
-        - provider-id=metal3://BAREMETALHOST_UUID
-    nodeName: "localhost.localdomain"
-----
-
-Besides other variables, the above definition must be completed with the interface name and with the other Cluster API objects, as described in <<atip-automated-provisioning>>.
-
-[NOTE]
-====
-* This approach is convenient only if the hardware in the cluster is uniform and the same configuration is needed on all hosts, interface name included.
-* Alternative approaches are possible and will be covered in future releases.
-====
-
-At this point, your hosts should have a working and running PTP stack and will start negotiating their PTP role.
-
-=== PTP on Intel Granite Rapids-D platforms
-
-{product} supports precise timing on a variety of different platforms, including the latest Intel Granite Rapids-D based designs (GNR-D). These new servers typically include an embedded high-speed Ethernet controller and one or more add-in cards with an Ethernet controller for additional ports. Contrary to previous platform generations, they are also equipped with a dedicated DPLL that allows the routing of the timing signals across the system and the different NICS, and no longer requires external cabling.
-The overall deployment is thus simplified, but specific steps and software components are required, such as boot time DPLL and internal signal configuration.
-
-Before going through the setup steps, download and install the latest kernel driver for the _Intel 800 Series Network Devices_ from the https://www.intel.com/content/www/us/en/download/19630/intel-network-adapter-driver-for-800-series-devices-under-linux.html[Intel website]. Select the zip file containing the "ice_RPM_Files" and unpack the archive, then install the `ice-kmp-default-*sles16sp0.x86_64.rpm` RPM there contained, for example file `ice-kmp-default-2.4.5_k6.12.0_160000.5-1.sles16sp0.x86_64.rpm`:
-
-[,console]
-----
-# transactional-update pkg install ice-kmp-default-2.4.5_k6.12.0_160000.5-1.sles16sp0.x86_64.rpm
-----
-
-Reboot the server to make the change persistent and effective.
-
-[NOTE]
-====
-* A Dell PowerEdge XR8720t system will be used as the reference system through the examples, the kernel interfaces and port configuration might be different on a different GNR-D server.
-* A Telco deployment is assumed and the Telco profile G.8275.1 used through the following sections for PTP.
-====
-
-==== PTP Boundary Clock
-
-This section describes the process of setting up a Boundary Clock (BC) on a GNR-D system, where one port on the integrated NIC receives the PTP timestamps from a GM and all the remaining ports in the system act as Time Transmitters towards other network nodes.
-[NOTE]
-====
-The setup described here is completely static. If the GM becomes unavailable, the downstream synchronization will exclusively rely on the host holdhover capabilities; no automatic switching to a different source of time reference will be performed.
-====
-
-To enable the BC behavior, run the following steps in the same order every time the system is booted:
-
-. Verify the expected PTP devices that control the PHCs are present:
-+
-[,console]
-----
-# ls -l /sys/class/ptp/
-total 0
-lrwxrwxrwx. 1 root root 0 Apr 27 20:21 ptp1 -> ../../devices/pci0000:12/0000:12:04.0/0000:13:00.0/ptp/ptp1
-lrwxrwxrwx. 1 root root 0 Apr 27 20:21 ptp2 -> ../../devices/pci0000:6b/0000:6b:02.0/0000:6c:00.0/ptp/ptp2
-lrwxrwxrwx. 1 root root 0 Apr 27 20:21 ptp3 -> ../../devices/pci0000:6b/0000:6b:06.0/0000:6e:00.0/ptp/ptp3
-----
-+
-[NOTE]
-====
-Adjust the subsequent commands according to the actual names found on the system being configured.
-====
-
-. Identify the embedded controller, as it will require specific configuration:
-+
-The previous output should indicate the device to which they are bound to through the PCI address and you can use `lspci` to look up the device type:
-+
-[,console]
-----
-# lspci -s 0000:13:00.0
-13:00.0 Ethernet controller: Intel Corporation Ethernet Connection E825-C for SFP (rev 04)
-# lspci -s 0000:6c:00.0
-6c:00.0 Ethernet controller: Intel Corporation Ethernet Controller E830-CC for SFP
-# lspci -s 0000:6e:00.0
-6e:00.0 Ethernet controller: Intel Corporation Ethernet Controller E830-CC for SFP
-----
-+
-This specific server is equipped with an _Intel E825-C_ embedded controller and two _E830-CC_ add-in cards.
-+
-Alternatively, you can find more information about the controller by looking up the first network port of the controller that exposes that PHC:
-+
-[,console]
-----
-# ls -l /sys/class/ptp/ptp0/device/net/
-total 0
-drwxr-xr-x. 5 root root 0 Apr 30 15:16 em5
-# ethtool -i em5
-driver: ice
-version: 2.4.5
-firmware-version: 4.03 0x80007f91 1.3881.0
-expansion-rom-version:
-bus-info: 0000:13:00.0
-[...]
-----
-+
-Note that `em5` is the first port of the integrated Ethernet controller on this system.
-
-. Configure the signals between the PHC on the integrated Ethernet controller and the system timing DPLL:
-
-.. Let the DPLL drive the Ethernet clock on the integrated controller:
-+
-[,console]
-----
-# echo 4 1 > /sys/class/net/em5/device/tspll_cfg
-----
-
-.. Enable a pulse every top of second (Pulse Per Second, PPS) from the PHC to the DPLL through the SDP2 pin (1kHz signal):
-+
-[,console]
-----
-# echo 2 1 > /sys/class/ptp/ptp1/pins/SDP2
-# echo 1 0 0 0 1000000 > /sys/class/ptp/ptp1/period
-----
-
-.. Optionally, pin SPD0 (1Hz signal) can be enabled too:
-+
-[,console]
-----
-# echo 2 2 > /sys/class/ptp/ptp1/pins/SDP0
-# echo 2 0 0 1 0 > /sys/class/ptp/ptp1/period
-----
-
-.. Enable the 1 PPS signal to be propagated from the timing system DPLL to the additional add-in cards:
-+
-[,console]
-----
-# echo 1 1 > /sys/class/ptp/ptp2/pins/SDP1
-# echo 1 1 > /sys/class/ptp/ptp3/pins/SDP1
-----
-
-. Run `ts2phc` to keep PHCs of the add-in cards in sync with the same timestamp of PHC `/dev/ptp1`:
-+
-[,console]
-----
-# ts2phc -f ts2phc-aic-all.cfg -s /dev/ptp1
-----
-+
-Refer to <<gnrd-ts2phc-config-aics>> for the content of `ts2phc-aic-all.cfg`.
-
-. Run an instance of `ptp4l` for the integrated controller (`/dev/ptp1`):
-+
-[,console]
-----
-# ptp4l -f ptp4l-G.8275.1-nac.conf
-----
-+
-Refer to <<gnrd-ptp4l-config-nac>> for the content of `ptp4l-G.8275.1-nac.conf`.
-
-. Run an instance of `ptp4l` for each add-in card (`/dev/ptp3` and/or `/dev/ptp2`):
-+
-[,console]
-----
-# ptp4l -f ptp4l-G.8275.1-aic1.conf
-# ptp4l -f ptp4l-G.8275.1-aic2.conf
-----
-+
-Refer to <<gnrd-ptp4l-config-aics>> for the content of the configuration files.
-+
-[NOTE]
-====
-To prevent conflicts and enable the next step, each of these instances must use different control and read-only sockets.
-====
-
-. Synchronize the PTP runtime parameters and values of the AICs `ptp4l` instances with `pmc`:
-+
-A BC is expected to forward not only the time of a GM it is connected to, but also ancillary parameters, such as its clock class and accuracy level. This happens automatically within a group of interfaces managed by the same `ptp4l` instance, but not accross different `ptp4l` instances, handling different PHCs and ports.
-+
-Once the system is synchronized to a GM, query the `ptp4l` instance on the integrated controller and set the values on the remaining `ptp4l` instances via `pmc` commands. For example:
-+
-[,console]
-----
-# pmc -f /etc/ptp4l-G.8275.1-nac-bmca.conf -u -b 0 'GET PARENT_DATA_SET' | grep gm
-                gm.ClockClass                         8
-                gm.ClockAccuracy                      0xfe
-                gm.OffsetScaledLogVariance            0xffff
-# pmc -f /etc/ptp4l-G.8275.1-nac-bmca.conf -u -b 0 'GET TIME_PROPERTIES_DATA_SET' | grep -v PROPERTIES
-                currentUtcOffset      37
-                leap61                0
-                leap59                0
-                currentUtcOffsetValid 0
-                ptpTimescale          1
-                timeTraceable         0
-                frequencyTraceable    0
-                timeSource            0xa0
-pmc -f /etc/ptp4l-G.8275.1-aic1-static.conf -u -b 0 'SET GRANDMASTER_SETTINGS_NP
-                clockClass              8
-                clockAccuracy           0xfe
-                offsetScaledLogVariance 0xffff
-                currentUtcOffset        37
-                leap61                  0
-                leap59                  0
-                currentUtcOffsetValid   0
-                ptpTimescale            1
-                timeTraceable           0
-                frequencyTraceable      0
-                timeSource              0xa0
-----
-+
-Refer to <<gnrd-pmc-forward>> to automate this process and avoid manual steps.
-
-. Optionally run `phc2sys` to derive the system time from the PTP synchronization:
-+
-[,console]
-----
-# phc2sys -f /etc/ptp4l-G.8275.1-nac.conf -s /dev/ptp1 -c CLOCK_REALTIME -w
-----
-+
-The input file is the same configuration file used for `ptp4l` and the integrated controller. See <<ptp-phc2sys-setup>> for letting systemd handle its execution.
-
-==== Configuration files
-
-This section provides sample configuration files and scripts that can be used in conjunction with the above steps to quickly set up a working BC on GNR-D. The `ptp4l` configuration files contain all the required settings, without the need for additional external execution flags, and are all based around the Telco profile G.8275.1. More details are provided for each file in their respective sections.
-
-[#gnrd-ptp4l-config-nac]
-===== `ptp4l` configuration file for the integrated controller (`/dev/ptp1`)
-
-[source,]
-----
-[global]
-domainNumber                    24
-priority2                       255
-dataset_comparison              G.8275.x
-G.8275.portDS.localPriority     128
-G.8275.defaultDS.localPriority  128
-maxStepsRemoved                 255
-logAnnounceInterval             -3
-logSyncInterval                 -4
-logMinDelayReqInterval          -4
-announceReceiptTimeout          3
-ptp_dst_mac                     01:1b:19:00:00:00
-network_transport               L2
 summary_interval                3
-message_tag                     "ptp4l-nac"
-uds_address                     /var/run/ptp4l-nac
-uds_ro_address                  /var/run/ptp4lro-nac
-
-[em1]
+message_tag                     "ptp4l"
+uds_address                     /var/run/ptp4l
+uds_ro_address                  /var/run/ptp4lro
 
 [em2]
 
 [em3]
+serverOnly                      1
 
 [em4]
+serverOnly                      1
 ----
+====
 
-The above configuration leverages the BMCA to determine the role of the port, assuming a GM is available through one of them. If tighter control is needed, add the `serverOnly` flag under each interface definition. For more details, refer to <<ptp-bc-setup>> or to the add-in cards configuration below as an example.
-For the sake of brevity, only four interfaces are listed, you need to adjust according to your requirements.
-
-[#gnrd-ptp4l-config-aics]
-===== `ptp4l` configuration file for add-in cards (`/dev/ptp2` or `/dev/ptp3`)
-
+. Point `ptp4l` at this file in `/etc/sysconfig/ptp4l`:
++
 [source,]
 ----
-# Telecom G.8275.1 example configuration
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf"
+----
+
+. Optionally align the system clock with `phc2sys` in `/etc/sysconfig/phc2sys`, using
+the shared NIC PHC as source:
++
+[source,]
+----
+OPTIONS="-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 24"
+----
+
+. Enable and start the services and verify that `em2` is locked to the GM. The
+receiver port moves to `SLAVE` and the offset (`rms`) converges to a low value:
++
+[,console]
+----
+# systemctl enable --now ptp4l phc2sys
+# journalctl -u ptp4l -f
+ptp4l[...]: "ptp4l" selected best master clock d0460c.ffff.05c130
+ptp4l[...]: "ptp4l" port 1 (em2): UNCALIBRATED to SLAVE on MASTER_CLOCK_SELECTED
+ptp4l[...]: "ptp4l" rms    8 max   24 freq +10092 +/-  18 delay   211 +/-   2
+ptp4l[...]: "ptp4l" rms    4 max   11 freq +10069 +/-   7 delay   210 +/-   2
+ptp4l[...]: "ptp4l" rms    3 max    9 freq +10070 +/-   6 delay   213 +/-   3
+----
+
+*Ordinary Clock (OC server)*
+
+. Identify the PHC of the PTP interface (`ethtool -T ens6f0np0`); in this example it
+is `/dev/ptp1`.
+
+. Create `/etc/ptp4l-G.8275.1.conf` with a single port and `clientOnly 1`, so the
+node only ever acts as a Time Receiver. The higher `localPriority` (`250`) keeps it
+below the BC in the BMCA:
++
+[#ptp-conf-bc-single-nic-oc]
+.Ordinary Clock configuration
+====
+[source,]
+----
+# Telecom G.8275.1 — Ordinary Clock (Time Receiver)
 [global]
 domainNumber                    24
 priority2                       255
@@ -2452,31 +2473,348 @@ logAnnounceInterval             -3
 logSyncInterval                 -4
 logMinDelayReqInterval          -4
 announceReceiptTimeout          3
-ptp_dst_mac                     01:1b:19:00:00:00
+clientOnly                      1
+ptp_dst_mac                     01:80:C2:00:00:0E
 network_transport               L2
 summary_interval                3
-message_tag                     "ptp4l-iac1"
-uds_address                     /var/run/ptp4l-aic1
-uds_ro_address                  /var/run/ptp4lro-aic1
+message_tag                     "ptp4l"
+uds_address                     /var/run/ptp4l
+uds_ro_address                  /var/run/ptp4lro
 
-[p1p1]
-serverOnly                      1
+[ens6f0np0]
+----
+====
 
-[p1p2]
-serverOnly                      1
+. Configure `/etc/sysconfig/ptp4l` and `/etc/sysconfig/phc2sys` as for the BC (the
+`phc2sys` source is the PHC of `ens6f0np0`), then enable and start the services:
++
+[source,]
+----
+# /etc/sysconfig/ptp4l
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf"
 
-[p1p3]
-serverOnly                      1
-
-[p1p4]
-serverOnly                      1
+# /etc/sysconfig/phc2sys
+OPTIONS="-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 24"
 ----
 
-For the sake of brevity, only four interfaces are listed. You need to adjust according to your requirements. All the interfaces have been statically set to the TimeTransmitter role.
+. Verify that `ens6f0np0` is locked to the regenerated time from the BC. The port moves to
+`SLAVE` and the offset (`rms`) stabilizes:
++
+[,console]
+----
+# journalctl -u ptp4l -f
+ptp4l[...]: "ptp4l" selected best master clock d0460c.ffff.05c130
+ptp4l[...]: "ptp4l" port 1 (ens6f0np0): UNCALIBRATED to SLAVE on MASTER_CLOCK_SELECTED
+ptp4l[...]: "ptp4l" rms   15 max   34 freq +11699 +/-  25 delay   468 +/-   5
+ptp4l[...]: "ptp4l" rms   13 max   30 freq +11701 +/-  23 delay   468 +/-   4
+ptp4l[...]: "ptp4l" rms   14 max   30 freq +11697 +/-  24 delay   467 +/-   4
+----
++
+The OC takes its time from the upstream Boundary Clock, which is its immediate master.
+The `selected best master clock` line, however, reports the *Grandmaster* identity
+(`d0460c.ffff.05c130`, the GM) and not the Boundary Clock's: a Boundary Clock forwards
+the Grandmaster identity unchanged while advertising its own port as the parent, so the
+chain stays traceable to the Grandmaster. To see both identities explicitly, query the
+parent data set on the OC (example output):
++
+[,console]
+----
+# pmc -f /etc/ptp4l-G.8275.1.conf -u -b 0 'GET PARENT_DATA_SET'
+sending: GET PARENT_DATA_SET
+	507c6f.fffe.4ae178-0 seq 0 RESPONSE MANAGEMENT PARENT_DATA_SET
+		parentPortIdentity                    000000.fffe.001101-2
+		parentStats                           0
+		observedParentOffsetScaledLogVariance 0xffff
+		observedParentClockPhaseChangeRate    0x7fffffff
+		grandmasterPriority1                  128
+		gm.ClockClass                         165
+		gm.ClockAccuracy                      0xfe
+		gm.OffsetScaledLogVariance            0xffff
+		grandmasterPriority2                  120
+		grandmasterIdentity                   d0460c.ffff.05c130
+----
++
+The two identities differ, which is exactly what a Boundary Clock deployment should
+show:
++
+* `parentPortIdentity` (`000000.fffe.001101-2`) — the *immediate master*: the Boundary
+Clock's transmit port, the clock the OC actually receives time from.
+* `grandmasterIdentity` (`d0460c.ffff.05c130`) — the *root of the timing tree*: the
+Grandmaster, forwarded unchanged through the Boundary Clock.
++
+The `gm.ClockClass`, `gm.ClockAccuracy` and `grandmasterPriority` values carry the
+Grandmaster's advertised quality used by the BMCA. If the two identities were equal, the
+OC would be synchronizing directly from a Grandmaster, with no Boundary Clock in the
+path.
 
-[#gnrd-ts2phc-config-aics]
-===== `ts2phc` configuration file for add-in cards
+*CAPI automation*
 
+To deploy this scenario using the automated provisioning workflow, use the generic
+Cluster API template described in <<add-telco-ptp,Fully automated directed network
+provisioning>> on each node, overriding its placeholders with the values below.
+
+.Boundary Clock (BC server)
+[cols="1,2"]
+|===
+| Placeholder | Value
+
+| `$\{PTP4L_CONF_PATH\}`
+| `/etc/ptp4l-G.8275.1.conf`
+
+| `$\{PTP4L_CONF_CONTENTS\}`
+| Copy the content from <<ptp-conf-bc-single-nic-bc,the Boundary Clock configuration above>>.
+
+| `$\{PTP4L_OPTIONS\}`
+| `-f /etc/ptp4l-G.8275.1.conf`
+
+| `$\{PHC2SYS_OPTIONS\}`
+| `-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 24`
+|===
+
+.Ordinary Clock (OC server)
+[cols="1,2"]
+|===
+| Placeholder | Value
+
+| `$\{PTP4L_CONF_PATH\}`
+| `/etc/ptp4l-G.8275.1.conf`
+
+| `$\{PTP4L_CONF_CONTENTS\}`
+| Copy the content from <<ptp-conf-bc-single-nic-oc,the Ordinary Clock configuration above>>.
+
+| `$\{PTP4L_OPTIONS\}`
+| `-f /etc/ptp4l-G.8275.1.conf`
+
+| `$\{PHC2SYS_OPTIONS\}`
+| `-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 24`
+|===
+
+[#ptp-scenario-bc-multi-nic-dpll]
+=== Scenario 4 - Boundary Clock (PTP-only) Multi-NIC with internal timing module (DPLL GNR-D based)
+
+*Explanation*
+
+{product} supports precise timing on a variety of platforms, including the latest Intel
+Granite Rapids-D based designs (GNR-D). These servers typically include an embedded
+high-speed Ethernet controller and one or more add-in cards (AICs) with an Ethernet
+controller for additional ports. Contrary to previous platform generations, they are also
+equipped with a dedicated DPLL that routes the timing signals across the system and the
+different NICs internally, and no longer require external cabling. The overall deployment
+is thus simplified, but specific steps and software components are required, such as
+boot-time DPLL and internal signal configuration.
+
+This scenario extends <<ptp-scenario-bc-single-nic,Scenario 3>> to a Boundary Clock (BC)
+built on several NICs, entirely over ITU-T G.8275.1 (PTP-only, Layer 2). One port of the
+integrated controller receives PTP from the Grandmaster and the add-in cards regenerate
+PTP downstream. Unlike the single-NIC case, each NIC has its own PHC; the on-board DPLL
+and `ts2phc` keep them aligned, and one `ptp4l` instance runs per PHC.
+
+.Prerequisites
+* Download and install the latest kernel driver for the _Intel 800 Series Network Devices_
+from the
+https://www.intel.com/content/www/us/en/download/19630/intel-network-adapter-driver-for-800-series-devices-under-linux.html[Intel website].
+* Select the zip file containing the "ice_RPM_Files", unpack the archive and install the
+`ice-kmp-default-*sles16sp0.x86_64.rpm`. This RPM contains, for example,
+`ice-kmp-default-2.4.5_k6.12.0_160000.5-1.sles16sp0.x86_64.rpm`:
++
+[,console]
+----
+# transactional-update pkg install ice-kmp-default-2.4.5_k6.12.0_160000.5-1.sles16sp0.x86_64.rpm
+----
++
+Reboot the server to make the change persistent and effective.
+
+[NOTE]
+====
+* A Dell PowerEdge XR8720t system is used as the reference system throughout the examples;
+the kernel interfaces and port configuration might be different on a different GNR-D
+server. Adjust the device names accordingly.
+* A telco deployment is assumed and the telco profile G.8275.1 is used throughout the
+following sections.
+====
+
+The scenario involves the following components:
+
+* *Grandmaster (GM)*: the reference for the PTP domain (domain `24`), on the upstream
+segment.
+* *PTP-aware switch*: acts as a Boundary Clock (T-BC) on the timing path; every port
+carrying PTP has `ptp enable`. The upstream and downstream segments are kept apart on
+different VLANs of the switch (a dedicated VLAN for each segment).
+* *Boundary Clock (BC server)*: the GNR-D node. Its integrated controller receives PTP from
+the GM on `em2` and disciplines the integrated PHC (`/dev/ptp1`). The on-board DPLL
+distributes that timing to the add-in cards and `ts2phc` keeps their PHCs (`/dev/ptp2`,
+`/dev/ptp3`) aligned with `/dev/ptp1`. Each add-in card regenerates PTP downstream (for
+example on `p1p1`), acting as a Time Transmitter.
+* *Ordinary Clock (OC server)*: a single-port node (`ens6f0np0`) on the downstream segment,
+whose only PTP master is the BC.
+
+The timing on the *BC server* is handled by several `linuxptp` daemons working together,
+because the PHCs are physically separate:
+
+* A `ptp4l` instance on the integrated controller (`/dev/ptp1`) runs the PTP protocol on
+`em2`. The BMCA selects the GM as master, the port moves to `SLAVE` and `ptp4l`
+disciplines `/dev/ptp1`.
+* The on-board DPLL is wired so that the integrated PHC drives it through the SDP pins, and
+the DPLL in turn drives the add-in cards' clocks. This is the internal replacement for the
+external 1PPS cabling used on previous platforms.
+* `ts2phc` keeps the add-in cards' PHCs aligned to `/dev/ptp1` from the signal the DPLL
+distributes.
+* A separate `ptp4l` instance per add-in card (`/dev/ptp2`, `/dev/ptp3`) regenerates PTP on
+its ports, all forced to `serverOnly 1` (Time Transmitters).
+* A Boundary Clock must forward the Grandmaster's ancillary attributes (clock class,
+accuracy, and so on) in addition to time. This happens automatically only within a single
+`ptp4l` instance, so `pmc` is used to forward those values from the integrated instance to
+the add-in instances (see step 5). `pmc` (PTP management client) is the `linuxptp` tool
+that queries and updates the runtime state of a running `ptp4l` instance over its
+management socket.
+
+[NOTE]
+====
+On the integrated controller only *one* of its ports is the administrative port that
+manages the PHC. Inspect `/sys/class/ptp/ptp1/device/net/` to find it (for example `em5`);
+it is the port used to configure the DPLL signals, and it is not necessarily the port that
+carries PTP (`em2`).
+====
+
+[NOTE]
+====
+The setup described here is completely static. If the GM becomes unavailable, downstream
+synchronization relies exclusively on the host holdover capabilities; no automatic
+switching to a different time reference is performed.
+====
+
+*Diagram*
+
+.Boundary Clock (PTP-only), multi-NIC GNR-D node with on-board DPLL, with propagation to an Ordinary Clock
+image::product-atip-ptp-scenario-bc-multi-nic-dpll.png[Scenario 4 - Boundary Clock (PTP-only) multi-NIC with internal timing module (DPLL GNR-D based),scaledwidth=100%]
+
+*Configuration*
+
+Every switch port on the timing path must have PTP enabled. The BC server is then brought
+up in the order below. Each runtime step is also mapped to a `systemd` unit so that the
+configuration survives reboots and can be automated with Cluster API (see
+<<add-telco-ptp-gnrd,the GNR-D CAPI automation>>). The OC server is configured exactly as in
+<<ptp-scenario-bc-single-nic,Scenario 3>>.
+
+. Identify the PTP devices and the integrated controller.
+
+.. List the PTP clocks and the PCI device each is bound to:
++
+[,console]
+----
+# ls -l /sys/class/ptp/
+lrwxrwxrwx 1 root root 0 ... ptp1 -> ../../devices/pci0000:12/0000:12:04.0/0000:13:00.0/ptp/ptp1
+lrwxrwxrwx 1 root root 0 ... ptp2 -> ../../devices/pci0000:6b/0000:6b:02.0/0000:6c:00.0/ptp/ptp2
+lrwxrwxrwx 1 root root 0 ... ptp3 -> ../../devices/pci0000:6b/0000:6b:06.0/0000:6e:00.0/ptp/ptp3
+----
+
+.. Run `lspci` to identify each device type, allowing you to distinguish between the
+integrated controller and the add-in cards:
++
+[,console]
+----
+# lspci -s 0000:13:00.0
+13:00.0 Ethernet controller: Intel Corporation Ethernet Connection E825-C for SFP (rev 04)
+# lspci -s 0000:6c:00.0
+6c:00.0 Ethernet controller: Intel Corporation Ethernet Controller E830-CC for SFP
+# lspci -s 0000:6e:00.0
+6e:00.0 Ethernet controller: Intel Corporation Ethernet Controller E830-CC for SFP
+----
++
+This reference server has an _Intel E825-C_ integrated controller (`/dev/ptp1`) and two
+_E830-CC_ add-in cards (`/dev/ptp2`, `/dev/ptp3`).
+
+.. Identify the administrative port of the integrated controller, which manages its PHC:
++
+[,console]
+----
+# ls /sys/class/ptp/ptp1/device/net/
+em5
+# ethtool -i em5
+driver: ice
+version: 2.4.5
+[...]
+----
+
+. Configure the internal timing signals (DPLL).
++
+Wire the integrated PHC to the DPLL and let the DPLL feed the add-in cards, using the
+administrative port found above (`em5`) and the correct `ptpN` indices:
++
+[#gnrd-startup-setup]
+.`01-gnrd-startup-setup.sh`
+====
+[source,bash]
+----
+#!/bin/bash
+
+# The admin port that manages the PHC is under /sys/class/ptp/ptp1/device/net/ (e.g. em5).
+# Only one port of the integrated NIC (emX, E825-C) exposes it.
+
+# Let the DPLL drive the Ethernet clock on the integrated controller
+echo 4 1 > /sys/class/net/em5/device/tspll_cfg
+
+# Feed the DPLL from the integrated PHC through the SDP pins:
+# SDP0 -> 1 pulse per second (1PPS, 1 Hz): enable the pin, then set a 1 s period
+echo 2 2 > /sys/class/ptp/ptp1/pins/SDP0
+echo 2 0 0 1 0 > /sys/class/ptp/ptp1/period
+
+# SDP2 -> 1000 pulses per second (1kPPS, 1 kHz): enable the pin, then set a 1 ms period
+echo 2 1 > /sys/class/ptp/ptp1/pins/SDP2
+echo 1 0 0 0 1000000 > /sys/class/ptp/ptp1/period
+
+# Propagate the pulses from the DPLL to the add-in cards (SDP1 on each add-in PHC)
+echo 1 1 > /sys/class/ptp/ptp2/pins/SDP1
+echo 1 1 > /sys/class/ptp/ptp3/pins/SDP1
+----
+====
++
+These settings are lost on reboot, so run the script at boot from a oneshot `systemd` unit,
+ordered before `ts2phc` and `ptp4l`:
++
+[source,ini]
+----
+# /etc/systemd/system/gnrd-ptp-dpll-setup.service
+[Unit]
+Description=GNR-D PTP DPLL and internal signal setup
+Before=ts2phc.service ptp4l@nac.service ptp4l@aic1.service ptp4l@aic2.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/01-gnrd-startup-setup.sh
+
+[Install]
+WantedBy=multi-user.target
+----
+
+. Align the add-in cards' PHCs with `ts2phc`.
++
+`ts2phc` ("time stamp to PHC") aligns the add-in cards' PHCs to a reference clock. Here, the
+reference is the integrated PHC (`/dev/ptp1`, already disciplined by the GM through its
+`ptp4l` instance), passed on the command line with `-s /dev/ptp1`. The on-board DPLL
+delivers the 1PPS derived from that reference to each add-in card on its `SDP1` pin;
+`ts2phc` timestamps those input pulses (EXTTS) and steps each add-in PHC accordingly, so
+every PHC in the node ends up sharing the same time.
++
+[NOTE]
+====
+Aligning the add-in PHCs takes two complementary settings, at different levels:
+
+* *Hardware*: the `SDP1` input pin of each add-in PHC must be enabled for the on-board DPLL to deliver the 1PPS pulse to it. This is done in the DPLL setup script of the previous step
+(`echo 1 1 > /sys/class/ptp/ptpN/pins/SDP1`).
+* *Software*: `ts2phc` must be told to timestamp that input and step the PHC. This is what the
+configuration below does (`ts2phc.channel`, `ts2phc.pin_index`, `ts2phc.extts_polarity`).
+
+Without enabling the pin, the pulse never reaches the PHC; without the `ts2phc` configuration
+the pulse is never applied to it. Both are required.
+====
++
+Create its configuration file:
++
+[#gnrd-ts2phc-config]
+.`/etc/ts2phc-cf-all.cfg` — `ts2phc` configuration file
+====
 [source,]
 ----
 [global]
@@ -2495,15 +2833,212 @@ ts2phc.channel          1
 ts2phc.extts_polarity   rising
 ts2phc.pin_index        1
 ----
+====
++
+Each add-in card is configured through a section named after its first port (`[p1p1]`,
+`[p2p1]`), which identifies the PHC to discipline. The parameters map the DPLL pulse to
+that card:
++
+* `ts2phc.pin_index` and `ts2phc.channel`: the pin and channel where the DPLL delivers the
+1PPS (`SDP1` in this setup, hence `pin_index 1`).
+* `ts2phc.extts_polarity`: the pulse edge to timestamp (`rising`).
+* `ts2phc.pulsewidth`: the expected input pulse width, in nanoseconds (100 ms here).
++
+Run it manually as `ts2phc -f /etc/ts2phc-cf-all.cfg -s /dev/ptp1 -m`, or let `systemd`
+manage it through `/etc/sysconfig/ts2phc`:
++
+[source,]
+----
+# /etc/sysconfig/ts2phc
+OPTIONS="-f /etc/ts2phc-cf-all.cfg -s /dev/ptp1 -m"
+----
 
-This configuration covers the synchronization of two add-in cards (referenced by their first port, `p1p1` and `p2p1`) via the SDP1 on each controller.
+. Run one `ptp4l` instance per PHC.
++
+The integrated controller runs a BMCA-driven instance (the receiver), and each add-in card
+runs an instance with all ports forced to `serverOnly 1`. Each instance must use a
+different control and read-only socket. Create the three configuration files:
++
+[#gnrd-ptp4l-config-nac]
+.`/etc/ptp4l-nac.conf` — integrated controller (`/dev/ptp1`)
+====
+[source,]
+----
+# Telecom G.8275.1 — integrated controller (receiver)
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l-nac"
+uds_address                     /var/run/ptp4l-nac
+uds_ro_address                  /var/run/ptp4lro-nac
 
+[em2]
+----
+====
++
+The integrated instance declares only `em2`, the port that receives PTP from the GM, and sets
+no `serverOnly` or `clientOnly` on it: it relies on the BMCA to assign the role. With a GM
+reachable on `em2`, the BMCA selects it as the Time Receiver (`SLAVE`) and disciplines
+`/dev/ptp1`. The other ports of the integrated controller are not declared, because on this
+node the downstream regeneration is performed by the add-in cards rather than by the
+integrated controller. The add-in cards, in contrast, force `serverOnly 1` because they must
+always be Time Transmitters — they take their time from the DPLL and `ts2phc`, not by
+receiving PTP, so they must never be elected as receivers. If tighter control is needed, add
+the `serverOnly` or `clientOnly` flag explicitly under the interface.
++
+The `G.8275.portDS.localPriority` and `G.8275.defaultDS.localPriority` values (`128` on the
+integrated instance, `250` on the add-in cards) act as a G.8275.x BMCA tie-breaker: they are
+compared only after `clockClass`, `clockAccuracy`, variance and `priority2`, and a lower value
+is preferred. Keeping the default `128` on the integrated instance makes it outrank the add-in
+instances (`250`), which keeps the Time Transmitter/Time Receiver ordering within the node
+deterministic and drives which port the BMCA elects, as reflected in the port states reported
+by `ptp4l`.
++
+[#gnrd-ptp4l-config-aics]
+.`/etc/ptp4l-aic1.conf` — add-in card 1 (`/dev/ptp2`)
+====
+[source,]
+----
+# Telecom G.8275.1 — add-in card (Time Transmitter)
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     250
+G.8275.defaultDS.localPriority  250
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l-aic1"
+uds_address                     /var/run/ptp4l-aic1
+uds_ro_address                  /var/run/ptp4lro-aic1
+
+[p1p1]
+serverOnly                      1
+----
+====
++
+[#gnrd-ptp4l-config-aic2]
+.`/etc/ptp4l-aic2.conf` — add-in card 2 (`/dev/ptp3`)
+====
+[source,]
+----
+# Telecom G.8275.1 — add-in card (Time Transmitter)
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     250
+G.8275.defaultDS.localPriority  250
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l-aic2"
+uds_address                     /var/run/ptp4l-aic2
+uds_ro_address                  /var/run/ptp4lro-aic2
+
+[p2p1]
+serverOnly                      1
+----
+====
++
+[NOTE]
+====
+As in <<ptp-scenario-bc-single-nic,Scenario 3>>, every node on the timing path uses the same
+non-forwardable G.8275.1 multicast MAC `01:80:C2:00:00:0E`, including the downstream OC.
+====
++
+Manage the instances with a templated `systemd` unit that reads
+`/etc/ptp4l-<instance>.conf`:
++
+[source,ini]
+----
+# /etc/systemd/system/ptp4l@.service
+[Unit]
+Description=PTP Boundary Clock instance %i
+After=gnrd-ptp-dpll-setup.service
+Requires=gnrd-ptp-dpll-setup.service
+
+[Service]
+ExecStart=/usr/sbin/ptp4l -f /etc/ptp4l-%i.conf
+
+[Install]
+WantedBy=multi-user.target
+----
++
+Enable and start the three instances:
++
+[,console]
+----
+# systemctl enable --now ptp4l@nac ptp4l@aic1 ptp4l@aic2
+----
+
+. Forward the Grandmaster parameters across the `ptp4l` instances.
++
+A Boundary Clock must forward not only time but also the Grandmaster's ancillary parameters
+(clock class, accuracy, UTC offset, and so on). This happens automatically between ports of
+the *same* `ptp4l` instance, but not across the separate instances that manage different
+PHCs. The values are applied at runtime with `pmc` over each instance's UDS socket
+(`SET GRANDMASTER_SETTINGS_NP`).
++
+[IMPORTANT]
+====
+The values applied with `pmc` are held only in the running `ptp4l` process; they are *not*
+written to the `.conf` file and do *not* survive a restart. If a `ptp4l` instance is
+restarted, it reverts to the file defaults and the values must be forwarded again. Automate
+the forwarding (see below) rather than running it once by hand.
+====
++
+Once the integrated controller is locked to the GM, query the Grandmaster values. The
+helper below takes the configuration file of the instance to query as its argument:
++
+[#gnrd-get-pmc-values]
+.`get_pmc_values.sh` — query the Grandmaster values from a `ptp4l` instance
+====
+[source,bash]
+----
+#!/bin/bash
+# Retrieve Grandmaster information via pmc for the given ptp4l config file
+set -euo pipefail
+
+echo "PARENT_DATA_SET (Grandmaster clock values):"
+pmc -f "$1" -u -b 0 'GET PARENT_DATA_SET' | grep gm
+
+echo "TIME_PROPERTIES_DATA_SET:"
+pmc -f "$1" -u -b 0 'GET TIME_PROPERTIES_DATA_SET'
+----
+====
++
+Then forward those values to the add-in instances. The following script reads the values
+from the integrated instance and applies them to each add-in instance. Edit the "Input
+variables" section to match your configuration file names, and run it once the system is
+synchronized to a GM:
++
 [#gnrd-pmc-forward]
-===== GM parameters forwarding script
-
-The script below can be leveraged to forward the GM values and parameters to Time Receivers on ports handled by `ptp4l` instances other than the one where the GM lives. Do not forget to edit the `Input variables` section to adjust the file names and run it once the system is sychronized to a GM.
-
-[bash,]
+.`04-ptp-forward-GM.sh` — forward the Grandmaster values to the add-in instances
+====
+[source,bash]
 ----
 #!/bin/bash
 
@@ -2512,8 +3047,8 @@ set -euo pipefail
 ################## Input variables ##################
 VERBOSE=1
 
-CONFIG_FILE_NAC=/etc/ptp4l-G.8275.1-nac-bmca.conf
-CONFIG_FILES_AICS=(/etc/ptp4l-G.8275.1-aic1-static.conf /etc/ptp4l-G.8275.1-aic2-static.conf)
+CONFIG_FILE_NAC=/etc/ptp4l-nac.conf
+CONFIG_FILES_AICS=(/etc/ptp4l-aic1.conf /etc/ptp4l-aic2.conf)
 
 #####################################################
 
@@ -2526,8 +3061,7 @@ if [ "${GM_PRESENT}" != "true" ]; then
     exit 1
 fi
 
-# Get the "upstream" Grand Master values
-
+# Get the "upstream" Grandmaster values
 PDS_GM_VALUES=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET PARENT_DATA_SET' | awk 'BEGIN {ORS=" "} /gm./ {print $2}')
 TPDS_GM_VALUES=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET TIME_PROPERTIES_DATA_SET' | awk 'BEGIN {ORS=" "} NR>2 {print $2}')
 
@@ -2553,8 +3087,7 @@ if [ "$VERBOSE" -eq 1 ]; then
 fi
 
 
-# Forward these values to the "downstream" Time Receivers updating the ptp4l instances
-
+# Forward these values to the "downstream" Time Receivers, updating the ptp4l instances
 for FILE in "${CONFIG_FILES_AICS[@]}"; do
     if [ "$VERBOSE" -eq 1 ]; then
         echo "Updating GRANDMASTER_SETTINGS_NP (${FILE})"
@@ -2578,11 +3111,114 @@ for FILE in "${CONFIG_FILES_AICS[@]}"; do
     fi
 done
 ----
+====
++
+Because the values are not persistent, run this script from a `systemd` timer so that they
+are refreshed periodically and after any instance restart:
++
+[source,ini]
+----
+# /etc/systemd/system/ptp-forward-gm.service
+[Unit]
+Description=Forward Grandmaster parameters to the add-in ptp4l instances
+After=ptp4l@nac.service ptp4l@aic1.service ptp4l@aic2.service
 
-[NOTE]
-====
-The script must run every time the GM changes.
-====
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/04-ptp-forward-GM.sh
+----
++
+[source,ini]
+----
+# /etc/systemd/system/ptp-forward-gm.timer
+[Unit]
+Description=Refresh forwarded Grandmaster parameters
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+----
++
+The effect is visible by querying an add-in `ptp4l` instance on the BC: before forwarding,
+the node advertises its file defaults; after forwarding begins, it advertises the Grand
+Master's actual values (which then propagate to the downstream OC). For example,
+`gm.ClockClass` changes:
++
+[,console]
+----
+# ./get_pmc_values.sh /etc/ptp4l-aic1.conf     # before forwarding
+        gm.ClockClass                         165
+        gm.ClockAccuracy                      0xfe
+        gm.OffsetScaledLogVariance            0xffff
+# ./get_pmc_values.sh /etc/ptp4l-aic1.conf     # after forwarding
+        gm.ClockClass                         8
+        gm.ClockAccuracy                      0xfe
+        gm.OffsetScaledLogVariance            0xffff
+----
+
+. Optionally, derive the system clock from PTP with `phc2sys`, using the integrated PHC as
+source (`/etc/sysconfig/phc2sys`):
++
+[source,]
+----
+OPTIONS="-f /etc/ptp4l-nac.conf -s /dev/ptp1 -c CLOCK_REALTIME -w"
+----
+
+*CAPI automation*
+
+To deploy this scenario with the automated provisioning workflow, use the GNR-D-specific
+Cluster API template described in <<add-telco-ptp-gnrd,Fully automated directed network
+provisioning — GNR-D scenarios>>. Unlike the standard scenarios, it deploys several `ptp4l`
+instances, the `ts2phc` service, the DPLL boot-time setup and the Grandmaster forwarding
+timer, so it requires the additional configuration files and `systemd` units listed above.
+Override its placeholders with the values below.
+
+.GNR-D Boundary Clock
+[cols="1,2"]
+|===
+| Placeholder | Value
+
+| `$\{GNRD_DPLL_SETUP_CONTENTS\}`
+| Copy the content from <<gnrd-startup-setup,`01-gnrd-startup-setup.sh`>>.
+
+| `$\{GNRD_FORWARD_GM_CONTENTS\}`
+| Copy the content from <<gnrd-pmc-forward,`04-ptp-forward-GM.sh`>>.
+
+| `$\{TS2PHC_CONF_CONTENTS\}`
+| Copy the content from <<gnrd-ts2phc-config,`/etc/ts2phc-cf-all.cfg`>>.
+
+| `$\{TS2PHC_OPTIONS\}`
+| `-f /etc/ts2phc-cf-all.cfg -s /dev/ptp1 -m`
+
+| `$\{PTP4L_NAC_CONTENTS\}`
+| Copy the content from <<gnrd-ptp4l-config-nac,`/etc/ptp4l-nac.conf`>>.
+
+| `$\{PTP4L_AIC1_CONTENTS\}`
+| Copy the content from <<gnrd-ptp4l-config-aics,`/etc/ptp4l-aic1.conf`>>.
+
+| `$\{PTP4L_AIC2_CONTENTS\}`
+| Copy the content from <<gnrd-ptp4l-config-aic2,`/etc/ptp4l-aic2.conf`>>.
+|===
+
+[#ptp-scenario-bc-synce-multi-nic-dpll]
+=== BC with PTP + SyncE + propagation (multi-NIC, DPLL)
+
+*Explanation*
+
+// TODO
+
+*Diagram*
+
+// TODO: image::<path>[BC with PTP + SyncE + propagation (multi-NIC, DPLL)]
+
+*Configuration*
+
+// TODO
+
+*CAPI automation*: see <<add-telco-ptp,Fully automated directed network provisioning>>.
 
 [#sctp]
 == SCTP - Stream Control Transmission Protocol
