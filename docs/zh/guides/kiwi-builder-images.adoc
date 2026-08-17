@@ -1,0 +1,165 @@
+[#guides-kiwi-builder-images]
+= 使用 Kiwi 构建更新的 SUSE Linux Micro 镜像
+:revdate: 2025-10-09
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+本节介绍了如何生成更新的 SUSE Linux Micro 镜像，以供 Edge Image Builder、Cluster API (CAPI) + Metal^3^ 使用，或直接将磁盘镜像写入块设备。此过程在以下情况下非常有用：需要在初始系统引导镜像中包含最新补丁（以最大限度地减少安装后的补丁传输），或者在使用 CAPI 的场景中，首选使用新镜像重新安装操作系统，而不是就地升级主机。
+
+此过程利用 https://osinside.github.io/kiwi/[Kiwi] 来运行镜像构建。{product} 附带了一个容器化版本，通过内置的辅助工具简化了整个过程，允许指定所需的 *控制文件*。控制文件定义了所需的输出镜像类型，常见类型如下：
+
+* “*Base*” - 包含精简软件包集（包含 podman）的 SUSE Linux Micro 磁盘镜像。
+* “*Base-SelfInstall*” - 基于上述“Base”的 SelfInstall 镜像。
+* “*Base-RT*” - 与上述“Base”相同，但改用实时 (rt) 内核。
+* “*Base-RT-SelfInstall*” - 基于上述“Base-RT”的 SelfInstall 镜像
+* “*Default*” - 基于上述“Base”的 SUSE Linux Micro 磁盘镜像，但包含更多工具，包括虚拟化堆栈、Cockpit 和 salt-minion。
+* “*Default-SelfInstall*” - 基于上述“Default”的 SelfInstall 镜像
+
+有关更多详细信息，请参阅 https://documentation.suse.com/sle-micro/{version-operatingsystem}/html/Micro-deployment-images/index.html#alp-images-installer-type[SUSE Linux Micro {version-operatingsystem}] 文档。
+
+NOTE: 此过程适用于 {x86-64} 和 {aarch64} 架构，但必须使用与所构建镜像架构相同的构建主机。换句话说，要构建 {aarch64} 镜像，需要使用 {aarch64} 构建主机，反之亦然（对于 {x86-64}），目前不支持交叉构建。
+
+== 先决条件
+
+Kiwi 镜像构建器需要满足以下条件：
+
+* 一台与所构建镜像架构相同的 SUSE Linux Micro {version-operatingsystem} 主机（“构建系统”）。
+* 构建系统需要已通过 `SUSEConnect` 注册（该注册用于从 SUSE 储存库拉取最新的软件包）
+* 可用于拉取所需软件包的互联网连接。如果通过代理连接，则需要预先配置构建主机。
+* 构建主机上需要禁用 SELinux（因为 SELinux 标记是在容器中进行的，它可能会与主机策略冲突）
+* 至少 10GB 的可用磁盘空间，以容纳容器镜像、构建根目录以及生成的输出镜像。
+
+== 入门
+
+由于某些限制，目前需要禁用 SELinux。连接到 SUSE Linux Micro {version-operatingsystem} 镜像构建主机并确保已禁用 SELinux：
+
+[,console]
+----
+# setenforce 0
+----
+
+创建一个与 Kiwi 构建容器共享的输出目录，以保存生成的镜像：
+
+[,console]
+----
+# mkdir ~/output
+----
+
+从 SUSE 注册中心拉取最新的 Kiwi 构建器镜像：
+
+[,console,subs="attributes"]
+----
+# podman pull registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder}
+(...)
+----
+
+== 构建默认镜像
+
+如果在运行容器镜像时未提供任何参数，这是 Kiwi 镜像容器的默认行为。以下命令运行 `podman`，并将两个目录映射到容器：
+
+* 来自底层主机的 `/etc/zypp/repos.d` SUSE Linux Micro 软件包储存库目录。
+* 上面创建的输出 `~/output` 目录。
+
+Kiwi 镜像容器需要按如下方式运行 `build-image` 辅助脚本：
+
+[,console,subs="attributes"]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image
+(...)
+----
+
+NOTE: 如果您是第一次运行此脚本，预计它会在启动后不久 *失败*，并显示“*错误：早期循环设备测试失败，请重试容器运行。*”，这是底层主机系统上创建的循环设备在容器镜像内无法立即识别的症状。只需重新运行该命令即可顺利进行。
+
+几分钟后，可以在本地输出目录中找到这些镜像：
+
+[,console,subs="attributes"]
+----
+(...)
+INFO: Image build successful, generated images are available in the 'output' directory.
+
+# ls -1 output/
+SLE-Micro.x86_64-{version-operatingsystem}.changes
+SLE-Micro.x86_64-{version-operatingsystem}.packages
+SLE-Micro.x86_64-{version-operatingsystem}.raw
+SLE-Micro.x86_64-{version-operatingsystem}.verified
+build
+kiwi.result
+kiwi.result.json
+----
+
+== 使用其他控制文件构建镜像
+
+为了构建不同的控制文件，使用了 Kiwi 容器镜像辅助脚本中的“*-p*”命令选项。例如，要构建“*Default-SelfInstall*”ISO 映像：
+
+[,console,subs="attributes"]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image -p Default-SelfInstall
+(...)
+----
+
+NOTE: 为避免数据丢失，如果 `output` 目录中有镜像，Kiwi 将拒绝运行。在继续 `rm -f output/*` 之前，必须删除输出目录的内容。
+
+或者，要使用实时内核（“*kernel-rt*”）构建 SelfInstall ISO 映像：
+
+[,console,subs="attributes"]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image -p Base-RT-SelfInstall
+(...)
+----
+
+== 构建具有大扇区大小的镜像
+
+某些硬件需要具有大扇区大小的镜像，即 *4096 bytes* 而不是标准的 512 字节。容器化 Kiwi 构建器支持通过指定“*-b*”参数来生成具有大块大小的镜像。例如，要构建具有大扇区大小的“*Default-SelfInstall*”镜像：
+
+[,console,subs="attributes"]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image -p Default-SelfInstall -b
+(...)
+----
+
+== 使用自定义 Kiwi 镜像定义文件
+
+对于高级用例，可以使用自定义 Kiwi 镜像定义文件 (`SL-Micro.kiwi`) 以及任何必要的构建后脚本。这需要覆盖由 {product} 团队预打包的默认定义。
+
+创建一个新的目录，并将其映射到辅助脚本正在查找的容器镜像中 (`/micro-sdk/defs`)：
+
+[,console,subs="attributes"]
+----
+# mkdir ~/mydefs/
+# cp /path/to/SL-Micro.kiwi ~/mydefs/
+# cp /path/to/config.sh ~/mydefs/
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output -v ~/mydefs/:/micro-sdk/defs/ \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image
+(...)
+----
+
+[WARNING]
+====
+这仅适用于高级用例，并可能导致可支持性问题。请联系您的 SUSE 代表以获取进一步的建议和指导。
+====
+
+要获取容器中包含的默认 Kiwi 镜像定义文件，可以使用以下命令：
+
+[,console,subs="attributes"]
+----
+$ podman create --name kiwi-builder registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder}
+$ podman cp kiwi-builder:/micro-sdk/defs/SL-Micro.kiwi .
+$ podman cp kiwi-builder:/micro-sdk/defs/SL-Micro.kiwi.4096 .
+$ podman rm kiwi-builder
+$ ls ./SL-Micro.*
+(...)
+----

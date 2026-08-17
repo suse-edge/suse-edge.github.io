@@ -1,0 +1,214 @@
+[#integrations-nats]
+= NATS
+:revdate: 25/04/2025
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+https://nats.io/[NATS] es una tecnología de conectividad creada para el mundo hiperconectado en constante crecimiento. Es una tecnología única que permite a las aplicaciones comunicarse de forma segura a través de cualquier combinación de proveedores de nube, in situ, edge, web y dispositivos móviles. NATS consta de una familia de productos de código abierto que están estrechamente integrados, pero que pueden implementarse de forma sencilla e independiente. NATS es utilizado a nivel mundial por miles de empresas, abarcando casos de uso que incluyen microservicios, edge computing, dispositivos móviles e IoT, y puede utilizarse para aumentar o reemplazar la mensajería tradicional.
+
+== Arquitectura
+
+NATS es una infraestructura que permite el intercambio de datos entre aplicaciones en forma de mensajes.
+
+=== Aplicaciones cliente de NATS
+
+Las bibliotecas cliente de NATS pueden utilizarse para permitir que las aplicaciones publiquen, se suscriban, soliciten y respondan entre diferentes instancias.
+Estas aplicaciones se denominan generalmente `client applications`.
+
+=== Infraestructura de servicio de NATS
+
+Los servicios de NATS son proporcionados por uno o más procesos de servidor NATS que están configurados para interconectarse entre sí y proporcionar una infraestructura de servicio de NATS. La infraestructura de servicio de NATS puede escalar desde un único proceso de servidor NATS ejecutándose en un dispositivo final hasta un superclúster global público de muchos clústeres que abarcan todos los principales proveedores de nube y todas las regiones del mundo.
+
+=== Diseño de mensajería sencillo
+
+NATS facilita que las aplicaciones se comuniquen mediante el envío y la recepción de mensajes. Estos mensajes se dirigen e identifican mediante cadenas de asunto y no dependen de la ubicación en la red.
+Los datos se codifican y se enmarcan como un mensaje y lo envía un publicador. El mensaje es recibido, decodificado y procesado por uno o más suscriptores.
+
+=== NATS JetStream
+
+NATS tiene un sistema de persistencia distribuido integrado llamado JetStream.
+JetStream se creó para resolver los problemas identificados con el streaming en la tecnología actual: complejidad, fragilidad y falta de escalabilidad. JetStream también resuelve el problema del acoplamiento entre el publicador y el suscriptor (los suscriptores deben estar activos y en funcionamiento para recibir el mensaje cuando se publica).
+Puede encontrar más información sobre NATS JetStream https://docs.nats.io/nats-concepts/jetstream[aquí].
+
+== Instalación
+
+=== Instalación de NATS sobre K3s
+
+NATS está diseñado para múltiples arquitecturas, por lo que se puede instalar fácilmente en <<components-k3s,K3s.>>
+
+Vamos a crear un archivo de valores para sobrescribir los valores predeterminados de NATS.
+
+[,yaml]
+----
+cat > values.yaml <<EOF
+cluster:
+  # Enable the HA setup of the NATS
+  enabled: true
+  replicas: 3
+
+nats:
+  jetstream:
+    # Enable JetStream
+    enabled: true
+
+    memStorage:
+      enabled: true
+      size: 2Gi
+
+    fileStorage:
+      enabled: true
+      size: 1Gi
+      storageDirectory: /data/
+EOF
+----
+
+Ahora instalemos NATS mediante Helm:
+
+[,bash]
+----
+helm repo add nats https://nats-io.github.io/k8s/helm/charts/
+helm install nats nats/nats --namespace nats --values values.yaml \
+ --create-namespace
+----
+
+Con el archivo `values.yaml` anterior, los siguientes componentes estarán en el espacio de nombres `nats`:
+
+. Versión de alta disponibilidad (HA) del Statefulset de NATS que contiene tres contenedores: Servidor NATS + sidecars de recarga de configuración y métricas.
+. Contenedor NATS box, que viene con un conjunto de utilidades `NATS` que se pueden utilizar para verificar la configuración.
+. JetStream también aprovecha su sistema secundario Key-Value que viene con `PVCs` vinculado a los pods.
+
+==== Probando la configuración
+
+[,bash]
+----
+kubectl exec -n nats -it deployment/nats-box -- /bin/sh -l
+----
+
+. Cree una suscripción para el asunto de prueba:
++
+[,bash]
+----
+nats sub test &
+----
++
+. Envíe un mensaje al asunto de prueba:
++
+[,bash]
+----
+nats pub test hi
+----
+
+==== Limpiando
+
+[,bash]
+----
+helm -n nats uninstall nats
+rm values.yaml
+----
+
+=== NATS como sistema secundario para K3s
+
+Un componente que aprovecha K3s es https://github.com/k3s-io/kine[KINE], que es un shim que permite la sustitución de etcd por sistemas secundarios de almacenamiento alternativos dirigidos originalmente a bases de datos relacionales.
+Como JetStream proporciona una API de Key Value, esto hace posible tener a NATS como sistema secundario para el clúster de K3s.
+
+Ya existe una PR fusionada que hace que NATS integrado en K3s sea sencillo, pero el cambio todavía https://github.com/k3s-io/k3s/issues/7410#issue-1692989394[no está incluido] en las versiones de K3s.
+
+Por este motivo, el binario de K3s debe compilarse manualmente.
+
+//In this tutorial, https://suse-edge.github.io/docs/quickstart/slemicro-utm-aarch64[SUSE Linux Micro on OSX on Apple Silicon (UTM)] VM is used.
+
+//[NOTE]
+//====
+//Run the commands below on the OSX PC.
+//====
+
+==== Compilación de K3s
+
+[,bash]
+----
+git clone --depth 1 https://github.com/k3s-io/k3s.git && cd k3s
+----
+
+El comando siguiente añade `nats` en las etiquetas de compilación para habilitar la función integrada de NATS en K3s:
+
+[,bash]
+----
+sed -i '' 's/TAGS="ctrd/TAGS="nats ctrd/g' scripts/build
+make local
+----
+
+Reemplace <node-ip> por la IP real del nodo donde se iniciará K3s:
+
+[,bash]
+----
+export NODE_IP=<node-ip>
+sudo scp dist/artifacts/k3s-arm64 ${NODE_IP}:/usr/local/bin/k3s
+----
+
+[NOTE]
+====
+La compilación local de K3s requiere el plugin buildx de la CLI de Docker.
+Se puede https://github.com/docker/buildx#manual-download[instalar manualmente] si `$ make local` falla.
+====
+
+==== Instalación de la CLI de NATS
+
+[,bash]
+----
+TMPDIR=$(mktemp -d)
+nats_version="nats-0.0.35-linux-arm64"
+curl -o "${TMPDIR}/nats.zip" -sfL https://github.com/nats-io/natscli/releases/download/v0.0.35/${nats_version}.zip
+unzip "${TMPDIR}/nats.zip" -d "${TMPDIR}"
+
+sudo scp ${TMPDIR}/${nats_version}/nats ${NODE_IP}:/usr/local/bin/nats
+rm -rf ${TMPDIR}
+----
+
+==== Ejecución de NATS como sistema secundario de K3s
+
+Vamos a `ssh` en el nodo y ejecutar K3s con el flag `--datastore-endpoint` apuntando a `nats`.
+
+[NOTE]
+====
+El comando siguiente inicia K3s como un proceso en primer plano, por lo que los registros pueden seguirse fácilmente para ver si hay algún problema.
+Para no bloquear el terminal actual, se podría añadir un flag `&` antes del comando para iniciarlo como un proceso en segundo plano.
+====
+
+[,bash]
+----
+k3s server  --datastore-endpoint=nats://
+----
+
+[NOTE]
+====
+Para hacer que el servidor K3s con el sistema secundario de NATS sea permanente en su VM `slemicro`, se puede ejecutar el siguiente script, que crea un servicio `systemd` con las configuraciones necesarias.
+====
+
+[,bash]
+----
+export INSTALL_K3S_SKIP_START=false
+export INSTALL_K3S_SKIP_DOWNLOAD=true
+
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server \
+ --datastore-endpoint=nats://"  sh -
+----
+
+==== Solución de problemas
+
+Los comandos siguientes se pueden ejecutar en el nodo para verificar que todo lo relacionado con el flujo funciona correctamente:
+
+[,bash]
+----
+nats str report -a
+nats str view -a
+----

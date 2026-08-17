@@ -1,0 +1,95 @@
+[#atip-architecture]
+= 概念与架构
+:revdate: 2026-05-27
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+SUSE Telco Cloud 是一个旨在从核心到边缘大规模托管现代云原生电信应用程序的平台。
+
+本页面介绍了 SUSE Telco Cloud 中使用的架构和组件。
+
+
+== SUSE Telco Cloud 架构
+
+下图显示了 SUSE Telco Cloud 的高层架构：
+
+image::product-atip-architecture1.png[scaledwidth=100%]
+
+
+== 组件
+
+这里有两个不同的堆栈：管理堆栈和运行时堆栈：
+
+* *管理堆栈*：这是 SUSE Telco Cloud 中用于管理运行时堆栈的部署和生命周期的部分。此解决方案包含下列组件：
+  ** 使用 <<components-rancher,Rancher>> 在公有云和私有云环境中进行多集群管理
+  ** 支持 <<components-metal3,Metal^3^>>、<<components-metallb,MetalLB>> 和 `CAPI` (Cluster API) 基础设施提供程序的裸机支持
+  ** 全面的租户隔离和 `IDP` (身份提供程序) 集成
+  ** 庞大的第三方集成和扩展市场
+  ** 供应商中立的 API 和丰富的提供程序生态系统
+  ** 控制 SUSE Linux Micro 事务更新
+  ** 使用 <<components-fleet,Fleet>> 通过 Git 存储库管理集群生命周期的 GitOps 引擎
+
+* *运行时堆栈*：这是 SUSE Telco Cloud 中用于运行工作负载的部分。
+  ** <<components-rke2,RKE2>> 作为安全加固的轻量级 Kubernetes 发行版，针对边缘和合规性要求严格的电信环境进行了优化。
+  ** （可选）<<components-suse-security,SUSE Security>>，用于启用镜像漏洞扫描、深度数据包检测和自动集群内流量控制等安全功能。
+  ** （可选）使用 <<components-suse-storage,SUSE Storage>> 的块存储，以启用一种简单易用的云原生存储解决方案。
+  ** 经过优化的操作系统，采用 <<components-slmicro,SUSE Linux Micro>>，可实现安全、轻量且不可变（事务性文件系统）的操作系统，用于运行容器。SUSE Linux Micro 可在 {aarch64} 和 {x86-64} 架构上使用，它还支持用于电信和边缘用例的 `Real-Time Kernel`。
+
+== 部署模型
+
+SUSE Telco Cloud 遵循两阶段部署模型：管理集群使用由 <<components-eib,Edge Image Builder>> 生成的镜像进行部署，下游集群则通过定向网络配置进行部署。本章概述了此部署模型，因为它是 SUSE Telco Cloud 环境推荐且受支持的方法。
+
+=== 为什么选择此部署模型？
+
+管理集群是一次性的单站点部署。基于镜像的配置将所有组件捆绑到一个可启动镜像中。通过这种方式，管理集群将自行启动，从而将操作复杂性降至最低。这是使其启动并运行的最简单、最直接的方法。
+
+然而，下游集群的情况则不同。在电信环境中，它们需要在许多数据中心和边缘站点进行大规模部署，且通常没有现场技术专家。定向网络配置正是为此而设计：它要求目标服务器支持带外管理接口（如 Redfish），管理集群通过该接口远程开启、检查并配置裸机节点，无需任何现场干预。
+
+如果像基于镜像的配置那样，将所有集群特定的配置烘焙到启动镜像中，意味着每个站点的差异都需要不同的镜像，并且任何配置更改都需要在所有站点重新构建和分发镜像。定向网络配置通过保持操作系统镜像的通用性，并在配置时从管理集群驱动所有集群特定的配置（包括网络、Kubernetes 和电信配置文件）来解决此问题。操作员只需上架、通电并连接硬件，其余工作由管理集群处理。
+
+这种分离还解锁了完整的 GitOps 集成。由于整个下游集群定义表示为 Cluster API 清单，因此它可以存储在 Git 中并由 Fleet 在所有站点进行协调，从而使部署、配置和生命周期操作完全可审计且可重复，无需人工干预。
+
+=== 管理集群的部署
+
+使用 <<components-eib,Edge Image Builder>> 创建包含管理堆栈的新 `ISO` 镜像。然后，您可以使用此 `ISO` 镜像在虚拟机或裸机上安装新的管理集群。
+
+image::product-atip-architecture2.png[scaledwidth=100%]
+
+NOTE: 有关如何部署新管理集群的详细信息，请参见 <<atip-management-cluster,SUSE Telco Cloud 管理集群指南>>。
+
+NOTE: 有关如何使用 Edge Image Builder 的详细信息，请参见 <<quickstart-eib,Edge Image Builder 指南>>。
+
+
+=== 部署带有电信配置文件的单节点下游集群
+
+一旦管理集群启动并运行，我们就可以使用它，通过定向网络配置工作流部署一个启用了所有电信功能并进行了相应配置的单节点下游集群。
+
+下图显示了部署它的高级工作流：
+
+image::product-atip-architecture3.png[scaledwidth=100%]
+
+NOTE: 有关如何部署下游集群的详细信息，请参见 <<atip-automated-provisioning,SUSE Telco Cloud 自动化配置指南。>>
+
+NOTE: 有关电信功能的详细信息，请参见 <<atip-features,SUSE Telco Cloud 电信功能指南。>>
+
+=== 部署高可用性下游集群
+
+一旦管理集群启动并运行，我们就可以使用它，通过定向网络配置工作流部署一个以 `MetalLB` 作为负载均衡器的高可用性下游集群。
+
+下图显示了部署它的高级工作流：
+
+image::product-atip-architecture4.png[scaledwidth=100%]
+
+NOTE: 有关如何部署下游集群的详细信息，请参见 <<atip-automated-provisioning,SUSE Telco Cloud 自动化配置指南。>>
+
+NOTE: 有关 `MetalLB` 的详细信息，请参见 <<components-metallb,此处：>>

@@ -1,0 +1,2553 @@
+[#atip-features]
+= Configuração de recursos de Telco
+:revdate: 2026-05-27
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Esta seção documenta e explica a configuração de recursos específicos de Telco em clusters implantados via SUSE Telco Cloud.
+
+O método de implantação de provisionamento de rede direcionado é utilizado, conforme descrito na seção <<atip-automated-provisioning,Provisionamento Automatizado>>.
+
+Os tópicos a seguir estão incluídos nesta seção:
+
+* <<kernel-image-for-real-time,Imagem do kernel para tempo real>>: Imagem de kernel a ser usada pelo kernel de tempo real.
+* <<kernel-args,Argumentos de kernel para baixa latência e alto desempenho>>: Argumentos de kernel a serem usados para desempenho máximo e baixa latência na execução de cargas de trabalho de telco.
+* <<cpu-pinning-host,Fixação de CPU no Host>>: Isolamento das CPUs por meio de argumentos de kernel e arquivo de controle TuneD.
+* <<cpu-pinning-k8s,Fixação de CPU no Kubernetes>>: Isolamento das CPUs no Kubernetes por meio da configuração do Kubelet.
+* <<cni-configuration,Configuração de CNI>>: Configuração de CNI a ser usada pelo cluster Kubernetes.
+* <<sriov,Configuração de SR-IOV>>: Configuração de SR-IOV a ser usada pelas cargas de trabalho do Kubernetes.
+* <<dpdk,Configuração de DPDK>>: Configuração de DPDK a ser usada pelo sistema.
+* <<acceleration,Aceleração vRAN>>: Descarregamento do cálculo do algoritmo FEC para a placa de Aceleração vRAN.
+* <<huge-pages,Huge pages>>: Configuração de Huge pages a ser usada pelas cargas de trabalho do Kubernetes.
+* <<numa-aware-scheduling,Configuração de agendamento com reconhecimento de NUMA>>: Configuração de agendamento com reconhecimento de NUMA a ser usada pelas cargas de trabalho do Kubernetes.
+* <<metal-lb-configuration,Configuração do Metal LB>>: Configuração do Metal LB a ser usada pelas cargas de trabalho do Kubernetes.
+* <<private-registry,Configuração de registro privado>>: Configuração de registro privado a ser usada pelas cargas de trabalho do Kubernetes.
+* <<ptp-configuration,Configuração do Precision Time Protocol>>: Arquivos de configuração para executar perfis PTP de Telco.
+* <<sctp,Configuração SCTP>>: Habilitar a camada SCTP na pilha IP do kernel Linux.
+
+
+[#kernel-image-for-real-time]
+== Imagem do kernel para tempo real
+
+A imagem do kernel de tempo real não é necessariamente melhor do que um kernel padrão.
+É um kernel diferente ajustado para um caso de uso específico. O kernel de tempo real é ajustado para menor latência ao custo de throughput. O kernel de tempo real não é recomendado para uso geral, mas, em nosso caso, este é o kernel recomendado para cargas de trabalho de telecomunicações onde a latência é um fator chave.
+
+Existem quatro recursos principais:
+
+* Execução determinística:
++
+Obtenha maior previsibilidade — garanta que processos de negócios críticos sejam concluídos a tempo, sempre, e forneça um serviço de alta qualidade, mesmo sob cargas pesadas do sistema. Ao proteger recursos essenciais do sistema para processos de alta prioridade, você pode garantir maior previsibilidade para aplicações sensíveis ao tempo.
++
+* Baixo jitter:
++
+O baixo jitter, construído sobre a tecnologia altamente determinística, ajuda a manter as aplicações sincronizadas com o mundo real. Isso ajuda serviços que precisam de cálculos contínuos e repetidos.
++
+* Herança de prioridades:
++
+Herança de prioridades refere-se à capacidade de um processo de menor prioridade assumir uma prioridade mais alta quando há um processo de maior prioridade que exige que o processo de menor prioridade termine antes que ele possa concluir sua tarefa. O SUSE Linux Enterprise Real Time resolve esses problemas de inversão de prioridade para processos de missão crítica.
++
+* Interrupções de thread:
++
+Processos executados em modo de interrupção em um sistema operacional de propósito geral não são preemptíveis. Com o SUSE Linux Enterprise Real Time, essas interrupções foram encapsuladas por threads do kernel, que são interrompíveis e permitem que as interrupções de hardware e software sejam preemptadas por processos de maior prioridade definidos pelo usuário.
++
+No nosso caso, se você instalou uma imagem de tempo real como `SUSE Linux Micro RT`, o kernel de tempo real já está instalado. A partir do https://scc.suse.com/[SUSE Customer Center], você pode baixar a imagem do kernel de tempo real.
++
+
+[NOTE]
+====
+Para mais informações sobre o kernel de tempo real, visite https://www.suse.com/products/realtime/[SUSE Real Time].
+====
+
+[#kernel-args]
+== Argumentos do kernel para baixa latência e alto desempenho
+
+Configurar os argumentos apropriados do kernel é essencial para otimizar o desempenho, alcançar baixa latência e garantir a implantação bem-sucedida de clusters para cargas de trabalho de telecomunicações. Embora alguns parâmetros sejam projetados especificamente para permitir que o kernel de tempo real funcione de forma ideal, esta seção se aplica tanto às configurações de kernel RT quanto às padrão. Além disso, certos argumentos são obrigatórios para que o método de Provisionamento de Rede Direcionado implante com sucesso nós de cluster downstream.
+
+* Remova `kthread_cpus` ao usar o kernel de tempo real do SUSE. Este parâmetro controla em quais CPUs as threads do kernel são criadas. Ele também controla quais CPUs são permitidos para o PID 1 e para o carregamento de módulos do kernel (o auxiliar de espaço do usuário kmod). Este parâmetro não é reconhecido e não tem qualquer efeito.
+
+* Isole os núcleos da CPU usando `isolcpus`, `nohz_full`, `rcu_nocbs` e `irqaffinity`. Para uma lista abrangente de técnicas de CPU pinning, consulte o capítulo <<cpu-pinning-host,CPU Pinning on Host>>.
+
+* Adicione as flags `domain,nohz,managed_irq` ao argumento de kernel `isolcpus`. Sem nenhuma flag, `isolcpus` é equivalente a especificar apenas a flag `domain`. Isso isola as CPUs especificadas do agendamento, incluindo tarefas do kernel. A flag `nohz` interrompe o tick do agendador nas CPUs especificadas (se apenas uma tarefa estiver executável em uma CPU), e a flag `managed_irq` evita o roteamento de interrupções externas (dispositivo) gerenciadas nas CPUs especificadas. Observe que as linhas IRQ de dispositivos NVMe são totalmente gerenciadas pelo kernel e, como consequência, serão roteadas para os núcleos não isolados (housekeeping). Por exemplo, a linha de comando fornecida ao final desta seção resultará em apenas quatro filas (mais uma fila de administração/controle) alocadas no sistema:
+
++
+[,shell]
+----
+for I in $(grep nvme0 /proc/interrupts | cut -d ':' -f1); do cat /proc/irq/${I}/effective_affinity_list; done | column
+39      0       19      20      39
+----
++
+Este comportamento evita qualquer interrupção causada por E/S de disco em qualquer aplicação sensível ao tempo em execução nos núcleos isolados, mas pode exigir atenção e um projeto cuidadoso para cargas de trabalho focadas em armazenamento.
+
+* Ajuste os ticks (interrupções de temporizador periódicas do kernel):
+** `skew_tick=1`: os ticks podem, às vezes, ocorrer simultaneamente. Em vez de todas as CPUs receberem seu tick de temporizador exatamente no mesmo momento, `skew_tick=1` faz com que ocorram em momentos ligeiramente deslocados. Isso ajuda a reduzir o jitter do sistema, resultando em tempos de resposta de interrupção mais consistentes e menores (um requisito essencial para aplicações sensíveis à latência).
+** `nohz=on`: interrompe o tick de temporizador periódico em CPUs ociosas.
+** `nohz_full=<cpu-cores>`: Interrompe o tick de temporizador periódico em CPUs especificadas que são dedicadas a aplicações de tempo real.
+
+* Desative o tratamento de Machine Check Exception (MCE) especificando `mce=off`. MCEs são erros de hardware detectados pelo processador e desativá-los pode evitar logs ruidosos.
+
+* Adicione `nowatchdog` para desativar o watchdog de soft-lockup, que é implementado como um temporizador em execução no contexto de interrupção de hardware do temporizador. Quando ele expira (ou seja, um soft lockup é detectado), ele imprimirá um aviso (no contexto de interrupção de hardware), executando quaisquer alvos de latência. Mesmo que nunca expire, ele entra na lista de temporizadores, aumentando ligeiramente a sobrecarga de cada interrupção de temporizador. Esta opção também desativa o watchdog NMI, para que os NMIs não possam interferir.
+
+* `nmi_watchdog=0` desativa o watchdog NMI (Non-Maskable Interrupt). Isso pode ser omitido quando `nowatchdog` é usado.
+
+* RCU (Read-Copy-Update) é um mecanismo de kernel que permite acesso simultâneo e sem bloqueio para muitos leitores a dados compartilhados. Um callback RCU, uma função acionada após um 'período extra', garante que todos os leitores anteriores tenham terminado para que os dados antigos possam ser recuperados com segurança. Nós ajustamos o RCU, particularmente para cargas de trabalho sensíveis, para descarregar esses callbacks de CPUs dedicadas (fixadas), evitando que operações do kernel interfiram em tarefas críticas e sensíveis ao tempo.
+** Especifique as CPUs fixadas em `rcu_nocbs` para que os callbacks RCU não sejam executados nelas. Isso ajuda a reduzir o jitter e a latência para as cargas de trabalho de tempo real.
+** `rcu_nocb_poll` faz com que as CPUs sem callback façam 'polling' regularmente para verificar se o tratamento de callback é necessário. Isso pode reduzir a sobrecarga de interrupção.
+** `rcupdate.rcu_cpu_stall_suppress=1` suprime avisos de travamento de CPU RCU, que às vezes podem ser falsos positivos em sistemas de tempo real com carga pesada
+** `rcupdate.rcu_expedited=1` acelera o período extra para operações RCU, tornando as seções críticas de leitura mais responsivas
+** `rcupdate.rcu_normal_after_boot=1` Quando usado com rcu_expedited, permite que o RCU reverta para a operação normal (não acelerada) após a inicialização do sistema.
+** `rcupdate.rcu_task_stall_timeout=0` desativa o detector de travamento de tarefas RCU, evitando possíveis avisos ou paradas do sistema devido a tarefas RCU de longa duração.
+** `rcutree.kthread_prio=99` define a prioridade da thread do kernel de callback RCU para a mais alta possível (99), garantindo que ela seja agendada e processe os callbacks RCU prontamente, quando necessário.
+
+* Adicione `ignition.platform.id=openstack` para que o Metal3 e a API de Cluster provisionem/desprovisionem o cluster com sucesso. Isso é usado pelo agente Python do Metal3, que se originou do Openstack Ironic.
+
+* Habilite https://documentation.suse.com/smart/network/html/network-interface-predictable-naming/index.html[Nomeação previsível de interface de rede] via `net.ifnames=1`. A partir do SUSE Linux Micro 6.2, isso é habilitado por padrão e uma configuração explícita não é necessária. Para versões anteriores à 6.2, isso deve ser definido explicitamente como um argumento do kernel. Isso se alinha com a configuração `predictableNicNames` no gráfico Helm Metal^3^ do Cluster de Gerenciamento, que é necessária para que o Provisionamento de Rede Direcionado funcione corretamente. A nomenclatura consistente de interface de rede também é crítica quando o SR-IOV é utilizado.
+
+* Remova `intel_pstate=passive`. Esta opção configura `intel_pstate` para funcionar com governadores cpufreq genéricos, mas para fazer isso funcionar, ela desativa os P-states gerenciados por hardware (`HWP`) como um efeito colateral. Para reduzir a latência de hardware, esta opção não é recomendada para cargas de trabalho em tempo real.
+
+* Substitua `intel_idle.max_cstate=0 processor.max_cstate=1` por `idle=poll`. Para evitar transições de C-State, a opção `idle=poll` é usada para desativar as transições de C-State e manter a CPU no C-State mais alto. A opção `intel_idle.max_cstate=0` desativa `intel_idle`, portanto `acpi_idle` é usada, e `acpi_idle.max_cstate=1` então define o C-state máximo para acpi_idle.
+Em arquiteturas {x86-64}, o primeiro ACPI C-State é sempre `POLL`, mas ele usa uma função `poll_idle()`, que pode introduzir uma pequena latência ao ler o clock periodicamente e reiniciar o loop principal em `do_idle()` após um tempo limite (isso também envolve limpar e definir a flag de tarefa `TIF_POLL`).
+Em contraste, `idle=poll` executa um loop contínuo, aguardando ativamente que uma tarefa seja reagendada. Isso minimiza a latência de saída do estado ocioso, mas ao custo de manter a CPU funcionando em velocidade máxima na thread ociosa.
+
+* Desative o C1E no BIOS. Esta opção é importante para desativar o estado C1E no BIOS para evitar que a CPU entre no estado C1E quando ociosa. O estado C1E é um estado de baixo consumo de energia que pode introduzir latência quando a CPU está ociosa.
+
+O restante desta documentação aborda parâmetros adicionais, incluindo huge pages e IOMMU.
+
+Isso fornece um exemplo de argumentos de kernel para um servidor Intel de 32 núcleos, incluindo os ajustes mencionados anteriormente:
+
+[,shell]
+----
+$ cat /proc/cmdline
+BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll
+----
+
+Aqui está outro exemplo de configuração para um servidor AMD de 64 núcleos. Entre os 128 processadores lógicos (`0-127`), os primeiros 8 núcleos (`0-7`) são designados para manutenção, enquanto os 120 núcleos restantes (`8-127`) são fixados para os aplicativos:
+[,shell]
+----
+$ cat /proc/cmdline
+BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=575291cf-74e8-42cf-8f2c-408a20dc00b8 skew_tick=1 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 amd_iommu=on iommu=pt irqaffinity=0-7 isolcpus=domain,nohz,managed_irq,8-127 nohz_full=8-127 rcu_nocbs=8-127 mce=off nohz=on nowatchdog nmi_watchdog=0 nosoftlockup quiet rcu_nocb_poll rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll
+----
+
+[#cpu-pinning-host]
+== Fixação de CPU no Host
+
+A fixação de CPU, também conhecida como afinidade de processador, é a técnica de vincular um processo ou thread a um núcleo de CPU específico, impedindo que o agendador do sistema operacional o mova. Ao garantir que um processo sempre seja executado no mesmo núcleo, ele se beneficia do acesso mais rápido aos dados que permanecem na memória cache desse núcleo. Essa prática é comum em ambientes de computação de alto desempenho porque melhora drasticamente o desempenho e reduz a sobrecarga.
+
+=== Isolamento de CPUs via TuneD
+`tuned` é uma ferramenta de ajuste de sistema que monitora as condições do sistema para otimizar o desempenho usando vários perfis predefinidos. Um recurso importante é sua capacidade de isolar núcleos de CPU para cargas de trabalho específicas, como aplicativos em tempo real. Isso evita que o SO utilize esses núcleos e potencialmente aumente a latência.
+
+Para habilitar e configurar esse recurso, a primeira coisa é criar um perfil para os núcleos de CPU que queremos isolar. Neste exemplo, entre 64 núcleos, dedicamos 60 núcleos (`1-30,33-62`) para o aplicativo e os 4 núcleos restantes são usados para manutenção. Observe que o design de CPUs isoladas depende fortemente dos aplicativos em tempo real.
+
+[,shell]
+----
+$ echo "export tuned_params" >> /etc/grub.d/00_tuned
+
+$ echo "isolated_cores=1-30,33-62" >> /etc/tuned/cpu-partitioning-variables.conf
+
+$ tuned-adm profile cpu-partitioning
+Tuned (re)started, changes applied.
+----
+
+=== Isolamento de CPUs via argumentos do kernel
+Em seguida, precisamos modificar a opção do GRUB para isolar os núcleos da CPU e outros parâmetros importantes para o uso da CPU.
+As seguintes opções são importantes para serem personalizadas com as especificações do seu hardware atual:
+
+[,shell]
+
+|===
+| parameter | value | descrição
+
+| isolcpus
+| domain,nohz,managed_irq,1-30,33-62
+| Isole os núcleos 1-30 e 33-62. `domain` indica que essas CPUs fazem parte do domínio de isolamento. `nohz` habilita a operação sem tick nessas CPUs isoladas quando estão ociosas, para reduzir interrupções. `managed_irq` isola as CPUs fixadas de serem alvo de IRQs. Isso contempla `irqaffinity=0-7`, que já direciona a maioria das IRQs para os núcleos de manutenção.
+
+| skew_tick
+| 1
+| Esta opção permite que o kernel desloque as interrupções do temporizador entre as CPUs isoladas.
+
+| nohz
+| on
+| Quando habilitada, a interrupção periódica do temporizador do kernel (o 'tick') parará em qualquer núcleo de CPU que esteja ocioso. Isso beneficia principalmente as CPUs de manutenção (`0,31,32,63`). Isso economiza energia e reduz as ativações desnecessárias nesses núcleos de uso geral.
+
+| nohz_full
+| 1-30,33-62
+| Para os núcleos isolados, isso interrompe o tick e faz isso mesmo quando a CPU está executando uma única tarefa ativa. Isso significa que faz a CPU rodar em modo full tickless (ou 'dyntick'). O kernel só entregará interrupções de temporizador quando elas forem realmente necessárias.
+
+| rcu_nocbs
+| 1-30,33-62
+| Esta opção descarrega o processamento de callback RCU de núcleos de CPU especificados.
+
+| rcu_nocb_poll
+| 
+| Quando esta opção está definida, as CPUs sem callback RCU farão polling regularmente para verificar se o tratamento de callback é necessário, em vez de serem explicitamente despertadas por outras CPUs. Isso pode reduzir a sobrecarga de interrupção.
+
+| irqaffinity
+| 0,31,32,63
+| Esta opção permite que o kernel execute as interrupções nos núcleos de manutenção.
+
+| inativo
+| Fazer poll
+| Isso minimiza a latência de saída do estado ocioso, mas ao custo de manter a CPU funcionando em velocidade máxima na thread ociosa.
+
+| nmi_watchdog
+| 0
+| Esta opção desativa apenas o watchdog NMI. Isso pode ser omitido quando `nowatchdog` estiver definido.
+
+| nowatchdog
+|
+| Esta opção desativa o watchdog de soft-lockup, que é implementado como um temporizador executado no contexto de interrupção de hardware do temporizador.
+|===
+
+Os comandos a seguir modificam a configuração do GRUB e aplicam as alterações mencionadas acima para que estejam presentes na próxima inicialização:
+
+Edite o arquivo `/etc/default/grub` com os parâmetros acima e o arquivo ficará assim:
+
+[,shell]
+----
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
+----
+
+Atualize a configuração do GRUB:
+[,shell]
+----
+$ transactional-update grub.cfg
+$ reboot
+----
+
+Para validar que os parâmetros sejam aplicados após a reinicialização, o seguinte comando pode ser usado para verificar a linha de comando do kernel:
+
+[,shell]
+----
+$ cat /proc/cmdline
+----
+
+Existe outro script que pode ser usado para ajustar a configuração da CPU, que basicamente realiza as seguintes etapas:
+
+* Defina o governador da CPU como `performance`.
+* Desative a migração de timer para as CPUs isoladas.
+* Migre as threads kdaemon para as CPUs de manutenção.
+* Defina a latência das CPUs isoladas para o menor valor possível.
+* Atrase as atualizações do vmstat para 300 segundos.
+
+O script está disponível em https://raw.githubusercontent.com/suse-edge/telco-cloud-examples/refs/heads/{release-tag-telco-cloud}/telco-examples/downstream-clusters/dhcp-less/eib/custom/files/performance-settings.sh[repositório de exemplos do SUSE Telco Cloud].
+
+[#cpu-pinning-k8s]
+== Fixação de CPU no Kubernetes
+
+=== Versões do RKE2 < v1.32
+Habilite a fixação de CPU em seu cluster RKE2 editando o arquivo de configuração do RKE2. Adicione os argumentos do kubelet abaixo no arquivo `/etc/rancher/rke2/config.yaml`. Certifique-se de especificar os núcleos de CPU de housekeeping nos argumentos `kubelet-reserved` e `system-reserved`:
+
+[,yaml]
+----
+kubelet-arg:
+- "cpu-manager-policy=static"
+- "cpu-manager-policy-options=full-pcpus-only=true"
+- "cpu-manager-reconcile-period=0s"
+- "kubelet-reserved=cpu=0,31,32,63"
+- "system-reserved=cpu=0,31,32,63"
+----
+
+=== Versões do RKE2 >= v1.32
+Se a sua versão do RKE2 for v1.32 ou superior, argumentos de linha de comando não podem ser usados para configurar o kubelet, seguindo a prática upstream do Kubernetes. Para configurar a fixação de CPU, um arquivo de configuração do kubelet precisa ser criado. Consulte https://documentation.suse.com/cloudnative/rke2/latest/en/install/configuration.html#_kubelet_configuration[documentação do RKE2].
+
+Crie um novo arquivo de configuração do kubelet, como `01-cpu-pinning.conf`, e coloque-o no diretório `/var/lib/rancher/rke2/agent/etc/kubelet.conf.d/`:
+
+[,yaml]
+----
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cpuManagerPolicy: static
+reservedSystemCPUs: 0,31,32,63
+topologyManagerPolicy: single-numa-node
+----
+
+Para que as alterações de configuração entrem em vigor, uma reinicialização do serviço RKE2 apropriado (servidor ou agente) é necessária. Esta ação interromperá brevemente o serviço RKE2 no host. Execute apenas um dos seguintes comandos, dependendo do tipo de nó:
+
+[,shell]
+----
+# If the node is RKE2 agent
+systemctl restart rke2-agent
+# Else if the node is RKE2 server
+systemctl restart rke2-server
+----
+
+=== Implante cargas de trabalho aproveitando a fixação de CPU.
+
+Existem três maneiras de usar o recurso usando o `Static Policy` definido no kubelet, dependendo das solicitações e limites que você define em sua carga de trabalho:
+
+1. `BestEffort` Classe de QoS: Se você não definir nenhuma solicitação ou limite para `CPU`, o pod será agendado no primeiro `CPU` disponível no sistema.
++
+Um exemplo de uso da `BestEffort` Classe de QoS poderia ser:
++
+[,yaml]
+----
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+----
++
+2. `Burstable` Classe de QoS: Se você definir uma solicitação de CPU, que não é igual aos limites, ou se não houver solicitação de CPU.
++
+Exemplos de uso da `Burstable` Classe de QoS poderiam ser:
++
+[,yaml]
+----
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    resources:
+      limits:
+        memory: "200Mi"
+      requests:
+        memory: "100Mi"
+----
++
+ou
++
+[,yaml]
+----
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    resources:
+      limits:
+        memory: "200Mi"
+        cpu: "2"
+      requests:
+        memory: "100Mi"
+        cpu: "1"
+----
++
+3.  `Guaranteed` Classe de QoS: Se você definir uma solicitação de CPU, que é igual aos limites.
++
+Um exemplo de uso da Classe de QoS `Guaranteed` poderia ser:
++
+[,yaml]
+----
+spec:
+  containers:
+    - name: nginx
+      image: nginx
+      resources:
+        limits:
+          memory: "200Mi"
+          cpu: "2"
+        requests:
+          memory: "200Mi"
+          cpu: "2"
+----
+
+
+[#cni-configuration]
+== Configuração de CNI
+
+=== Cilium
+`Cilium` é o plug-in de CNI padrão para o SUSE Telco Cloud.
+Para habilitar o Cilium no cluster RKE2 como o plug-in padrão, a seguinte configuração é necessária no arquivo `/etc/rancher/rke2/config.yaml`:
+
+[,yaml]
+----
+cni:
+- cilium
+----
+
+Isso também pode ser especificado com argumentos de linha de comando, ou seja, `--cni=cilium` na linha do servidor no arquivo `/etc/systemd/system/rke2-server`.
+
+Para usar a rede `SR-IOV` descrita em <<option2-sriov-helm>> junto com o Cilium, implante o meta plugin `multus`. Certifique-se de que `multus` esteja listado antes de outras CNIs.
+
+[,yaml]
+----
+cni:
+- multus
+- cilium
+----
+
+=== Calico
+`Calico` é outro plug-in de CNI para {product} para Telco.
+Para habilitar o Calico no cluster RKE2 como o plug-in padrão, a seguinte configuração é necessária no arquivo `/etc/rancher/rke2/config.yaml`:
+
+[,yaml]
+----
+cni:
+- calico
+----
+
+Isso também pode ser especificado com argumentos de linha de comando, ou seja, `--cni=calico` na linha do servidor no arquivo `/etc/systemd/system/rke2-server`.
+
+Para usar a rede `SR-IOV` descrita em <<option2-sriov-helm>> junto com o Calico, implante o meta plugin `multus`. Certifique-se de que `multus` esteja listado antes de outras CNIs.
+
+[,yaml]
+----
+cni:
+- multus
+- calico
+----
+
+[NOTE]
+====
+Para mais informações sobre plug-ins CNI, consulte https://docs.rke2.io/install/network_options[Opções de Rede].
+====
+
+=== Bond CNI
+Em termos gerais, o bonding fornece um método para agregar múltiplas interfaces de rede em uma única interface lógica "bonded". Isso é normalmente usado para aumentar a disponibilidade do serviço introduzindo caminhos de rede redundantes, mas também pode ser usado para aumentar a largura de banda com certos modos de bond.
+Os seguintes plug-ins CNI são suportados para o plug-in Bond CNI em combinação com o multus:
+
+* MACVLAN
+* Dispositivo do Host
+* SR-IOV
+
+==== Bond CNI com MACVLAN
+Para usar o plug-in Bond CNI com MACVLAN, são necessárias duas interfaces livres no contêiner. O exemplo a seguir usa 'enp8s0' e 'enp9s0'. Comece criando definições de anexo de rede para eles: 
+
+*NetworkAttachmentDefinition enp8s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp8s0-conf
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "macvlan",
+          "capabilities": { "ips": true },
+          "master": "enp8s0",
+          "mode": "bridge",
+          "ipam": {}
+        }, {
+          "capabilities": { "mac": true },
+          "type": "tuning"
+        }
+      ]
+    }'
+----
+
+*NetworkAttachmentDefinition enp9s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp9s0-conf
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "macvlan",
+          "capabilities": { "ips": true },
+          "master": "enp9s0",
+          "mode": "bridge",
+          "ipam": {}
+        }, {
+          "capabilities": { "mac": true },
+          "type": "tuning"
+        }
+      ]
+    }'
+----
+
+Depois disso, adicione uma definição de anexo de rede para o próprio bond.
+
+*NetworkAttachmentDefinition bond*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: bond-net1
+spec:
+  config: '{
+  "type": "bond",
+  "cniVersion": "0.3.1",
+  "name": "bond-net1",
+  "mode": "active-backup",
+  "failOverMac": 1,
+  "linksInContainer": true,
+  "miimon": "100",
+  "mtu": 1500,
+  "links": [
+     {"name": "net1"},
+     {"name": "net2"}
+  ],
+  "ipam": {
+    "type": "static",
+    "addresses": [
+      {
+        "address": "192.168.200.100/24",
+        "gateway": "192.168.200.1"
+      }
+    ],
+    "subnet": "192.168.200.0/24",
+    "routes": [{
+      "dst": "0.0.0.0/0"
+    }]
+  }
+}'
+----
+
+A atribuição de endereço IP aqui é estática e define o endereço do bond como '192.168.200.100' em uma rede /24, com um gateway residindo no primeiro endereço disponível da rede. No anexo de rede do bond, também definimos o tipo de bond que desejamos. Neste caso, é active-backup.
+
+Para usar este bond, o pod precisa conhecer todas as interfaces. Uma definição de pod de exemplo pode ser assim:
+
+[,shell,subs="attributes"]
+----
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod
+  annotations:
+        k8s.v1.cni.cncf.io/networks: '[
+{"name": "enp8s0-conf",
+"interface": "net1"
+},
+{"name": "enp9s0-conf",
+"interface": "net2"
+},
+{"name": "bond-net1",
+"interface": "bond0"
+}]'
+spec:
+  restartPolicy: Never
+  containers:
+  - name: bond-test
+    image: alpine:latest
+    command:
+      - /bin/sh
+      - "-c"
+      - "sleep 60m"
+    imagePullPolicy: IfNotPresent
+----
+
+Observe como a anotação se refere a todas as redes e como ela define o mapeamento entre as interfaces 'enp8s0 -> net1' e 'enp9s0 -> net2'. 
+
+==== Bond CNI com Dispositivo Host
+Para usar o plugin Bond CNI com dispositivo host, são necessárias duas interfaces livres no host. Essas interfaces são então mapeadas para o contêiner. O exemplo a seguir usa 'enp8s0' e 'enp9s0'. Comece criando definições de anexo de rede para eles: 
+
+*NetworkAttachmentDefinition enp8s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp8s0-hostdev
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "host-device",
+          "name": "host0",
+          "device": "enp8s0",
+          "ipam": {}
+        }]
+    }'
+----
+
+*NetworkAttachmentDefinition enp9s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp9s0-hostdev
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "host-device",
+          "name": "host0",
+          "device": "enp9s0",
+          "ipam": {}
+        }]
+    }'
+----
+
+Após isso, adicione a definição de anexo de rede para o próprio bond. Isso é semelhante ao caso de uso de MACVLAN.
+
+*NetworkAttachmentDefinition bond*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: bond-net1
+spec:
+  config: '{
+  "type": "bond",
+  "cniVersion": "0.3.1",
+  "name": "bond-net1",
+  "mode": "active-backup",
+  "failOverMac": 1,
+  "linksInContainer": true,
+  "miimon": "100",
+  "mtu": 1500,
+  "links": [
+     {"name": "net1"},
+     {"name": "net2"}
+  ],
+  "ipam": {
+    "type": "static",
+    "addresses": [
+      {
+        "address": "192.168.200.100/24",
+        "gateway": "192.168.200.1"
+      }
+    ],
+    "subnet": "192.168.200.0/24",
+    "routes": [{
+      "dst": "0.0.0.0/0"
+    }]
+  }
+}'
+----
+
+A atribuição de endereço IP aqui é estática e define o endereço do bond como '192.168.200.100' em uma rede /24, com um gateway residindo no primeiro endereço disponível da rede. No anexo de rede do bond, defina o tipo de bond. Neste caso, é active-backup.
+
+Para usar este bond, o pod precisa conhecer todas as interfaces. Um exemplo de definição de pod para bond com dispositivos host pode ser assim:
+
+[,shell,subs="attributes"]
+----
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod
+  annotations:
+        k8s.v1.cni.cncf.io/networks: '[
+{"name": "enp8s0-hostdev",
+"interface": "net1"
+},
+{"name": "enp9s0-hostdev",
+"interface": "net2"
+},
+{"name": "bond-net1",
+"interface": "bond0"
+}]'
+spec:
+  restartPolicy: Never
+  containers:
+  - name: bond-test
+    image: alpine:latest
+    command:
+      - /bin/sh
+      - "-c"
+      - "sleep 60m"
+    imagePullPolicy: IfNotPresent
+----
+
+==== Bond CNI com SR-IOV
+Usar o Bond CNI com SR-IOV é bastante simples. Para mais detalhes sobre como configurar o SR-IOV, consulte <<sriov>>. Conforme descrito lá, você deve criar `SriovNetworkNodePolicies` que define `resourceNames`, bem como o número de funções virtuais e afins. As `resourceNames` estão sendo usadas pelo `SriovNetwork`, que é usado como interfaces na definição do pod. A definição do bond é exatamente a mesma dos casos de MACVLAN e dispositivo host.
+
+[NOTE]
+====
+O Bond CNI com SR-IOV só é aplicável a Funções Virtuais (VF) SRIOV usando o driver de kernel. VFs de driver de espaço de usuário - como aquelas usadas em cargas de trabalho DPDK - não podem ser vinculadas com o Bond CNI.
+====
+
+[#sriov]
+== SR-IOV
+
+SR-IOV (Single Root I/O Virtualization) permite que um único dispositivo físico, como um adaptador de rede, separe seus recursos entre múltiplas `PCIe` funções de hardware. Isso permite acesso direto aos recursos para várias aplicações.
+
+Fornecemos dois métodos distintos para implantar `SR-IOV` em seu cluster:
+
+* <<option1-sriov-deviceplugin>>: Este método oferece suporte a dispositivos de rede e acelerador vRAN.
+* <<option2-sriov-helm>>: Este método automatizado proporciona uma implantação mais simples. Este método é apenas para dispositivos de rede.
+
+Em casos raros em que você precisa de ambas as soluções - usando o Operador de Rede para dispositivos de rede e o Plugin de Dispositivo para Aceleradores vRAN - você deve implantá-los em namespaces separados do Kubernetes. Essa separação é essencial para evitar conflitos entre as duas implantações.
+
+[#option1-sriov-deviceplugin]
+=== Opção 1: Daemonset e configMap do Plugin de Dispositivo de Rede SR-IOV
+
+O https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin[Plugin de Dispositivo de Rede SR-IOV] descobre e anuncia recursos de rede, como funções físicas (PFs) PCI e suas funções virtuais (VFs), em um host Kubernetes.
+
+* Prepare o configMap para o plugin de dispositivo
+
+Precisamos criar um configMap que defina pools de recursos SR-IOV. Execute o comando `lspci` para recuperar as informações:
+
+[,shell]
+----
+$ lspci | grep -i acc
+07:00.0 Processing accelerators: Intel Corporation Device 57c2
+07:00.1 Processing accelerators: Intel Corporation Device 57c3
+07:00.2 Processing accelerators: Intel Corporation Device 57c3
+07:00.3 Processing accelerators: Intel Corporation Device 57c3
+07:00.4 Processing accelerators: Intel Corporation Device 57c3
+07:00.5 Processing accelerators: Intel Corporation Device 57c3
+07:00.6 Processing accelerators: Intel Corporation Device 57c3
+07:00.7 Processing accelerators: Intel Corporation Device 57c3
+07:01.0 Processing accelerators: Intel Corporation Device 57c3
+07:01.1 Processing accelerators: Intel Corporation Device 57c3
+07:01.2 Processing accelerators: Intel Corporation Device 57c3
+07:01.3 Processing accelerators: Intel Corporation Device 57c3
+07:01.4 Processing accelerators: Intel Corporation Device 57c3
+07:01.5 Processing accelerators: Intel Corporation Device 57c3
+07:01.6 Processing accelerators: Intel Corporation Device 57c3
+07:01.7 Processing accelerators: Intel Corporation Device 57c3
+07:02.0 Processing accelerators: Intel Corporation Device 57c3
+0a:00.0 Processing accelerators: Intel Corporation Device 57c2
+
+$ lspci | grep -i net
+19:00.0 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
+19:00.1 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
+19:00.2 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
+19:00.3 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
+51:00.0 Ethernet controller: Intel Corporation Ethernet Controller E810-C for QSFP (rev 02)
+51:00.1 Ethernet controller: Intel Corporation Ethernet Controller E810-C for QSFP (rev 02)
+51:01.0 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:01.1 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:01.2 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:01.3 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:11.0 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:11.1 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:11.2 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:11.3 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+----
+
+O Plugin de Dispositivo SR-IOV usa um configMap contendo um arquivo JSON para definir quais recursos de hardware o Kubernetes deve expor. Esta configuração baseia-se em dois conceitos principais: `selectors` (para descoberta de hardware) e `resources` (para exposição no Kubernetes).
+
+Um `resource` é a entidade nomeada que os pods consomem (por exemplo, `rancher.io/intel_fec_5g`). Os recursos podem ser definidos como um de dois tipos:
+
+* `accelerator`: Usado para placas aceleradoras vRAN (como ACC100/vRAN Boost).
+* `netdevice`: Usado para interfaces de rede padrão (NICs).
+
+Você define os dispositivos de destino usando `selectors` para filtrar o hardware no nó:
+
+* `vendors`: `8086` (Intel)
+* `devices`: `57c3` (FEC VF), `1889` (NIC VF)
+* `drivers`: `vfio-pci`
+* `pfNames`: `p2p1` (nome da interface física)
+
+Para placas de rede, você também pode selecionar um subconjunto de Funções Virtuais (VFs) de uma Função Física:
+
+* `pfNames`: `["eth1#1,2,3,4,5,6"]` ou `[eth1#1-6]`
+
+Para permitir que os pods solicitem os dispositivos, cada recurso deve ter um nome, que é composto por um prefixo e um nome:
+
+* `resourceName`: `pci_sriov_net_bh_dpdk`
+* `resourcePrefix`: `rancher.io`
+
+Os pods então solicitariam o nome do recurso combinado: `rancher.io/pci_sriov_net_bh_dpdk`.
+
+[NOTE]
+====
+Este documento não lista todos os seletores possíveis. Diferentes tipos de recursos usam diferentes conjuntos de seletores. Para detalhes abrangentes, consulte o https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin[repositório do SR-IOV Network Device Plugin].
+====
+
+O ConfigMap abaixo é um exemplo que cria três recursos: um para a placa aceleradora vRAN (FEC) e dois para duas portas NIC diferentes.
+
+Para a placa FEC, você deve primeiro recuperar o ID do dispositivo e o token VFIO. Siga as instruções no capítulo <<acceleration>> para os pré-requisitos.
+
+[,yaml]
+----
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sriovdp-config
+  namespace: kube-system
+data:
+  config.json: |
+    {
+        "resourceList": [
+            {
+                "resourcePrefix": "rancher.io",
+                "resourceName": "intel_fec_5g",
+                "deviceType": "accelerator",
+                "selectors": {
+                    "vendors": ["8086"],
+                    "devices": ["57c3"]
+                },
+                "additionalInfo": {
+                      "*": {
+                        "VFIO_TOKEN": "00112233-4455-6677-8899-aabbccddeeff"
+                      }
+                  }
+            },
+            {
+                "resourcePrefix": "rancher.io",
+                "resourceName": "intel_sriov_odu",
+                "deviceType": "netdevice",
+                "selectors": {
+                    "vendors": ["8086"],
+                    "devices": ["1889"],
+                    "drivers": ["vfio-pci"],
+                    "pfNames": ["p2p1"]
+                }
+            },
+            {
+                "resourcePrefix": "rancher.io",
+                "resourceName": "intel_sriov_oru",
+                "deviceType": "netdevice",
+                "selectors": {
+                    "vendors": ["8086"],
+                    "devices": ["1889"],
+                    "drivers": ["vfio-pci"],
+                    "pfNames": ["p2p2"]
+                }
+            }
+        ]
+    }
+----
+
+* Prepare o arquivo `daemonset` para implantar o plugin de dispositivo.
+
+O plugin de dispositivo suporta várias arquiteturas (`arm`, `amd`, `ppc64le`), portanto, o mesmo arquivo pode ser usado para diferentes arquiteturas implantando vários `daemonset` para cada arquitetura.
+
+[,yaml]
+----
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sriov-device-plugin
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-sriov-device-plugin-amd64
+  namespace: kube-system
+  labels:
+    tier: node
+    app: sriovdp
+spec:
+  selector:
+    matchLabels:
+      name: sriov-device-plugin
+  template:
+    metadata:
+      labels:
+        name: sriov-device-plugin
+        tier: node
+        app: sriovdp
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      serviceAccountName: sriov-device-plugin
+      containers:
+      - name: kube-sriovdp
+        image: registry.suse.com/rancher/hardened-sriov-network-device-plugin:v3.9.0-build20250425
+        imagePullPolicy: IfNotPresent
+        args:
+        - --log-dir=sriovdp
+        - --log-level=10
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "40Mi"
+          limits:
+            cpu: 1
+            memory: "200Mi"
+        volumeMounts:
+        - name: devicesock
+          mountPath: /var/lib/kubelet/
+          readOnly: false
+        - name: log
+          mountPath: /var/log
+        - name: config-volume
+          mountPath: /etc/pcidp
+        - name: device-info
+          mountPath: /var/run/k8s.cni.cncf.io/devinfo/dp
+      volumes:
+        - name: devicesock
+          hostPath:
+            path: /var/lib/kubelet/
+        - name: log
+          hostPath:
+            path: /var/log
+        - name: device-info
+          hostPath:
+            path: /var/run/k8s.cni.cncf.io/devinfo/dp
+            type: DirectoryOrCreate
+        - name: config-volume
+          configMap:
+            name: sriovdp-config
+            items:
+            - key: config.json
+              path: config.json
+----
+
+* Após aplicar o configMap e o `daemonset`, o plugin de dispositivo será implantado e as interfaces serão descobertas e disponibilizadas para os pods.
++
+[,shell]
+----
+$ kubectl get pods -n kube-system | grep sriov
+kube-system  kube-sriov-device-plugin-amd64-twjfl  1/1  Running  0  2m
+----
++
+* Verifique em todos os nós se as interfaces foram descobertas e disponibilizadas para os pods:
++
+----
+$ kubectl get nodes -o json | jq '.items[] | {name: .metadata.name, allocatable: .status.allocatable}'
+{
+  "name": "node1.suse.edge.com",
+  "allocatable": {
+      "cpu": "64",
+      "ephemeral-storage": "256196109726",
+      "hugepages-1Gi": "40Gi",
+      "hugepages-2Mi": "0",
+      "rancher.io/intel_fec_5g": "16",
+      "rancher.io/intel_sriov_odu": "4",
+      "rancher.io/intel_sriov_oru": "4",
+      "memory": "221396384Ki",
+      "pods": "110"
+  }
+}
+----
++
+* O nome do recurso para o acelerador `FEC` é `rancher.io/intel_fec_5g` e 16 VFs estão disponíveis para uso.
+* Os nomes do recurso para as placas NIC são `rancher.io/intel_sriov_odu` e `rancher.io/intel_sriov_oru`. Cada recurso fornece 4 VFs.
+
+[IMPORTANT]
+====
+Se nenhuma interface for detectada como recurso alocável nos nós do Kubernetes, é essencial resolver esse problema. Uma causa comum é uma especificação de configMap mal formada, portanto, é melhor revisar o configMap e seus seletores.
+====
+
+[#option2-sriov-helm]
+=== Opção 2 (Recomendada): Operador de Rede SR-IOV 
+
+* Obtenha o Helm se não estiver presente:
+
+[,shell,subs="attributes"]
+----
+$ curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+----
+
+* Instale o Operador de Rede SR-IOV no namespace `sriov-network-operator`:
+
+[,shell,subs="attributes"]
+----
+helm install sriov-crd oci://registry.suse.com/edge/charts/sriov-crd -n sriov-network-operator
+helm install sriov-network-operator oci://registry.suse.com/edge/charts/sriov-network-operator -n sriov-network-operator
+----
+
+* Verifique os CRDs e pods implantados:
+
+[,shell]
+----
+$ kubectl get crd
+$ kubectl -n sriov-network-operator get pods
+----
+
+* Verifique se o rótulo SR-IOV foi aplicado aos nós.
+
+Com todos os recursos em execução, o rótulo aparece automaticamente em seu nó:
+
+[,shell]
+----
+$ kubectl get nodes -oyaml | grep feature.node.kubernetes.io/network-sriov.capable
+
+feature.node.kubernetes.io/network-sriov.capable: "true"
+----
+
+* Revise o `daemonset` para ver o novo `sriov-network-config-daemon` e `sriov-rancher-nfd-worker` como ativos e prontos:
+
+[,shell]
+----
+$ kubectl get daemonset -n sriov-network-operator
+NAMESPACE             NAME                            DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR                                           AGE
+sriov-network-operator   sriov-network-config-daemon     1         1         1       1            1           feature.node.kubernetes.io/network-sriov.capable=true   45m
+sriov-network-operator   sriov-rancher-nfd-worker        1         1         1       1            1           <none>                                                  45m
+----
+
+Em alguns minutos, os nós serão detectados e totalmente configurados com capacidades `SR-IOV`. A atualização pode levar, às vezes, até 10 minutos:
+
+[,shell]
+----
+$ kubectl get sriovnetworknodestates -A
+NAMESPACE             NAME     AGE
+sriov-network-operator   xr11-2   83s
+----
+
+* Verifique se as interfaces foram detectadas.
+
+As interfaces descobertas devem ser o endereço PCI do dispositivo de rede. Verifique esta informação com o comando `lspci` no host.
+
+[,shell]
+----
+$ kubectl get sriovnetworknodestates -n sriov-network-operator -oyaml
+apiVersion: v1
+items:
+- apiVersion: sriovnetwork.openshift.io/v1
+  kind: SriovNetworkNodeState
+  metadata:
+    creationTimestamp: "2023-06-07T09:52:37Z"
+    generation: 1
+    name: xr11-2
+    namespace: sriov-network-operator
+    ownerReferences:
+    - apiVersion: sriovnetwork.openshift.io/v1
+      blockOwnerDeletion: true
+      controller: true
+      kind: SriovNetworkNodePolicy
+      name: default
+      uid: 80b72499-e26b-4072-a75c-f9a6218ec357
+    resourceVersion: "356603"
+    uid: e1f1654b-92b3-44d9-9f87-2571792cc1ad
+  spec:
+    dpConfigVersion: "356507"
+  status:
+    interfaces:
+    - deviceID: "1592"
+      driver: ice
+      eSwitchMode: legacy
+      linkType: ETH
+      mac: 40:a6:b7:9b:35:f0
+      mtu: 1500
+      name: p2p1
+      pciAddress: "0000:51:00.0"
+      totalvfs: 128
+      vendor: "8086"
+    - deviceID: "1592"
+      driver: ice
+      eSwitchMode: legacy
+      linkType: ETH
+      mac: 40:a6:b7:9b:35:f1
+      mtu: 1500
+      name: p2p2
+      pciAddress: "0000:51:00.1"
+      totalvfs: 128
+      vendor: "8086"
+    syncStatus: Succeeded
+kind: List
+metadata:
+  resourceVersion: ""
+----
+
+[NOTE]
+====
+Se sua interface não for detectada aqui, certifique-se de que ela esteja presente no próximo config map:
+
+[,shell]
+----
+$ kubectl get cm supported-nic-ids -oyaml -n sriov-network-operator
+----
+
+Se seu dispositivo não estiver listado, edite o config map adicionando os valores corretos para que seja descoberto. Em seguida, reinicie os `sriov-network-config-daemon` pods em cada nó para que a atualização entre em vigor.
+====
+
+* Crie o `SriovNetworkNodePolicy` para configurar o `VFs`
+
+Esta política cria o recurso `intelnicsDpdk` para consumo do pod. Ela também vincula o driver `vfio-pci` ao dispositivo PCI fornecido e cria 8 VFs com um tamanho de MTU de 1500:
+
+[NOTE]
+====
+O campo `resourceName` não deve conter caracteres especiais e deve ser exclusivo em todo o cluster.
+O exemplo usa o `deviceType: vfio-pci` porque o DPDK é usado em combinação com SR-IOV. Se você não usar o DPDK, configure `deviceType: netdevice` (valor padrão).
+====
+
+[,yaml]
+----
+apiVersion: sriovnetwork.openshift.io/v1
+kind: SriovNetworkNodePolicy
+metadata:
+  name: policy-dpdk
+  namespace: sriov-network-operator
+spec:
+  nodeSelector:
+    feature.node.kubernetes.io/network-sriov.capable: "true"
+  resourceName: intelnicsDpdk
+  deviceType: vfio-pci
+  numVfs: 8
+  mtu: 1500
+  nicSelector:
+    deviceID: "1592"
+    vendor: "8086"
+    rootDevices:
+    - 0000:51:00.0
+----
+
+* Valide as configurações em todos os nós:
+
+Com o resourcePrefix `rancher.io` predefinido, um recurso `rancher.io/intelnicsDpdk` com 8 VFs deve ser descoberto.
+
+[,shell]
+----
+$ kubectl get nodes -o jsonpath='{"items": [ { "name": @.metadata.name, "allocatable": @.status.allocatable } ]}' | jq
+{
+  "name": "node1.suse.edge.com",
+  "allocatable": {
+      "cpu": "64",
+      "ephemeral-storage": "256196109726",
+      "hugepages-1Gi": "60Gi",
+      "hugepages-2Mi": "0",
+      "rancher.io/intel_fec_5g": "16",
+      "memory": "200424836Ki",
+      "pods": "110",
+      "rancher.io/intelnicsDpdk": "8"
+  }
+}
+----
+
+* (Opcional) Crie o `sriovnetwork`
+
+Esta etapa é opcional e necessária apenas para definições de rede personalizadas. Especifique o `resourceName` para vincular à política de nó criada anteriormente.
+
+Se o `networkNamespace` estiver definido, a rede será exposta aos pods nesse namespace. Caso contrário, a rede ficará disponível no namespace de instalação do Network Operator.
+
+[,yaml]
+----
+apiVersion: sriovnetwork.openshift.io/v1
+kind: SriovNetwork
+metadata:
+  name: network-dpdk
+  namespace: sriov-network-operator        # where SRIOV Operator is installed
+spec:
+  ipam: |
+    {
+      "type": "host-local",
+      "subnet": "192.168.0.0/24",
+      "rangeStart": "192.168.0.20",
+      "rangeEnd": "192.168.0.60",
+      "routes": [{
+        "dst": "0.0.0.0/0"
+      }],
+      "gateway": "192.168.0.1"
+    }
+  vlan: 500
+  resourceName: intelnicsDpdk
+  networkNamespace: default         # where workloads are deployed
+----
+
+* Se a atualização for bem-sucedida, uma NetworkAttachmentDefinition (NAD) será criada no cluster de destino.
+
+[,shell]
+----
+$ kubectl get net-attach-def -A -oyaml
+
+apiVersion: v1
+items:
+- apiVersion: k8s.cni.cncf.io/v1
+  kind: NetworkAttachmentDefinition
+  metadata:
+    annotations:
+      k8s.v1.cni.cncf.io/resourceName: rancher.io/intelnicsDpdk
+    creationTimestamp: "2023-06-08T11:22:27Z"
+    generation: 1
+    name: network-dpdk
+    namespace: default
+    resourceVersion: "13124"
+    uid: df7c89f5-177c-4f30-ae72-7aef3294fb15
+  spec:
+    config: '{ "cniVersion":"0.4.0", "name":"network-dpdk","type":"sriov","vlan":500,"vlanQoS":0,"ipam":{"type":"host-local","subnet":"192.168.0.0/24","rangeStart":"192.168.0.10","rangeEnd":"192.168.0.60","routes":[{"dst":"0.0.0.0/0"}],"gateway":"192.168.0.1"}
+      }'
+kind: List
+metadata:
+  resourceVersion: ""
+----
+
+Os pods de carga de trabalho podem usar o resourceName `rancher.io/intelnicsDpdk` para usar os VFs da interface de rede.
+
+
+[#dpdk]
+== DPDK
+
+`DPDK` (Data Plane Development Kit) é um conjunto de bibliotecas e drivers para processamento rápido de pacotes. Ele é usado para acelerar cargas de trabalho de processamento de pacotes executadas em uma ampla variedade de arquiteturas de CPU.
+O DPDK inclui bibliotecas de plano de dados e drivers otimizados para a placa de interface de rede (`NIC`) para os seguintes fins:
+
+1. Um gerenciador de filas implementa filas sem bloqueio.
+2. Um gerenciador de buffers pré-aloca buffers de tamanho fixo.
+3. Um gerenciador de memória aloca pools de objetos na memória e usa um anel para armazenar objetos livres; garante que os objetos sejam distribuídos igualmente em todos os canais `DRAM`.
+4. Drivers de modo de polling (`PMD`) são projetados para funcionar sem notificações assíncronas, reduzindo a sobrecarga.
+5. Uma estrutura de pacotes consiste em um conjunto de bibliotecas que auxiliam no desenvolvimento do processamento de pacotes.
+
+As etapas a seguir mostrarão como habilitar `DPDK` e como criar `VFs` a partir do `NICs` para serem usados pelas interfaces `DPDK`:
+
+* Instale o pacote `DPDK`:
+
+[,shell]
+----
+$ transactional-update pkg install dpdk dpdk-tools libdpdk-25
+$ reboot
+----
+
+
+* Parâmetros kernel:
+
+Para usar o DPDK, empregue alguns drivers para habilitar certos parâmetros do kernel:
+
+|===
+| parameter | value | descrição
+
+| iommu
+| pt
+| Esta opção habilita o uso do driver `vfio` para as interfaces DPDK.
+
+| intel_iommu or amd_iommu
+| on
+| Esta opção habilita o uso de `vfio` para `VFs`.
+|===
+
+Para habilitar os parâmetros, adicione-os ao arquivo `/etc/default/grub`:
+
+[,shell]
+----
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
+----
+
+Atualize a configuração do GRUB e reinicie o sistema para aplicar as alterações:
+
+[,shell]
+----
+$ transactional-update grub.cfg
+$ reboot
+----
+
+* Carregue o módulo do kernel `vfio-pci` e habilite `SR-IOV` nas NICs. O primeiro argumento indica o driver `vfio-pci` para suportar SR-IOV, e o segundo argumento impede que o dispositivo PCI entre em um estado de baixo consumo de energia quando está ocioso:
+
+[,shell]
+----
+$ modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
+----
+
+* Crie algumas funções virtuais (`VFs`) a partir do `NICs`.
+
+Para criar para `VFs`, por exemplo, para dois `NICs` diferentes, os seguintes comandos são necessários:
+
+[,shell]
+----
+$ echo 4 > /sys/bus/pci/devices/0000:51:00.0/sriov_numvfs
+$ echo 4 > /sys/bus/pci/devices/0000:51:00.1/sriov_numvfs
+----
+
+* Vincule as novas VFs com o driver `vfio-pci`:
+
+[,shell]
+----
+$ dpdk-devbind.py -b vfio-pci 0000:51:01.0 0000:51:01.1 0000:51:01.2 0000:51:01.3 \
+                              0000:51:11.0 0000:51:11.1 0000:51:11.2 0000:51:11.3
+----
+
+* Revise se a configuração foi aplicada corretamente:
+
+[,shell]
+----
+$ dpdk-devbind.py -s
+
+Network devices using DPDK-compatible driver
+============================================
+0000:51:01.0 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:01.1 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:01.2 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:01.3 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:01.0 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:11.1 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:21.2 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:31.3 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+
+Network devices using kernel driver
+===================================
+0000:19:00.0 'BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet 1751' if=em1 drv=bnxt_en unused=igb_uio,vfio-pci *Active*
+0000:19:00.1 'BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet 1751' if=em2 drv=bnxt_en unused=igb_uio,vfio-pci
+0000:19:00.2 'BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet 1751' if=em3 drv=bnxt_en unused=igb_uio,vfio-pci
+0000:19:00.3 'BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet 1751' if=em4 drv=bnxt_en unused=igb_uio,vfio-pci
+0000:51:00.0 'Ethernet Controller E810-C for QSFP 1592' if=eth13 drv=ice unused=igb_uio,vfio-pci
+0000:51:00.1 'Ethernet Controller E810-C for QSFP 1592' if=rename8 drv=ice unused=igb_uio,vfio-pci
+----
+
+
+[#acceleration]
+== Aceleração vRAN (`Intel ACC100/VRB1/VRB2`)
+
+À medida que os provedores de serviços de comunicação migram de redes 4G para 5G, muitos estão adotando arquiteturas de rede de acesso via rádio virtualizada (vRAN) para maior capacidade de canal e implantação mais fácil de serviços e aplicações baseados em borda. As soluções vRAN estão idealmente localizadas para fornecer serviços de baixa latência com a flexibilidade de aumentar ou diminuir a capacidade com base no volume de tráfego em tempo real e na demanda na rede.
+
+Uma das cargas de trabalho 4G e 5G que mais consomem processamento é a camada 1 de RAN (`L1`) `FEC`, que resolve erros de transmissão de dados em canais de comunicação não confiáveis ou ruidosos. A tecnologia `FEC` detecta e corrige um número limitado de erros em dados 4G ou 5G, eliminando a necessidade de retransmissão. Como a transação de aceleração `FEC` não contém informações de estado da célula, ela pode ser facilmente virtualizada, permitindo benefícios de agrupamento e fácil migração de células.
+
+Historicamente, a Intel fornecia a placa aceleradora vRAN ACC100 para executar rapidamente algoritmos FEC de Camada 1, liberando poder de processamento do host para a CPU principal. Desde então, a Intel integrou essa tecnologia diretamente em CPUs mais novas, começando com Sapphire Rapids, sob o nome `Intel vRAN Boost` (VRB). O Intel vRAN Boost atua como um acelerador de descarregamento na própria CPU, eliminando a necessidade de uma placa de hardware separada. Esta seção detalha a configuração do SUSE Telco Cloud para que as cargas de trabalho aproveitem o ACC100 ou o Intel vRAN Boost.
+
+
+=== Parâmetros kernel
+
+Para habilitar a aceleração `vRAN`, precisamos habilitar os seguintes parâmetros do kernel (se ainda não estiverem presentes):
+
+|===
+| parameter | value | descrição
+
+| iommu
+| pt
+| Esta opção habilita o uso de vfio para as interfaces DPDK.
+
+| intel_iommu or amd_iommu
+| on
+| Esta opção habilita o uso de vfio para VFs.
+|===
+
+Modifique o arquivo GRUB `/etc/default/grub` para adicioná-los à linha de comando do kernel:
+
+[,shell]
+----
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
+----
+
+Atualize a configuração do GRUB e reinicie o sistema para aplicar as alterações:
+
+[,shell]
+----
+$ transactional-update grub.cfg
+$ reboot
+----
+
+Para verificar se os parâmetros foram aplicados após a reinicialização, verifique a linha de comando:
+
+[,shell]
+----
+$ cat /proc/cmdline
+----
+
+=== Configure SR-IOV em aceleradores FEC
+
+* Carregue o módulo do kernel `vfio-pci` para habilitar a aceleração vRAN. O primeiro argumento indica o módulo `vfio-pci` para suportar SR-IOV, e o segundo argumento impede que o dispositivo PCI entre em um estado de baixo consumo de energia quando estiver ocioso.
+
+[,shell]
+----
+$ modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
+----
+
+* Recupere o endereço do dispositivo PCI do acelerador FEC:
+
+[,shell]
+----
+$ lspci -DPPnn | grep -i acc
+0000:07:00.0 Processing accelerators [1200]: Intel Corporation Device [8086:57c2]
+0000:0a:00.0 Processing accelerators [1200]: Intel Corporation Device [8086:57c2]
+
+----
+
+* Vincule a interface física (`PF`) ao driver `vfio-pci`:
+
+[,shell]
+----
+$ dpdk-devbind.py -b vfio-pci 0000:07:00.0
+----
+
+* Crie as funções virtuais (`VFs`) a partir da interface física (`PF`).
+
+Verifique a capacidade máxima `VF` da placa aceleradora. Em seguida, configure a placa para expor o número desejado de VFs, sem exceder o número máximo. Neste exemplo, configuramos a placa para sua capacidade total de 16 VFs:
+
+[,shell]
+----
+$ cat /sys/bus/pci/devices/0000:07:00.0/sriov_totalvfs
+64
+$ echo 16 > /sys/bus/pci/devices/0000:07:00.0/sriov_numvfs
+----
+
+* Configure a placa aceleradora e suas funções virtuais com um arquivo de controle 4G ou 5G, selecionando o tipo de dispositivo `vRAN Boost` correto dependendo da geração exata do processador Intel: `VRB1` (anteriormente conhecido como ACC200) se for Sapphire Rapids Edge Enhanced (SPR-EE), `VRB2` para Granite Rapids-D (GNR-D). Um token de VF exclusivo (UUID) deve ser fornecido (a carga de trabalho consumirá este token de VF para utilizar os recursos de aceleração FEC da placa).
+
+[WARNING]
+====
+Descontinuação a partir de `pf-bb-config`: a nova versão do RPM que oferece suporte ao tipo de dispositivo VRB2 agora está instalando os arquivos de exemplo de configuração no local `/usr/share/pf-bb-config/examples`; o caminho antigo `/opt/pf-bb-config/` ainda é suportado, mas será removido em versões futuras. Por favor, atualize seus scripts e documentação para refletir o novo caminho (como feito no exemplo abaixo).
+====
+
+[,shell]
+----
+$ pf_bb_config VRB2 -c /usr/share/pf-bb-config/examples/vrb2/vrb2_config_vf_5g.cfg -f /usr/share/pf-bb-config/examples/vrb2/srs_fft_windows_coefficient.bin -v 00112233-4455-6677-8899-aabbccddeeff -p 0000:07:00.0
+== pf_bb_config Version 25.11 ==
+VRB2 PF [0000:07:00.0] configuration complete!
+Log file = /var/log/pf_bb_cfg_0000:07:00.0.log
+----
+
+* Verifique as novas VFs criadas a partir da PF FEC. Observe que as VFs obtiveram o ID de dispositivo `0d5d`. Esta informação é necessária na próxima etapa para expor essas VFs como recurso do Kubernetes:
+
+[,shell]
+----
+$ # dpdk-devbind.py -s | grep -A18 Baseband 
+Baseband devices using DPDK-compatible driver
+=============================================
+0000:07:00.0 'Device 57c2' numa_node=0 drv=vfio-pci unused=
+0000:07:00.1 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.2 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.3 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.4 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.5 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.6 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.7 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.0 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.1 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.2 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.3 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.4 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.5 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.6 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.7 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:02.0 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+--
+Other Baseband devices
+======================
+0000:0a:00.0 'Device 57c2' numa_node=0 unused=vfio-pci
+
+Other Crypto devices
+====================
+0000:01:00.0 '420xx Series QAT 4946' numa_node=0 unused=vfio-pci
+0000:03:00.0 'Device 2714' numa_node=0 unused=vfio-pci
+
+DMA devices using kernel driver
+===============================
+0000:00:01.0 'Device 11fb' numa_node=0 drv=idxd unused=vfio-pci 
+
+Other Eventdev devices
+======================
+0000:03:00.0 'Device 2714' numa_node=0 unused=vfio-pci
+
+No 'Mempool' devices detected
+=============================
+----
+
+=== Configurar o Kubernetes para Aceleração FEC
+A etapa final é expor as VFs ao Kubernetes com a ajuda do plugin de dispositivo SR-IOV. Crie um ConfigMap usando o deviceID das VFs coletado na etapa anterior e instale o plugin de dispositivo SR-IOV. Assim que os nós do Kubernetes exibirem as VFs FEC como recursos `Allocatable`, o cluster estará pronto para que as cargas de trabalho aproveitem a aceleração FEC. 
+
+Siga as etapas da Opção 1 no capítulo <<sriov>>. O SRIOV Network Operator não é aplicável para o Acelerador FEC, portanto, a Opção 2 não é aplicável.
+
+
+[#huge-pages]
+== Huge pages
+
+Quando um processo usa `RAM`, o `CPU` marca-o como usado por esse processo. Para eficiência, o `CPU` aloca `RAM` em blocos; `4K` bytes é o valor padrão em muitas plataformas. Esses blocos são chamados de páginas. As páginas podem ser trocadas para o disco, etc.
+
+Como o espaço de endereçamento do processo é virtual, o `CPU` e o sistema operacional precisam lembrar quais páginas pertencem a qual processo e onde cada página está armazenada. Quanto maior o número de páginas, mais longa é a busca pelo mapeamento de memória. Quando um processo usa `1 GB` de memória, isso representa 262144 entradas para consultar (`1 GB` / `4 K`). Se uma entrada da tabela de páginas consome 8 bytes, isso representa `2 MB` (262144 * 8) para consultar.
+
+A maioria das arquiteturas `CPU` atuais suportam páginas maiores que o padrão, o que dá ao `CPU/OS` menos entradas para consultar.
+
+* Parâmetros kernel
+
+Para habilitar as huge pages, devemos adicionar os seguintes parâmetros do kernel. Neste exemplo, configuramos 40 páginas de 1G, embora o tamanho das huge pages e o número exato devam ser adaptados aos requisitos de memória da sua aplicação:
+
+|===
+| parameter | value | descrição
+
+| hugepagesz
+| 1G
+| Esta opção permite definir o tamanho das huge pages para 1 G
+
+| hugepages
+| 40
+| Este é o número de huge pages definido anteriormente
+
+| default_hugepagesz
+| 1G
+| Este é o valor padrão para obter as huge pages
+|===
+
+Modifique o arquivo GRUB `/etc/default/grub` para adicionar estes parâmetros em `GRUB_CMDLINE_LINUX`:
+
+[,shell]
+----
+default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0
+----
+
+Atualize a configuração do GRUB e reinicie o sistema para aplicar as alterações:
+
+[,shell]
+----
+$ transactional-update grub.cfg
+$ reboot
+----
+
+Para validar que os parâmetros foram aplicados após a reinicialização, você pode verificar a linha de comando:
+
+[,shell]
+----
+$ cat /proc/cmdline
+----
+
+* Usando huge pages
+
+Para usar as huge pages, precisamos montá-las:
+
+[,shell]
+----
+$ mkdir -p /hugepages
+$ mount -t hugetlbfs nodev /hugepages
+----
+
+Implante uma carga de trabalho do Kubernetes, criando os recursos e os volumes:
+
+[,yaml]
+----
+...
+ resources:
+   requests:
+     memory: "24Gi"
+     hugepages-1Gi: 16Gi
+     intel.com/intel_sriov_oru: '4'
+   limits:
+     memory: "24Gi"
+     hugepages-1Gi: 16Gi
+     intel.com/intel_sriov_oru: '4'
+...
+----
+
+[,yaml]
+----
+...
+volumeMounts:
+  - name: hugepage
+    mountPath: /hugepages
+...
+volumes:
+  - name: hugepage
+    emptyDir:
+      medium: HugePages
+...
+----
+
+
+[#numa-aware-scheduling]
+== Agendamento com reconhecimento de NUMA
+
+O acesso não uniforme à memória ou a arquitetura de memória não uniforme (`NUMA`) é um design de memória física usado na arquitetura `SMP` (multiprocessadores), em que o tempo de acesso à memória depende da sua localização em relação a um processador. Sob `NUMA`, um processador pode acessar sua própria memória local mais rapidamente do que a memória não local, ou seja, memória local para outro processador ou memória compartilhada entre processadores.
+
+=== Identificando nós NUMA
+
+Para identificar os nós `NUMA`, em seu sistema use o seguinte comando:
+
+[,shell]
+----
+$ lscpu | grep NUMA
+NUMA node(s):                       1
+NUMA node0 CPU(s):                  0-63
+----
+
+[NOTE]
+====
+Para este exemplo, temos apenas um nó `NUMA` mostrando 64 `CPUs`.
+
+`NUMA` precisa ser habilitado no `BIOS`. Se `dmesg` não tiver registros da inicialização NUMA durante a inicialização, as mensagens relacionadas a `NUMA` no buffer de anel do kernel podem ter sido sobrescritas.
+====
+
+
+
+[#metal-lb-configuration]
+== Metal LB
+
+`MetalLB` é uma implementação de balanceador de carga para clusters Kubernetes bare metal, usando protocolos de roteamento padrão como `L2` e `BGP` como protocolos de anúncio. É um balanceador de carga de rede que pode ser usado para expor serviços em um cluster Kubernetes para o mundo exterior devido à necessidade de usar Serviços do Kubernetes do tipo `LoadBalancer` com bare metal.
+
+Para habilitar `MetalLB` no cluster `RKE2`, as seguintes etapas são necessárias:
+
+* Instale `MetalLB` usando o seguinte comando:
+
+[,shell,subs="attributes,specialchars"]
+----
+$ kubectl apply <<EOF -f
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: metallb
+  namespace: kube-system
+spec:
+  chart: oci://registry.suse.com/edge/charts/metallb
+  targetNamespace: metallb-system
+  version: {version-metallb-chart}
+  createNamespace: true
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: endpoint-copier-operator
+  namespace: kube-system
+spec:
+  chart: oci://registry.suse.com/edge/charts/endpoint-copier-operator
+  targetNamespace: endpoint-copier-operator
+  version: {version-endpoint-copier-operator-chart}
+  createNamespace: true
+EOF
+----
+
+* Crie as configurações de `IpAddressPool` e `L2advertisement`:
+
+[,yaml]
+----
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: kubernetes-vip-ip-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    - 10.168.200.98/32
+  serviceAllocation:
+    priority: 100
+    namespaces:
+      - default
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: ip-pool-l2-adv
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - kubernetes-vip-ip-pool
+----
+
+* Crie o serviço de endpoint para expor o `VIP`:
+
+[,yaml]
+----
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubernetes-vip
+  namespace: default
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: rke2-api
+    port: 9345
+    protocol: TCP
+    targetPort: 9345
+  - name: k8s-api
+    port: 6443
+    protocol: TCP
+    targetPort: 6443
+  sessionAffinity: None
+  type: LoadBalancer
+----
+
+* Verifique se o `VIP` foi criado e se os pods `MetalLB` estão em execução:
+
+[,shell]
+----
+$ kubectl get svc -n default
+$ kubectl get pods -n default
+----
+
+[#private-registry]
+== Configuração de registro privado
+
+`Containerd` pode ser configurado para se conectar a registros privados e usá-los para extrair imagens privadas em cada nó.
+
+Na inicialização, `RKE2` verifica se um arquivo `registries.yaml` existe em `/etc/rancher/rke2/` e instrui `containerd` a usar quaisquer registros definidos no arquivo. Se você deseja usar um registro privado, crie este arquivo como root em cada nó que usará o registro.
+
+Para adicionar o registro privado, crie o arquivo `/etc/rancher/rke2/registries.yaml` com o seguinte conteúdo:
+
+[,yaml]
+----
+mirrors:
+  docker.io:
+    endpoint:
+      - "https://registry.example.com:5000"
+configs:
+  "registry.example.com:5000":
+    auth:
+      username: xxxxxx # this is the registry username
+      password: xxxxxx # this is the registry password
+    tls:
+      cert_file:            # path to the cert file used to authenticate to the registry
+      key_file:             # path to the key file for the certificate used to authenticate to the registry
+      ca_file:              # path to the ca file used to verify the registry's certificate
+      insecure_skip_verify: # may be set to true to skip verifying the registry's certificate
+----
+
+ou sem autenticação:
+
+[,yaml]
+----
+mirrors:
+  docker.io:
+    endpoint:
+      - "https://registry.example.com:5000"
+configs:
+  "registry.example.com:5000":
+    tls:
+      cert_file:            # path to the cert file used to authenticate to the registry
+      key_file:             # path to the key file for the certificate used to authenticate to the registry
+      ca_file:              # path to the ca file used to verify the registry's certificate
+      insecure_skip_verify: # may be set to true to skip verifying the registry's certificate
+----
+
+Para que as alterações no registro entrem em vigor, você precisa realizar a configuração deste arquivo antes de iniciar o RKE2 no nó ou reiniciar o RKE2 em cada nó configurado.
+
+[NOTE]
+====
+Para obter mais informações sobre isso, verifique https://documentation.suse.com/cloudnative/rke2/latest/en/install/containerd_registry_configuration.html#_registries_configuration_file[configuração do registro do containerd rke2].
+====
+
+[#ptp-configuration]
+== Precision Time Protocol
+
+O Precision Time Protocol (PTP) é um protocolo de rede desenvolvido pelo Institute of Electrical and Electronics Engineers (IEEE) para permitir a sincronização de tempo em sub-microssegundos em uma rede de computadores. Desde a sua criação e há algumas décadas, o PTP tem sido usado em muitas indústrias. Recentemente, ele tem visto uma adoção crescente nas redes de telecomunicações como um elemento vital para redes 5G. Embora seja um protocolo relativamente simples, sua configuração pode mudar significativamente dependendo da aplicação. Por esse motivo, vários perfis foram definidos e padronizados.
+
+Nesta seção, apenas perfis específicos de telecomunicações serão abordados. Consequentemente, a capacidade de carimbo de data/hora e um relógio de hardware PTP (PHC) na NIC serão assumidos. Atualmente, todos os adaptadores de rede de nível de telecomunicações vêm com suporte a PTP em hardware, mas você pode verificar tais capacidades com o seguinte comando:
+
+[,console]
+----
+# ethtool -T p1p1
+Time stamping parameters for p1p1:
+Capabilities:
+        hardware-transmit
+        software-transmit
+        hardware-receive
+        software-receive
+        software-system-clock
+        hardware-raw-clock
+PTP Hardware Clock: 0
+Hardware Transmit Timestamp Modes:
+        off
+        on
+Hardware Receive Filter Modes:
+        none
+        all
+----
+
+Substitua `p1p1` pelo nome da interface a ser usada para PTP.
+
+As seções a seguir fornecerão orientações sobre como instalar e configurar o PTP especificamente no SUSE Telco Cloud, mas espera-se familiaridade com conceitos básicos de PTP. Para uma breve visão geral do PTP e da implementação incluída no SUSE Telco Cloud, consulte a https://documentation.suse.com/sles/15-SP7/html/SLES-all/cha-tuning-ptp.html[documentação do SLES Precision Time Protocol].
+
+=== Instalar componentes de software PTP
+
+No SUSE Telco Cloud, a implementação do PTP é fornecida pelo pacote `linuxptp`, que inclui dois componentes:
+
+- `ptp4l`: um daemon que controla o PHC na NIC e executa o protocolo PTP
+- `phc2sys`: um daemon que mantém o relógio do sistema sincronizado com o PHC sincronizado por PTP na NIC
+
+Ambos os daemons são necessários para que a sincronização do sistema funcione plenamente e devem ser configurados corretamente de acordo com sua configuração. Isso é abordado em <<ptp-telco-config>>.
+
+A maneira mais fácil e melhor de integrar o PTP em seu cluster downstream é adicionar o pacote `linuxptp` em `packageList` no arquivo de definição do Edge Image Builder (EIB). Dessa forma, o software do plano de controle PTP será instalado automaticamente durante o provisionamento do cluster. Veja a xref:../quickstart/eib.adoc#eib-configuring-rpm-packages[documentação do EIB] para obter mais informações sobre a instalação de pacotes.
+
+Abaixo, encontre um exemplo de manifesto EIB com `linuxptp`:
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: RAW
+  arch: x86_64
+  baseImage: {micro-base-rt-image-raw}
+  outputImageName: eibimage-slmicrort-telco.raw
+operatingSystem:
+  time:
+    timezone: America/New_York
+  kernelArgs:
+    - ignition.platform.id=openstack
+  systemd:
+    disable:
+      - rebootmgr
+      - transactional-update.timer
+      - transactional-update-cleanup.timer
+      - fstrim
+      - time-sync.target
+    enable:
+      - ptp4l
+      - phc2sys
+  users:
+    - username: root
+      encryptedPassword: $ROOT_PASSWORD
+  packages:
+    packageList:
+      - jq            # Non Telco specific - category: testing/utils
+      - dpdk          # TelCo Core-Network UserPlane (5G UPF) and RAN UserPlane (gNB: DU and CU-UP) - category: runtime
+      - dpdk-tools    # TelCo Core-Network UserPlane (5G UPF) and RAN UserPlane (gNB: DU and CU-UP) - category: testing/utils
+      - libdpdk-25    # TelCo Core-Network UserPlane (5G UPF) and RAN UserPlane (gNB: DU and CU-UP) - category: runtime
+      - pf-bb-config  # TelCo RAN (gNB: DU) - category: config.
+      - open-iscsi    # Non Telco specific (required by SUSE Storage/Longhorn) - category: runtime
+      - tuned         # Non Telco specific (linux tuning) - category: config.
+      - cpupower      # Non Telco specific (linux tuning - CPU power related settings) - category: config.
+      - rt-tests      # Non Telco specific (RT scheduler-latency testing) - category: testing/utils
+      - linuxptp      # TelCo RAN; time sync (gNB: DU) - category: runtime
+      - synce4l       # TelCo RAN; time sync (gNN: DU) - category: runtime
+      - pciutils      # Non Telco specific (provides "lspci" command) - category: testing/utils
+      - numactl       # Non Telco specific (provides "numatcl" command) - category: testing/utils
+    sccRegistrationCode: $SCC_REGISTRATION_CODE
+----
+
+[NOTE]
+====
+O pacote `linuxptp` incluído no SUSE Telco Cloud não habilita `ptp4l` e `phc2sys` por padrão. Se os arquivos de configuração específicos do sistema forem implantados no momento do provisionamento (veja <<ptp-capi>>), eles deverão ser habilitados. Faça isso adicionando-os à seção `systemd` do manifesto, como no exemplo acima.
+====
+
+Siga o processo habitual para criar a imagem conforme descrito na xref:../quickstart/eib.adoc#eib-how-to-build-image[Documentação do EIB] e use-a para implantar seu cluster. Se você é novo no EIB, comece pelo xref:../components/edge-image-builder.adoc#components-eib[] em vez disso.
+
+[#ptp-telco-config]
+=== Configure o PTP para implantações de telecomunicações
+
+Muitas aplicações de telecomunicações exigem sincronização rigorosa de fase e tempo com pouco desvio, o que resultou na definição de dois perfis orientados a telecomunicações: o ITU-T G.8275.1 e o ITU-T G.8275.2. Ambos possuem uma alta taxa de mensagens de sincronização e outras características distintas, como o uso de um algoritmo Best Master Clock (BMCA) alternativo. Tal comportamento exige configurações específicas no arquivo de configuração consumido pelo `ptp4l`, fornecido nas seções a seguir como referência.
+
+[NOTE]
+====
+* Ambas as seções cobrem apenas o caso de um relógio comum na configuração de Receptor de Tempo.
+* Qualquer perfil desse tipo deve ser usado em uma infraestrutura PTP bem planejada.
+* Sua rede PTP específica pode exigir ajustes adicionais de configuração; certifique-se de revisar e adaptar os exemplos fornecidos, se necessário.
+====
+
+==== Perfil PTP ITU-T G.8275.1
+
+O perfil G.8275.1 apresenta as seguintes características:
+
+* Executa diretamente sobre Ethernet e requer suporte total da rede (nós/switches adjacentes devem suportar PTP).
+* A configuração de domínio padrão é 24.
+* A comparação de conjuntos de dados é baseada no algoritmo G.8275.x e seus valores `localPriority` após `priority2`.
+
+Copie o seguinte conteúdo para um arquivo chamado `/etc/ptp4l-G.8275.1.conf`:
+
+[source,]
+----
+# Telecom G.8275.1 example configuration
+[global]
+domainNumber                    24
+priority2            255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout        3
+serverOnly                      0
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+----
+
+Uma vez que o arquivo tenha sido criado, ele deve ser referenciado em `/etc/sysconfig/ptp4l` para que o daemon inicie corretamente. Isso pode ser feito alterando a linha `OPTIONS=` para:
+
+[source,]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf -i $IFNAME --message_tag ptp-8275.1"
+----
+
+Mais precisamente:
+
+- `-f` requer o nome do arquivo de configuração a ser usado, sendo `/etc/ptp4l-G.8275.1.conf` o valor utilizado neste caso.
+- O `-i` requer o nome da interface a ser usada; substitua `$IFNAME` por um nome de interface real.
+- O `--message_tag` permite identificar melhor a saída do ptp4l nos logs do sistema e é opcional.
+
+Uma vez que as etapas acima estejam concluídas, o daemon `ptp4l` deve ser (re)iniciado:
+
+[,console]
+----
+# systemctl restart ptp4l
+----
+
+Verifique o status da sincronização observando os logs com:
+
+[,console]
+----
+# journalctl -e -u ptp4l
+----
+
+==== Arquivo de controle PTP ITU-T G.8275.2
+
+O arquivo de controle G.8275.2 tem as seguintes especificidades:
+
+* Executa sobre IP e não requer suporte total da rede (nós/switches adjacentes podem não suportar PTP).
+* A configuração de domínio padrão é 44.
+* A comparação de conjuntos de dados é baseada no algoritmo G.8275.x e seus valores `localPriority` após `priority2`.
+
+Copie o seguinte conteúdo para um arquivo chamado `/etc/ptp4l-G.8275.2.conf`:
+
+[source,]
+----
+# Telecom G.8275.2 example configuration
+[global]
+domainNumber                    44
+priority2            255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             0
+serverOnly                      0
+hybrid_e2e                      1
+inhibit_multicast_service       1
+unicast_listen                  1
+unicast_req_duration            60
+logSyncInterval                 -5
+logMinDelayReqInterval          -4
+announceReceiptTimeout        2
+#
+# Customize the following for slave operation:
+#
+[unicast_master_table]
+table_id                        1
+logQueryInterval                2
+UDPv4                           $PEER_IP_ADDRESS
+[$IFNAME]
+unicast_master_table            1
+----
+
+Certifique-se de substituir os seguintes espaços reservados:
+
+- `$PEER_IP_ADDRESS` - o endereço IP do próximo nó PTP com o qual se comunicar, como o master ou boundary clock que fornecerá a sincronização.
+- `$IFNAME` - informa a `ptp4l` qual interface usar para PTP.
+
+Uma vez que o arquivo tenha sido criado, ele deve ser referenciado, juntamente com o nome da interface a ser usada para PTP, em `/etc/sysconfig/ptp4l` para que o daemon inicie corretamente. Isso pode ser feito alterando a linha `OPTIONS=` para:
+
+[,shell]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.2.conf --message_tag ptp-8275.2"
+----
+
+Mais precisamente:
+
+- O `-f` requer o nome do arquivo de configuração a ser usado. Neste caso, é `/etc/ptp4l-G.8275.2.conf`.
+- O `--message_tag` permite identificar melhor a saída do ptp4l nos logs do sistema e é opcional.
+
+Uma vez que as etapas acima estejam concluídas, o daemon `ptp4l` deve ser (re)iniciado:
+
+[,console]
+----
+# systemctl restart ptp4l
+----
+
+Verifique o status da sincronização observando os logs com:
+
+[,console]
+----
+# journalctl -e -u ptp4l
+----
+
+[#ptp-bc-setup]
+==== Configuração PTP de um Boundary Clock
+
+As seções anteriores abordaram a configuração de um relógio comum, mas implantações de Telco podem exigir que o nó atue como um Boundary Clock. Em tal cenário, o tempo de referência deve ser propagado de um Grand Master para um ou mais Time Receivers downstream, o que requer uma NIC com duas ou mais portas. Neste caso, uma porta assumirá a função de Time Receiver, que está conduzindo as atualizações do PTP Hardware Clock (PHC) na NIC, enquanto as restantes funcionarão como Time Transmitters. Uma única instância de `ptp4l` é suficiente para uma única NIC multiporta, mas cada interface de kernel envolvida na distribuição de tempo deve ser fornecida, como parte de sua configuração. Por exemplo, atualize o arquivo `/etc/sysconfig/ptp4l` para incluir quatro portas, apenas substitua as variáveis pelos nomes reais das interfaces ou ajuste conforme necessário:
+
+[,shell]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf --message_tag ptp-8275.1 -i $IFNAME1 -i $IFNAME2 -i $IFNAME3 -i $IFNAME4"
+----
+[NOTE]
+====
+Não há necessidade de definir `clock_type` como `BC`, pois isso será automaticamente implícito se mais de uma porta for fornecida.
+====
+
+Uma vez feito, o daemon `ptp4l` pode ser (re)iniciado com:
+
+[,console]
+----
+# systemctl restart ptp4l
+----
+
+Sem qualquer configuração de porta específica, o `ptp4l` executará o BMCA para determinar através de qual porta o GM pode ser alcançado. Se uma configuração estática for preferida, anexe uma seção para cada porta com a função prescrita no arquivo de configuração. Por exemplo:
+
+[source,]
+----
+# Telecom G.8275.1 example configuration
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+
+[$IFNAME1]
+# Time Receiver by default
+
+[$IFNAME2]
+serverOnly                      1
+
+[$IFNAME3]
+serverOnly                      1
+
+[$IFNAME4]
+serverOnly                      1
+----
+
+No entanto, certifique-se de determinar a conexão correta com o GM antes de iniciar o daemon.
+
+[#ptp-phc2sys-setup]
+==== Sincronização do relógio do sistema a partir do PTP
+
+É importante ter em mente que o PTP funciona sincronizando os relógios de hardware locais da NIC. Isso não alinha automaticamente o relógio do sistema com o GM, já que o relógio do sistema é derivado de um relógio de hardware diferente.
+Para manter o relógio do sistema sincronizado com o PTP, o `phc2sys` deve ser executado. Recomenda-se que você conclua totalmente a configuração de `ptp4l` antes de passar para `phc2sys`. `phc2sys` não requer um arquivo de configuração por padrão e seus parâmetros de execução podem ser controlados exclusivamente através da variável `OPTIONS=` presente em `/etc/sysconfig/ptp4l`, de maneira semelhante a `ptp4l`:
+
+[source,]
+----
+OPTIONS="-s $IFNAME -w"
+----
+
+Onde `$IFNAME` é o nome da interface já configurada no ptp4l que será usada como fonte para o relógio do sistema. Isso é usado para identificar o PHC de origem.
+
+No entanto, se um perfil PTP específico ou número de domínio for usado, pode ser necessário fornecer ao `phc2sys` um arquivo de configuração de acordo com aquele fornecido ao `ptp4l`. Na maioria dos casos, ele também pode ser reutilizado diretamente com o phc2sys:
+
+[source,]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf -s $IFNAME -w"
+----
+
+[#ptp-capi]
+=== Integração com Cluster API
+
+Sempre que um cluster é implantado por meio de um cluster de gerenciamento e provisionamento de rede direcionado, tanto o arquivo de configuração quanto as duas variáveis de configuração em `/etc/sysconfig` podem ser implantados no host no momento do provisionamento. Abaixo está um trecho de uma definição de cluster, com foco em um objeto `RKE2ControlPlane` modificado que implanta o mesmo arquivo de configuração G.8275.1 em todos os hosts:
+
+[,yaml]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  replicas: 1
+  version: ${RKE2_VERSION}
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  registrationMethod: "control-plane-endpoint"
+  serverConfig:
+    cni: canal
+  agentConfig:
+    format: ignition
+    cisProfile: cis
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+            - name: rke2-preinstall.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=rke2-preinstall
+                Wants=network-online.target
+                Before=rke2-install.service
+                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStartPost=/bin/sh -c "umount /mnt"
+                [Install]
+                WantedBy=multi-user.target
+        storage:
+          files:
+            - path: /etc/ptp4l-G.8275.1.conf
+              overwrite: true
+              contents:
+                inline: |
+                  # Telecom G.8275.1 example configuration
+                  [global]
+                  domainNumber                    24
+                  priority2                       255
+                  dataset_comparison              G.8275.x
+                  G.8275.portDS.localPriority     128
+                  G.8275.defaultDS.localPriority  128
+                  maxStepsRemoved                 255
+                  logAnnounceInterval             -3
+                  logSyncInterval                 -4
+                  logMinDelayReqInterval          -4
+                  announceReceiptTimeout          3
+                  serverOnly                      0
+                  ptp_dst_mac                     01:80:C2:00:00:0E
+                  network_transport               L2
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /etc/sysconfig/ptp4l
+              overwrite: true
+              contents:
+                inline: |
+                  ## Path:           Network/LinuxPTP
+                  ## Description:    Precision Time Protocol (PTP): ptp4l settings
+                  ## Type:           string
+                  ## Default:        "-i eth0 -f /etc/ptp4l.conf"
+                  ## ServiceRestart: ptp4l
+                  #
+                  # Arguments when starting ptp4l(8).
+                  #
+                  OPTIONS="-f /etc/ptp4l-G.8275.1.conf -i $IFNAME --message_tag ptp-8275.1"
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /etc/sysconfig/phc2sys
+              overwrite: true
+              contents:
+                inline: |
+                  ## Path:           Network/LinuxPTP
+                  ## Description:    Precision Time Protocol (PTP): phc2sys settings
+                  ## Type:           string
+                  ## Default:        "-s eth0 -w"
+                  ## ServiceRestart: phc2sys
+                  #
+                  # Arguments when starting phc2sys(8).
+                  #
+                  OPTIONS="-s $IFNAME -w"
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+    kubelet:
+      extraArgs:
+        - provider-id=metal3://BAREMETALHOST_UUID
+    nodeName: "localhost.localdomain"
+----
+
+Além de outras variáveis, a definição acima deve ser completada com o nome da interface e com os outros objetos do Cluster API, conforme descrito em <<atip-automated-provisioning>>.
+
+[NOTE]
+====
+* Essa abordagem é conveniente apenas se o hardware no cluster for uniforme e a mesma configuração for necessária em todos os hosts, incluindo o nome da interface.
+* Abordagens alternativas são possíveis e serão abordadas em versões futuras.
+====
+
+Neste ponto, seus hosts devem ter uma pilha PTP funcionando e em execução e começarão a negociar sua função PTP.
+
+=== PTP em plataformas Intel Granite Rapids-D
+
+O {product} suporta temporização precisa em uma variedade de plataformas diferentes, incluindo os projetos mais recentes baseados em Intel Granite Rapids-D (GNR-D). Esses novos servidores normalmente incluem um controlador Ethernet de alta velocidade integrado e uma ou mais placas adicionais com um controlador Ethernet para portas extras. Ao contrário das gerações de plataforma anteriores, eles também são equipados com um DPLL dedicado que permite o roteamento dos sinais de temporização através do sistema e das diferentes NIC, e não requer mais cabeamento externo.
+A implantação geral é, portanto, simplificada, mas etapas e componentes de software específicos são necessários, como o DPLL no momento da inicialização e a configuração do sinal interno.
+
+Antes de seguir as etapas de configuração, baixe e instale o driver de kernel mais recente para os _Intel 800 Series Network Devices_ a partir do https://www.intel.com/content/www/us/en/download/19630/intel-network-adapter-driver-for-800-series-devices-under-linux.html[site da Intel]. Selecione o arquivo zip contendo os \"ice_RPM_Files\" e descompacte o arquivo, então instale o RPM `ice-kmp-default-*sles16sp0.x86_64.rpm` contido nele, por exemplo, o arquivo `ice-kmp-default-2.4.5_k6.12.0_160000.5-1.sles16sp0.x86_64.rpm`:
+
+[,console]
+----
+# transactional-update pkg install ice-kmp-default-2.4.5_k6.12.0_160000.5-1.sles16sp0.x86_64.rpm
+----
+
+Reinicie o servidor para tornar a alteração persistente e efetiva.
+
+[NOTE]
+====
+* Um sistema Dell PowerEdge XR8720t será usado como sistema de referência nos exemplos; as interfaces de kernel e a configuração de porta podem ser diferentes em um servidor GNR-D diferente.
+* Assume-se uma implantação de Telco e o perfil Telco G.8275.1 é usado nas seções a seguir para PTP.
+====
+
+==== PTP Boundary Clock
+
+Esta seção descreve o processo de configuração de um Boundary Clock (BC) em um sistema GNR-D, onde uma porta na NIC integrada recebe os timestamps PTP de um GM e todas as portas restantes no sistema atuam como Transmissores de Tempo para outros nós da rede.
+[NOTE]
+====
+A configuração descrita aqui é completamente estática. Se o GM ficar indisponível, a sincronização downstream dependerá exclusivamente das capacidades de holdover do host; nenhuma alternância automática para uma fonte diferente de referência de tempo será realizada.
+====
+
+Para habilitar o comportamento de BC, execute as seguintes etapas na mesma ordem toda vez que o sistema for inicializado:
+
+. Verifique se os dispositivos PTP esperados que controlam os PHCs estão presentes:
++
+[,console]
+----
+# ls -l /sys/class/ptp/
+total 0
+lrwxrwxrwx. 1 root root 0 Apr 27 20:21 ptp1 -> ../../devices/pci0000:12/0000:12:04.0/0000:13:00.0/ptp/ptp1
+lrwxrwxrwx. 1 root root 0 Apr 27 20:21 ptp2 -> ../../devices/pci0000:6b/0000:6b:02.0/0000:6c:00.0/ptp/ptp2
+lrwxrwxrwx. 1 root root 0 Apr 27 20:21 ptp3 -> ../../devices/pci0000:6b/0000:6b:06.0/0000:6e:00.0/ptp/ptp3
+----
++
+[NOTE]
+====
+Ajuste os comandos subsequentes de acordo com os nomes reais encontrados no sistema que está sendo configurado.
+====
+
+. Identifique o controlador integrado, pois ele exigirá uma configuração específica:
++
+A saída anterior deve indicar o dispositivo ao qual eles estão vinculados por meio do endereço PCI e você pode usar `lspci` para consultar o tipo de dispositivo:
++
+[,console]
+----
+# lspci -s 0000:13:00.0
+13:00.0 Ethernet controller: Intel Corporation Ethernet Connection E825-C for SFP (rev 04)
+# lspci -s 0000:6c:00.0
+6c:00.0 Ethernet controller: Intel Corporation Ethernet Controller E830-CC for SFP
+# lspci -s 0000:6e:00.0
+6e:00.0 Ethernet controller: Intel Corporation Ethernet Controller E830-CC for SFP
+----
++
+Este servidor específico está equipado com um controlador integrado _Intel E825-C_ e duas placas adicionais _E830-CC_.
++
+Alternativamente, você pode encontrar mais informações sobre o controlador consultando a primeira porta de rede do controlador que expõe esse PHC:
++
+[,console]
+----
+# ls -l /sys/class/ptp/ptp0/device/net/
+total 0
+drwxr-xr-x. 5 root root 0 Apr 30 15:16 em5
+# ethtool -i em5
+driver: ice
+version: 2.4.5
+firmware-version: 4.03 0x80007f91 1.3881.0
+expansion-rom-version:
+bus-info: 0000:13:00.0
+[...]
+----
++
+Observe que `em5` é a primeira porta do controlador Ethernet integrado neste sistema.
+
+. Configure os sinais entre o PHC no controlador Ethernet integrado e o DPLL de temporização do sistema:
+
+.. Deixe o DPLL controlar o clock Ethernet no controlador integrado:
++
+[,console]
+----
+# echo 4 1 > /sys/class/net/em5/device/tspll_cfg
+----
+
+.. Habilite um pulso a cada início de segundo (Pulse Per Second, PPS) do PHC para o DPLL através do pino SDP2 (sinal de 1kHz):
++
+[,console]
+----
+# echo 2 1 > /sys/class/ptp/ptp1/pins/SDP2
+# echo 1 0 0 0 1000000 > /sys/class/ptp/ptp1/period
+----
+
+.. Opcionalmente, o pino SPD0 (sinal de 1Hz) também pode ser habilitado:
++
+[,console]
+----
+# echo 2 2 > /sys/class/ptp/ptp1/pins/SDP0
+# echo 2 0 0 1 0 > /sys/class/ptp/ptp1/period
+----
+
+.. Habilite o sinal de 1 PPS para ser propagado do DPLL do sistema de temporização para as placas adicionais:
++
+[,console]
+----
+# echo 1 1 > /sys/class/ptp/ptp2/pins/SDP1
+# echo 1 1 > /sys/class/ptp/ptp3/pins/SDP1
+----
+
+. Execute `ts2phc` para manter os PHCs das placas adicionais sincronizados com o mesmo timestamp do PHC `/dev/ptp1`:
++
+[,console]
+----
+# ts2phc -f ts2phc-aic-all.cfg -s /dev/ptp1
+----
++
+Consulte <<gnrd-ts2phc-config-aics>> para o conteúdo de `ts2phc-aic-all.cfg`.
+
+. Execute uma instância do `ptp4l` para o controlador integrado (`/dev/ptp1`):
++
+[,console]
+----
+# ptp4l -f ptp4l-G.8275.1-nac.conf
+----
++
+Consulte <<gnrd-ptp4l-config-nac>> para o conteúdo de `ptp4l-G.8275.1-nac.conf`.
+
+. Execute uma instância do `ptp4l` para cada placa adicional (`/dev/ptp3` e/ou `/dev/ptp2`):
++
+[,console]
+----
+# ptp4l -f ptp4l-G.8275.1-aic1.conf
+# ptp4l -f ptp4l-G.8275.1-aic2.conf
+----
++
+Consulte <<gnrd-ptp4l-config-aics>> para o conteúdo dos arquivos de configuração.
++
+[NOTE]
+====
+Para evitar conflitos e permitir a próxima etapa, cada uma dessas instâncias deve usar soquetes de controle e de somente leitura diferentes.
+====
+
+. Sincronize os parâmetros de runtime PTP e os valores das instâncias do `ptp4l` das AICs com o `pmc`:
++
+Espera-se que um BC encaminhe não apenas o horário de um GM ao qual está conectado, mas também parâmetros auxiliares, como sua classe de relógio e nível de precisão. Isso acontece automaticamente dentro de um grupo de interfaces gerenciadas pela mesma instância do `ptp4l`, mas não entre instâncias diferentes do `ptp4l`, lidando com PHCs e portas diferentes.
++
+Uma vez que o sistema esteja sincronizado com um GM, consulte a instância do `ptp4l` no controlador integrado e defina os valores nas instâncias restantes do `ptp4l` via comandos `pmc`. Por exemplo:
++
+[,console]
+----
+# pmc -f /etc/ptp4l-G.8275.1-nac-bmca.conf -u -b 0 'GET PARENT_DATA_SET' | grep gm
+                gm.ClockClass                         8
+                gm.ClockAccuracy                      0xfe
+                gm.OffsetScaledLogVariance            0xffff
+# pmc -f /etc/ptp4l-G.8275.1-nac-bmca.conf -u -b 0 'GET TIME_PROPERTIES_DATA_SET' | grep -v PROPERTIES
+                currentUtcOffset      37
+                leap61                0
+                leap59                0
+                currentUtcOffsetValid 0
+                ptpTimescale          1
+                timeTraceable         0
+                frequencyTraceable    0
+                timeSource            0xa0
+pmc -f /etc/ptp4l-G.8275.1-aic1-static.conf -u -b 0 'SET GRANDMASTER_SETTINGS_NP
+                clockClass              8
+                clockAccuracy           0xfe
+                offsetScaledLogVariance 0xffff
+                currentUtcOffset        37
+                leap61                  0
+                leap59                  0
+                currentUtcOffsetValid   0
+                ptpTimescale            1
+                timeTraceable           0
+                frequencyTraceable      0
+                timeSource              0xa0
+----
++
+Consulte <<gnrd-pmc-forward>> para automatizar este processo e evitar etapas manuais.
+
+. Opcionalmente, execute o `phc2sys` para derivar o horário do sistema a partir da sincronização PTP:
++
+[,console]
+----
+# phc2sys -f /etc/ptp4l-G.8275.1-nac.conf -s /dev/ptp1 -c CLOCK_REALTIME -w
+----
++
+O arquivo de entrada é o mesmo arquivo de configuração usado para o `ptp4l` e o controlador integrado. Consulte <<ptp-phc2sys-setup>> para permitir que o systemd gerencie sua execução.
+
+==== Arquivos de configuração
+
+Esta seção fornece exemplos de arquivos de configuração e scripts que podem ser usados em conjunto com as etapas acima para configurar rapidamente um BC funcional no GNR-D. Os arquivos de configuração do `ptp4l` contêm todas as definições necessárias, sem a necessidade de sinalizadores de execução externos adicionais, e são todos baseados no perfil Telco G.8275.1. Mais detalhes são fornecidos para cada arquivo em suas respectivas seções.
+
+[#gnrd-ptp4l-config-nac]
+===== Arquivo de configuração do `ptp4l` para o controlador integrado (`/dev/ptp1`)
+
+[source,]
+----
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:1b:19:00:00:00
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l-nac"
+uds_address                     /var/run/ptp4l-nac
+uds_ro_address                  /var/run/ptp4lro-nac
+
+[em1]
+
+[em2]
+
+[em3]
+
+[em4]
+----
+
+A configuração acima aproveita o BMCA para determinar a função da porta, assumindo que um GM esteja disponível através de uma delas. Se um controle mais rigoroso for necessário, adicione o sinalizador `serverOnly` sob cada definição de interface. Para mais detalhes, consulte <<ptp-bc-setup>> ou a configuração das placas adicionais abaixo como exemplo.
+Por uma questão de brevidade, apenas quatro interfaces estão listadas; você precisa ajustar de acordo com seus requisitos.
+
+[#gnrd-ptp4l-config-aics]
+===== Arquivo de configuração do `ptp4l` para placas adicionais (`/dev/ptp2` ou `/dev/ptp3`)
+
+[source,]
+----
+# Telecom G.8275.1 example configuration
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     250
+G.8275.defaultDS.localPriority  250
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:1b:19:00:00:00
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l-iac1"
+uds_address                     /var/run/ptp4l-aic1
+uds_ro_address                  /var/run/ptp4lro-aic1
+
+[p1p1]
+serverOnly                      1
+
+[p1p2]
+serverOnly                      1
+
+[p1p3]
+serverOnly                      1
+
+[p1p4]
+serverOnly                      1
+----
+
+Por uma questão de brevidade, apenas quatro interfaces estão listadas. Você precisa ajustar de acordo com seus requisitos. Todas as interfaces foram definidas estaticamente para a função TimeTransmitter.
+
+[#gnrd-ts2phc-config-aics]
+===== Arquivo de configuração do `ts2phc` para placas adicionais
+
+[source,]
+----
+[global]
+use_syslog              0
+verbose                 1
+logging_level           7
+ts2phc.pulsewidth       100000000
+
+[p1p1]
+ts2phc.channel          1
+ts2phc.extts_polarity   rising
+ts2phc.pin_index        1
+
+[p2p1]
+ts2phc.channel          1
+ts2phc.extts_polarity   rising
+ts2phc.pin_index        1
+----
+
+Esta configuração cobre a sincronização de duas placas adicionais (referenciadas por sua primeira porta, `p1p1` e `p2p1`) via o SDP1 em cada controlador.
+
+[#gnrd-pmc-forward]
+===== Script de encaminhamento de parâmetros GM
+
+O script abaixo pode ser aproveitado para encaminhar os valores e parâmetros do GM para Time Receivers em portas gerenciadas por instâncias `ptp4l` diferentes daquela onde o GM reside. Não se esqueça de editar a seção `Input variables` para ajustar os nomes dos arquivos e executá-lo assim que o sistema estiver sincronizado com um GM.
+
+[bash,]
+----
+#!/bin/bash
+
+set -euo pipefail
+
+################## Variáveis de entrada ##################
+VERBOSE=1
+
+CONFIG_FILE_NAC=/etc/ptp4l-G.8275.1-nac-bmca.conf
+CONFIG_FILES_AICS=(/etc/ptp4l-G.8275.1-aic1-static.conf /etc/ptp4l-G.8275.1-aic2-static.conf)
+
+#####################################################
+
+
+# Verifique se o sistema está sincronizado com um GM
+GM_PRESENT=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET TIME_STATUS_NP' | awk '/gmPresent/ {print $2}')
+
+if [ \"${GM_PRESENT}\" != \"true\" ]; then
+    echo \"Nenhum GM presente, saindo...\"
+    exit 1
+fi
+
+# Obtenha os valores do Grand Master \"upstream\"
+
+PDS_GM_VALUES=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET PARENT_DATA_SET' | awk 'BEGIN {ORS=" "} /gm./ {print $2}')
+TPDS_GM_VALUES=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET TIME_PROPERTIES_DATA_SET' | awk 'BEGIN {ORS=" "} NR>2 {print $2}')
+
+if [ -z \"$PDS_GM_VALUES\" ]; then
+    echo \"Nenhum valor de PARENT_DATA_SET recuperado\"
+    exit 2
+elif [ -z \"$TPDS_GM_VALUES\" ]; then
+    echo \"Nenhum valor de TIME_PROPERTIES_DATA_SET recuperado\"
+    exit 2
+fi
+
+# Descompactar de PARENT_DATA_SET
+read CLOCK_CLASS CLOCK_ACCURACY VARIANCE <<< $PDS_GM_VALUES
+
+# Descompactar de TIME_PROPERTIES_DATA_SET
+read UTC_OFFSET LEAP_61 LEAP_59 UTC_OFFSET_VALID PTP_TIMESCALE T_TRACEABLE F_TRACEABLE T_SOURCE <<< $TPDS_GM_VALUES
+
+if [ \"$VERBOSE\" -eq 1 ]; then +
+    echo \"Lido de PARENT_DATA_SET: clockClass=${CLOCK_CLASS} clockAccuracy=${CLOCK_ACCURACY} offsetScaledLogVariance=${VARIANCE}\" +
+    echo \"Lido de TIME_PROPERTIES_DATA_SET: currentUtcOffset=${UTC_OFFSET} leap61=${LEAP_61} leap59=${LEAP_59}\" \\ +
+         \"currentUtcOffsetValid=${UTC_OFFSET_VALID} ptpTimescale=${PTP_TIMESCALE} timeTraceable=${T_TRACEABLE}\" \\ +
+         \"frequencyTraceable=${F_TRACEABLE} timeSource=${T_SOURCE}\" +
+fi
+
+
+# Encaminhe esses valores para os receptores de tempo "downstream" atualizando as instâncias ptp4l
+
+for FILE in \"${CONFIG_FILES_AICS[@]}\"; do +
+    if [ \"$VERBOSE\" -eq 1 ]; then +
+        echo \"Atualizando GRANDMASTER_SETTINGS_NP (${FILE})\" +
+    fi
+
+    pmc -f ${FILE} -u -b 0 'SET GRANDMASTER_SETTINGS_NP
+       clockClass              '${CLOCK_CLASS}'
+       clockAccuracy           '${CLOCK_ACCURACY}'
+       offsetScaledLogVariance '${VARIANCE}'
+       currentUtcOffset        '${UTC_OFFSET}'
+       leap61                  '${LEAP_61}'
+       leap59                  '${LEAP_59}'
+       currentUtcOffsetValid   '${UTC_OFFSET_VALID}'
+       ptpTimescale            '${PTP_TIMESCALE}'
+       timeTraceable           '${T_TRACEABLE}'
+       frequencyTraceable      '${F_TRACEABLE}'
+       timeSource              '${T_SOURCE}'' &> /dev/null
+
+    if [ $? -ne 0 ]; then +
+        echo \"Falha ao atualizar ${FILE}\" +
+    fi +
+done
+----
+
+[NOTE]
+====
+O script deve ser executado toda vez que o GM mudar.
+====
+
+[#sctp]
+== SCTP - Stream Control Transmission Protocol
+De https://en.wikipedia.org/wiki/Stream_Control_Transmission_Protocol[Stream Control Transmission Protocol - Wikipedia]
+
+[quote]
+____
+O Stream Control Transmission Protocol (SCTP) é um protocolo de comunicação de rede de computadores na camada de transporte do conjunto de protocolos da Internet.
+Originalmente destinado ao transporte de mensagens do Signaling System 7 (SS7) em telecomunicações, o protocolo fornece o recurso orientado a mensagens do User Datagram Protocol (UDP), garantindo ao mesmo tempo o transporte confiável e em sequência de mensagens com controle de congestionamento, como o Transmission Control Protocol (TCP).
+Ao contrário do UDP e do TCP, o protocolo suporta multihoming e caminhos redundantes para aumentar a resiliência e a confiabilidade.
+
+O SCTP é padronizado pela Internet Engineering Task Force (IETF) no RFC 9260. A implementação de referência do SCTP foi lançada como parte da versão 7 do FreeBSD e, desde então, foi amplamente portada para outras plataformas.
+____
+
+Nas especificações 3GPP 4G (LTE), o SCTP (Stream Control Transmission Protocol) atua como o transporte fundamental da Camada 4 para mensagens de sinalização do plano de controle em todo o Evolved Packet Core (EPC), incluindo a conexão de sinalização com o domínio da Radio Access Network (RAN). As especificações 3GPP 5G, por outro lado, removeram a necessidade de SCTP dentro da Core Network através da introdução da Service Based Architecture (SBA), que substitui todas as interfaces de sinalização baseadas em Diameter-over-SCTP por HTTP/2. No entanto, ele ainda é necessário dentro do domínio 5G RAN:
+
+* nas interfaces de sinalização entre os elementos de rede que compõem uma instância gNodeB "desagregada" (interface F1-C entre DU e CU-CP e interface E1 entre CU-CP e CU-UP).
+
+* na interface Xn-C que conecta instâncias gNodeB para fins de sinalização.
+
+* no ponto de referência N2 (também conhecido como NG-C) usado para conectar instâncias gNodeB (domínio RAN) com instâncias AMF (domínio Core Network) para fins de sinalização.
+
+Em seguida, você deve habilitar o módulo do kernel `sctp` do Linux (`lksctp`) nos nós de cluster downstream que hospedam as cargas de trabalho de telecomunicações compatíveis com SCTP que o utilizam:
+
+* Para carregar manualmente o módulo do kernel `sctp` em um nó Linux:
+
+[,shell]
+----
+$ sudo modprobe sctp
+----
+
+* Para automatizar o carregamento do módulo do kernel `sctp` a cada inicialização do nó, crie um arquivo chamado `sctp.conf` no diretório `/etc/modules-load.d/` que contenha simplesmente a string `sctp` (ou seja, o nome do módulo do kernel que a unidade https://www.freedesktop.org/software/systemd/man/latest/modules-load.d.html[systemd-modules-load.service] deve carregar na inicialização).
+
+[,shell]
+----
+$ echo "sctp" > /etc/modules-load.d/sctp.conf
+$ reboot
+----
+
+A maneira mais fácil e melhor de garantir que o módulo do kernel `sctp` seja carregado a cada inicialização do nó é adicionar esse arquivo `/etc/modules-load.d/sctp.conf` à imagem bruta criada com o Edge Image Builder (EIB) usada para provisionar nós downstream; consulte a xref:../quickstart/eib.adoc#adding-operating-system-files[documentação do Edge Image Builder (EIB)] para obter mais informações sobre como fazer isso.

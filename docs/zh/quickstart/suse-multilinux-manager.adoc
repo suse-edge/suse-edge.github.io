@@ -1,0 +1,288 @@
+[#quickstart-suma]
+= SUSE Multi-Linux Manager
+:revdate: 2025-05-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+
+:experimental:
+
+[WARNING]
+====
+{product} {version} (5.0.6) 中包含的 SUSE Multi-Linux Manager 版本尚不支持 SUSE Linux Micro 6.2。它将在未来的 {product} {version} 版本中进行更新并提供支持。
+====
+
+
+SUSE Multi-Linux Manager 包含在 {product} 中，旨在提供自动化和控制功能，以确保您的边缘部署中所有节点上的 SUSE Linux Micro 作为底层操作系统始终保持最新状态。它还可用于管理 Kubernetes，以及管理部署在您边缘节点上、基于 Kubernetes 的应用程序。
+
+本快速入门指南旨在帮助您尽快熟悉 SUSE Multi-Linux Manager，目标是为您的边缘节点提供操作系统更新。本快速入门指南不讨论诸如调整存储大小、创建和管理用于暂存目的的额外软件频道，或为大型部署管理用户、系统组和组织等主题。对于生产环境使用，我们强烈建议您熟悉全面的 https://documentation.suse.com/suma/5.0/en/suse-manager/index.html[SUSE Multi-Linux Manager 文档]。
+
+//For an introduction into using SUSE Multi-Linux Manager to manage the lifecycle of Kubernetes and your applications, see (((SCALABLE_EDGE_GUIDE))).
+
+要有效地使用 SUSE Multi-Linux Manager，需要执行以下步骤来准备 {product}：
+
+* 部署并配置 SUSE Multi-Linux Manager Server。
+* 同步 SUSE Linux Micro 软件包储存库。
+* 创建系统组。
+* 创建激活密钥。
+* 使用 Edge Image Builder 准备用于 SUSE Multi-Linux Manager 注册的安装介质
+
+== 部署 SUSE Multi-Linux Manager Server
+
+如果您已经运行了 SUSE Multi-Linux Manager {version-mlm} 实例，则可以跳过此步骤。
+
+您可以在专用物理服务器上、在您自己硬件上的虚拟机中或在云中运行 SUSE Multi-Linux Manager Server。针对受支持的公有云提供了预配置的 SUSE Multi-Linux Server 虚拟机镜像。
+
+在本快速入门中，我们使用 `SUSE-Manager-Server.x86_64-5.0.4-Qcow-5.0-2025-04.qcow2` 的“qcow2”镜像 {x86-64}，您可以在 https://www.suse.com/download/suse-manager/ 或 SUSE 客户中心找到该镜像。此镜像可在 KVM 等超级管理程序上作为虚拟机运行。请务必检查是否有最新版本的镜像，并将其用于新安装。
+
+您也可以在任何其他受支持的硬件架构上安装 SUSE Multi-Linux Manager Server。在这种情况下，请选择与您的硬件架构相匹配的镜像。
+
+下载镜像后，创建一个至少满足以下最低硬件规格的虚拟机：
+
+* 16 GB RAM
+* 4 个物理或虚拟核心
+* 一个至少 100 GB 的额外块设备
+
+使用 qcow2 镜像时，无需安装操作系统。您可以直接将该镜像附加为根分区。
+
+您需要设置网络，以便边缘节点稍后能够使用包含完全限定域名（“FQDN”）的主机名访问 SUSE Multi-Linux Manager Server！
+
+首次启动 SUSE Multi-Linux Manager 时，您需要执行一些初始配置：
+
+* 选择您的键盘布局
+* 接受该许可协议。
+* 选择您所在的时区。
+* 输入操作系统的 root 密码
+
+接下来的步骤需要以“root”用户身份执行：
+
+对于下一步，您需要 SUSE Multi-Linux Manager Extension 的注册代码，您可以在 SUSE 客户中心找到该注册代码。相同的代码可用于注册 SUSE Linux Micro 和 SUSE Multi-Linux Manager：
+
+注册 SUSE Linux Micro：
+[,shell]
+----
+transactional-update register -r <REGCODE> -e <your_email>
+----
+
+注册 SUSE Multi-Linux Manager：
+[,shell]
+----
+transactional-update register -p SUSE-Manager-Server/5.0/x86_64 -r <REGCODE>
+----
+
+产品字符串取决于您的硬件架构！例如，如果您在 64 位 Arm 系统上使用 SUSE Multi-Linux Manager，则字符串为“SUSE-Manager-Server/5.0/aarch64”。
+
+重引导
+
+更新系统：
+[,shell]
+----
+transactional-update
+----
+
+除非没有更改，否则请重新启动以应用更新。
+
+SUSE Multi-Linux Manager 通过由 Podman 管理的容器提供。`mgradm` 命令会为您处理设置和配置。
+
+[WARNING]
+====
+非常重要的一点是，您的 SUSE Multi-Linux Manager Server 必须配置有完全限定域名 (“FQDN”) 的主机名，以便您想要管理的边缘节点能够在您的网络中正确解析它！
+====
+
+在安装和配置 SUSE Multi-Linux Manager Server 容器之前，您需要准备之前添加的额外块设备。为此，您需要知道虚拟机分配给该设备的名称。例如，如果块设备是 `/dev/vdb`，您可以使用以下命令将其配置为供 SUSE Multi-Linux Manager 使用：
+
+[,shell]
+----
+mgr-storage-server /dev/vdb
+----
+
+部署 SUSE Multi-Linux Manager：
+[,shell]
+----
+mgradm install podman <FQDN>
+----
+
+提供 CA 证书的口令。此口令应与您的登录口令不同。您通常不需要在以后输入它，但应将其记下。
+
+提供“admin”用户的口令。这是用于登录 SUSE Multi-Linux Manager 的初始用户。您稍后可以创建具有完全或受限权限的其他用户。
+
+== 配置 SUSE Multi-Linux Manager
+
+部署完成后，您可以使用之前提供的主机名登录 SUSE Multi-Linux Manager Web UI。初始用户为“admin”。使用您在上一步中提供的口令。
+
+在下一步中，您需要使用组织凭据，您可以在 SUSE 客户中心中，位于您组织的“Users”选项卡下第二个子标签页中找到这些凭据。有了这些凭据，SUSE Multi-Linux Manager 就可以同步您拥有订阅的所有产品。
+
+选择 `Admin > Setup Wizard`。
+
+在 `Organization Credentials` 选项卡上，使用您在 SUSE Customer Center 中找到的 `Username` 和 `Password` 创建一个新的凭据。
+
+转至下一个选项卡 `SUSE Products`。您需要等待与 SUSE Customer Center 的首次数据同步完成。
+
+列表填充完成后，使用过滤器仅显示“Micro {version-operatingsystem}”。
+请在  下勾选适用于您边缘节点运行的硬件架构（`x86_64` 或 `aarch64`）的 SUSE Linux Micro {version-operatingsystem} 复选框。
+
+单击 `Add Products`。这将添加 SUSE Linux Micro 的主软件包储存库（“频道”），并自动将 SUSE Manager 客户端工具的频道作为子频道添加。
+
+根据您的互联网连接情况，首次同步可能需要一些时间。您可以立即开始执行后续步骤：
+
+在 `Systems > System Groups` 下，至少创建一个系统在加入时会自动纳入的组。组是对系统进行分类的重要方式，因此您可以一次性对整组系统应用配置或操作。它们在概念上类似于 Kubernetes 中的标签。
+
+点击 `+ Create Group`
+
+提供一个短名称（例如“Edge Nodes”）和详细描述。
+
+在 `Systems > Activation Keys` 下，至少创建一个激活密钥。激活密钥可以被视为一种配置控制文件，当系统加入 SUSE Multi-Linux Manager 时，该控制文件会自动应用于这些系统。如果您希望将某些边缘节点添加到不同的组或使用不同的配置，您可以为它们创建单独的激活密钥，并在稍后的 Edge Image Builder 中使用它们来创建自定义安装介质。
+
+激活密钥的一个典型高级用例是将您的测试集群分配到包含最新更新的软件频道，并将您的生产集群分配到仅在您于测试集群中测试过这些最新更新后才会获取它们的软件频道。
+
+点击 `+ Create Key`
+
+选择一个简短的描述，例如“Edge Nodes”。
+提供一个标识该密钥的唯一名称，例如，对于具有 {x86-64} 硬件架构的边缘节点，使用“edge-x86_64”。
+密钥会自动添加数字前缀。对于默认组织，该数字始终为“1”。如果您在 SUSE Multi-Linux Manager 中创建了其他组织并为它们创建了密钥，则该数字可能会有所不同。
+
+如果您尚未创建任何克隆的软件频道，则可以将“基础频道”(Base Channel) 的设置保留为“SUSE Manager Default”。这将自动为您的边缘节点分配正确的 SUSE 更新储存库。
+
+在“子频道”(Child Channel) 中，为您的激活密钥所使用的硬件架构选择“包含推荐”(include recommended) 滑块。这将添加“SUSE-Manager-Tools-For-SL-Micro-{version-operatingsystem}”频道。
+
+在“组”(Groups) 选项卡上，添加您之前创建的组。所有使用此激活密钥加入的节点都将自动添加到该组中。
+
+== 使用 Edge Image Builder 创建自定义安装映像
+
+要使用 Edge Image Builder，您只需要一个可以启动基于 Linux 的 podman 容器的环境。
+
+对于最小化的实验室设置，我们实际上可以使用 SUSE Multi-Linux Manager Server 所在的同一台虚拟机。请确保虚拟机中有足够的磁盘空间！这不建议用于生产环境。请参阅 <<id-prerequisites-2>> 以了解我们测试过 Edge Image Builder 的主机操作系统。
+
+以 root 用户身份登录您的 SUSE Multi-Linux Manager Server 主机。
+
+拉取 Edge Image Builder 容器：
+[,shell,subs="attributes"]
+----
+podman pull registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib}
+----
+
+创建目录 `/opt/eib` 和子目录 `base-images`：
+[,shell]
+----
+mkdir -p /opt/eib/base-images
+----
+
+在本快速入门中，我们使用 SUSE Linux Micro 映像的“self-install”版本。该映像稍后可以写入物理 USB 闪存驱动器，您可以使用它在物理服务器上进行安装。如果您的服务器具有通过 BMC（基板管理控制器）远程挂载安装 .iso 映像的选项，您也可以使用该方法。最后，该映像也可以与大多数虚拟化工具一起使用。
+
+如果您想将镜像直接预加载到物理节点，或者直接从虚拟机启动它，您也可以使用“raw”镜像类型。
+
+您可以在 SUSE 客户中心或 https://www.suse.com/download/sle-micro/ 上找到这些镜像。
+
+下载或复制镜像 `{micro-default-image-iso}` 到 `base-images` 目录，并将其命名为“slemicro.iso”。
+
+在基于 Arm® 的构建主机上构建 {aarch64} 镜像，是在 {product} {version-edge} 中的一项技术预览。它很可能会起作用，但目前尚不支持。如果您想尝试一下，您需要在 64 位 Arm® 机器上运行 Podman，并且需要将所有示例和代码片段中的“x86_64”替换为“aarch64”。
+
+在 `/opt/eib` 中，创建一个名为 `iso-definition.yaml` 的文件。这是您用于 Edge Image Builder 的构建定义。
+
+这是一个简单的示例，它安装 SL Micro {version-operatingsystem}，设置 root 密码、一个附加用户和键盘映射，启动 Cockpit 图形界面，并将您的节点注册到 SUSE Multi-Linux Manager：
+
+[,yaml]
+----
+apiVersion: 1.3
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+  - username: root
+    createHomeDir: true
+    encryptedPassword: $6$aaBTHyqDRUMY1HAp$pmBY7.qLtoVlCGj32XR/Ogei4cngc3f4OX7fwBD/gw7HWyuNBOKYbBWnJ4pvrYwH2WUtJLKMbinVtBhMDHQIY0
+  - username: admin
+    createHomeDir: true
+    encryptedPassword: $6$8EGZXU1iFcLiHHxk$Hs3nVtzO.yZhApT.YBHaNvLRZvXG3Iv/km92BtiNiGXhSSUG0ZbNHxlm7c//ROFj3W9M5xIkB.RLQpPKOFxP91
+  keymap: de
+  systemd:
+    enable:
+      - cockpit.socket
+  packages:
+    noGPGCheck: true
+  suma:
+    host: ${fully qualified hostname of your SUSE Multi-Linux Manager Server}
+    activationKey: 1-edge-x86_64
+----
+
+Edge Image Builder 还可以配置网络、在节点上自动安装 Kubernetes，甚至通过 Helm chart 部署应用程序。有关更全面的示例，请参阅 <<quickstart-eib>>。
+
+对于 `baseImage`，请指定您要在 `base-images` 目录中使用的 ISO 的实际名称。
+
+在此示例中，root 密码将为“root”。有关为您想要使用的安全密码创建密码哈希的信息，请参阅 <<id-configuring-os-users>>。
+
+由于 Cockpit 禁止以 root 用户身份连接，因此需要一个附加用户。在此示例中，该用户为“admin”，密码为“admin”。
+
+将键盘映射设置为您希望系统在安装后使用的实际键盘布局。
+
+[NOTE]
+====
+我们使用选项 `noGPGCheck: true`，因为我们不会提供用于检查 RPM 软件包的 GPG 密钥。我们建议在生产环境中使用的更安全设置的综合指南，可以在 {link-eib-installing-packages}[上游安装软件包指南] 中找到。
+====
+
+如前所述，您的 SUSE Multi-Linux Manager 主机需要一个完全限定的主机名，该主机名可以在您的边缘节点启动的网络中解析。
+
+`activationKey` 的值需要与您在 SUSE Multi-Linux Manager 中创建的密钥相匹配。
+
+要构建一个在安装后自动将您的边缘节点注册到 SUSE Multi-Linux Manager 的安装镜像，您还需要准备两个工件：
+
+* 用于安装 SUSE Multi-Linux Manager 管理代理的 Salt minion 软件包
+* 您的 SUSE Multi-Linux Manager 服务器的 CA 证书
+
+=== 下载 venv-salt-minion 软件包
+
+在 `/opt/eib` 中，创建一个子目录 `rpms`。
+
+将软件包 `venv-salt-minion` 从您的 SUSE Multi-Linux Manager 服务器下载到该目录中。您可以选择通过 Web UI 获取它，方法是在 `Software > Channel List` 下找到该软件包并从 SUSE-Manager-Tools ... 频道下载，或者使用 curl 等工具从 SUSE Multi-Linux Manager “启动储存库”下载：
+
+[,shell]
+----
+curl -O http://${HOSTNAME_OF_SUSE_MANAGER}/pub/repositories/slmicro/6/1/bootstrap/x86_64/venv-salt-minion-3006.0-8.1.x86_64.rpm
+----
+如果已经发布了更新的版本，实际的软件包名称可能会有所不同。如果有多个软件包可供选择，请始终选择最新的版本。
+
+为了解决 SUSE Multi-Linux Manager https://www.suse.com/releasenotes/x86_64/multi-linux-manager/5.1/index.html#_bootstrapping_sl_micro_6_1_clients[发行说明] 中记录的一个问题，您还需要将最新版本的构建密钥软件包放入 `rpms` 目录中（编写本文档时为 `suse-build-key-12.0-slfo.1.1_3.1.noarch.rpm`）。您可以在 SUSE Multi-Linux Manager 的 `Software` 部分，通过 SL Micro 的 Pool 频道的 `Packages` 选项卡找到它。在 `Details` 视图中有一个 `Download` 按钮。
+
+== 下载 SUSE Multi-Linux Manager CA 证书
+
+在 `/opt/eib` 中，创建一个子目录 `certificates`
+
+将 CA 证书从 SUSE Multi-Linux Manager 下载到该目录中：
+
+[,shell]
+----
+curl -O http://${HOSTNAME_OF_SUSE_MANAGER}/pub/RHN-ORG-TRUSTED-SSL-CERT
+----
+
+[WARNING]
+====
+您必须将证书重命名为 `RHN-ORG-TRUSTED-SSL-CERT.crt`。Edge Image Builder 随后将确保在安装过程中在边缘节点上安装并激活该证书。
+====
+
+现在您可以运行 Edge Image Builder：
+
+[,bash,subs="attributes"]
+----
+cd /opt/eib
+podman run --rm -it --privileged -v /opt/eib:/eib \
+registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+build --definition-file iso-definition.yaml
+----
+
+如果您为 YAML 定义文件使用了不同的名称，或者想要使用不同版本的 Edge Image Builder，则需要相应地调整命令。
+
+构建完成后，您将在 `/opt/eib` 目录中找到名为 `eib-image.iso` 的安装 ISO。
+
+该镜像现在可用于部署将尝试向 SUSE Multi-Linux Manager 注册的节点。
+
+节点完全安装后，您将在 SUSE Multi-Linux Manager 的 `Salt/Keys` 部分中看到其密钥列为 `pending`。一旦您接受了该密钥，节点将自动加入 SUSE Multi-Linux Manager，并在该过程完成后显示在 `Systems` 列表中。它将拥有您在激活密钥中提供的系统组。
+
+在应用任何其他配置之前，您应该安排一次重启。
+
+请注意，接受密钥的过程可以如 https://docs.saltproject.io/en/latest/topics/tutorials/autoaccept_grains.html[此处] 所述，通过使用白名单来完全自动化。
+
+
+
+

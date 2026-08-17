@@ -1,0 +1,165 @@
+[#guides-kiwi-builder-images]
+= Kiwiを使用して更新されたSUSE Linux Microイメージを構築する
+:revdate: 2025-10-09
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+このセクションでは、Edge Image Builder、Cluster API (CAPI) + Metal^3^で使用する、またはディスクイメージをブロックデバイスに直接書き込むための、更新されたSUSE Linux Microイメージの生成方法について説明します。このプロセスは、初期システムブートイメージに最新のパッチを含める必要がある場合（インストール後のパッチ転送を最小限に抑えるため）、またはCAPIを使用するシナリオで、ホストをその場でアップグレードするよりも新しいイメージでオペレーティングシステムを再インストールすることが望ましい場合に役立ちます。
+
+このプロセスでは、 https://osinside.github.io/kiwi/[Kiwi]を使用してイメージビルドを実行します。{product}には、ヘルパーユーティリティが組み込まれており、全体的なプロセスを簡素化するコンテナ化されたバージョンが付属しているため、必要なターゲット*プロファイル*を指定できます。プロファイルは、必要な出力イメージのタイプを定義します。一般的なものを以下に示します。
+
+* \"*Base*\" - パッケージセットが削減されたSUSE Linux Microディスクイメージ（podmanが含まれています）。
+* \"*Base-SelfInstall*\" - 上記の「Base」に基づくSelfInstallイメージ。
+* \"*Base-RT*\" - 上記の「Base」と同じですが、代わりにリアルタイム（rt）カーネルを使用します。
+* \"*Base-RT-SelfInstall*\" - 上記の「Base-RT」に基づくSelfInstallイメージ
+* \"*Default*\" - 上記の「Base」に基づくSUSE Linux Microディスクイメージですが、仮想化スタック、Cockpit、salt-minionなど、いくつかのツールが追加されています。
+* \"*Default-SelfInstall*\" - 上記の「Default」に基づくSelfInstallイメージ
+
+詳細については、 https://documentation.suse.com/sle-micro/{version-operatingsystem}/html/Micro-deployment-images/index.html#alp-images-installer-type[SUSE Linux Micro {version-operatingsystem}]のドキュメントを参照してください。
+
+NOTE: このプロセスは{x86-64}アーキテクチャと{aarch64}アーキテクチャの両方で機能しますが、構築するイメージと同じアーキテクチャのビルドホストを使用する必要があります。言い換えると、{aarch64}イメージを構築するには{aarch64}ビルドホストを使用する必要があり、{x86-64}の場合も同様です。現時点ではクロスビルドはサポートされていません。
+
+== 前提条件
+
+Kiwiイメージビルダーには以下が必要です。
+
+* 構築するイメージと同じアーキテクチャのSUSE Linux Micro {version-operatingsystem}ホスト（「ビルドシステム」）が必要です。
+* ビルドシステムは、`SUSEConnect`を介してすでに登録されている必要があります（登録は、SUSEリポジトリから最新のパッケージを取得するために使用されます）。
+* 必要なパッケージを取得するために使用できるインターネット接続。プロキシ経由で接続する場合、ビルドホストを事前に設定しておく必要があります。
+* ビルドホスト上でSELinuxを無効にする必要があります（SELinuxのラベリングはコンテナ内で行われ、ホストのポリシーと競合する可能性があるためです）。
+* コンテナイメージ、ビルドルート、および生成される出力イメージを格納するために、少なくとも10GBの空きディスク容量が必要です。
+
+== はじめに
+
+特定の制限により、現在はSELinuxを無効にする必要があります。SUSE Linux Micro {version-operatingsystem} イメージビルドホストに接続し、SELinuxが無効になっていることを確認してください。
+
+[,console]
+----
+# setenforce 0
+----
+
+生成されたイメージを保存するために、Kiwiビルドコンテナと共有する出力ディレクトリを作成します。
+
+[,console]
+----
+# mkdir ~/output
+----
+
+SUSEレジストリから最新のKiwiビルダーイメージをプルします。
+
+[,console,subs="attributes"]
+----
+# podman pull registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder}
+(...)
+----
+
+== デフォルトイメージのビルド
+
+これは、コンテナイメージの実行時に引数が指定されなかった場合のKiwiイメージコンテナのデフォルトの動作です。次のコマンドは、2つのディレクトリをコンテナにマッピングして `podman` を実行します。
+
+* 基盤となるホスト上の `/etc/zypp/repos.d` SUSE Linux Microパッケージリポジトリディレクトリが必要です。
+* 上記で作成した出力 `~/output` ディレクトリが必要です。
+
+Kiwiイメージコンテナでは、`build-image` ヘルパースクリプトを次のように実行する必要があります。
+
+[,console,subs="attributes"]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image
+(...)
+----
+
+NOTE: このスクリプトを初めて実行する場合、開始直後に「*ERROR:」というエラーで *失敗* することが予想されます。「Early loop device test failed, please retry the container run.*」というエラーは、基盤となるホストシステム上で作成されたループデバイスが、コンテナイメージ内で即座に認識されないことに起因する現象です。コマンドをもう一度実行するだけで、問題なく処理が進むはずです。
+
+数分後、イメージはローカルの出力ディレクトリで見つかります。
+
+[,console,subs="attributes"]
+----
+(...)
+INFO: Image build successful, generated images are available in the 'output' directory.
+
+# ls -1 output/
+SLE-Micro.x86_64-{version-operatingsystem}.changes
+SLE-Micro.x86_64-{version-operatingsystem}.packages
+SLE-Micro.x86_64-{version-operatingsystem}.raw
+SLE-Micro.x86_64-{version-operatingsystem}.verified
+build
+kiwi.result
+kiwi.result.json
+----
+
+== 他のプロファイルでのイメージビルド
+
+異なるイメージプロファイルをビルドするには、Kiwiコンテナイメージヘルパースクリプトの「*-p*」コマンドオプションを使用します。例えば、「*Default-SelfInstall*」ISOイメージをビルドするには次のようにします。
+
+[,console,subs="attributes"]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image -p Default-SelfInstall
+(...)
+----
+
+NOTE: データ損失を防ぐため、`output`ディレクトリ内にイメージが存在する場合、Kiwiは実行を拒否します。`rm -f output/*`に進む前に、出力ディレクトリの内容を削除する必要があります。
+
+あるいは、リアルタイムカーネル ("*kernel-rt*") を使用してSelfInstall ISOイメージをビルドするには、次のようにします。
+
+[,console,subs="attributes"]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image -p Base-RT-SelfInstall
+(...)
+----
+
+== 大きなセクタサイズでのイメージのビルド
+
+一部のハードウェアでは、標準の512バイトではなく、大きなセクタサイズ（例: *4096 bytes*）のイメージが必要です。コンテナ化されたKiwiビルダーは、「*-b*」パラメータを指定することで、大きなブロックサイズのイメージを生成する機能をサポートしています。例えば、大きなセクタサイズで「*Default-SelfInstall*」イメージをビルドするには、次のようにします。
+
+[,console,subs="attributes"]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image -p Default-SelfInstall -b
+(...)
+----
+
+== カスタムKiwiイメージ定義ファイルの使用
+
+高度なユースケースでは、カスタムKiwiイメージ定義ファイル (`SL-Micro.kiwi`) を、必要なビルド後スクリプトと共に使用できます。これには、{product}チームによって事前にパッケージ化されたデフォルトの定義を上書きする必要があります。
+
+新しいディレクトリを作成し、ヘルパースクリプトが参照しているコンテナイメージ内の場所にマッピングします (`/micro-sdk/defs`)。
+
+[,console,subs="attributes"]
+----
+# mkdir ~/mydefs/
+# cp /path/to/SL-Micro.kiwi ~/mydefs/
+# cp /path/to/config.sh ~/mydefs/
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output -v ~/mydefs/:/micro-sdk/defs/ \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image
+(...)
+----
+
+[WARNING]
+====
+これは高度なユースケースでのみ必要であり、サポート上の問題を引き起こす可能性があります。詳細なアドバイスやガイダンスについては、SUSEの担当者にお問い合わせください。
+====
+
+コンテナに含まれるデフォルトのKiwiイメージ定義ファイルを取得するには、以下のコマンドを使用できます。
+
+[,console,subs="attributes"]
+----
+$ podman create --name kiwi-builder registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder}
+$ podman cp kiwi-builder:/micro-sdk/defs/SL-Micro.kiwi .
+$ podman cp kiwi-builder:/micro-sdk/defs/SL-Micro.kiwi.4096 .
+$ podman rm kiwi-builder
+$ ls ./SL-Micro.*
+(...)
+----

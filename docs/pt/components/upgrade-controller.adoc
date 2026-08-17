@@ -1,0 +1,550 @@
+[#components-upgrade-controller]
+= Upgrade Controller
+:revdate: 2025-05-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Um controlador Kubernetes capaz de realizar atualizações nos seguintes {product} componentes da plataforma:
+
+* Sistema Operacional (SUSE Linux Micro)
+* Kubernetes (K3s & RKE2)
+* Componentes adicionais (Rancher, Elemental, SUSE Security, etc.)
+
+O link:https://github.com/suse-edge/upgrade-controller[Upgrade Controller] simplifica o processo de atualização para os componentes mencionados acima, encapsulando suas complexidades dentro de um único `user-facing` recurso que serve como um *gatilho* para a atualização. Os usuários só precisam configurar este recurso e o `Upgrade Controller` cuida do resto.
+
+[NOTE]
+====
+O `Upgrade Controller` atualmente suporta {product} atualizações de plataforma apenas para clusters *de gerenciamento não air-gapped*. Consulte a seção <<components-upgrade-controller-known-issues>> para obter mais informações.
+====
+
+== Como o {product} usa o Upgrade Controller?
+
+O *Upgrade Controller* é essencial na automação das operações de "Dia 2" (anteriormente manuais) necessárias para atualizar clusters de gerenciamento de uma versão de lançamento {product} para a próxima.
+
+Para alcançar essa automação, o Upgrade Controller utiliza ferramentas como o <<components-system-upgrade-controller,System Upgrade Controller>> e o link:https://github.com/k3s-io/helm-controller/[Helm Controller]. 
+
+Para mais detalhes sobre como o Upgrade Controller funciona, consulte <<components-upgrade-controller-how>>.
+
+Para limitações conhecidas que o Upgrade Controller possui, consulte <<components-upgrade-controller-known-issues>>.
+
+Para obter informações sobre a diferença entre o Upgrade Controller e o System Upgrade Controller, consulte <<components-upgrade-controller-uc-vs-suc>>.
+
+[#components-upgrade-controller-uc-vs-suc]
+== Upgrade Controller vs System Upgrade Controller
+
+O <<components-system-upgrade-controller, System Upgrade Controller (SUC)>> é uma ferramenta de propósito geral que propaga instruções de atualização para nós específicos do Kubernetes.
+
+Embora ele suporte algumas operações de "Dia 2" para a plataforma {product}, ele *não* cobre todas elas. Além disso, mesmo para operações suportadas, os usuários precisam configurar, manter e implantar manualmente múltiplos `SUC Plans` — um processo sujeito a erros que pode levar a problemas inesperados.
+
+Isso levou à necessidade de uma ferramenta que **automatize** e **abstraia** a complexidade de gerenciar várias operações de "Dia 2" para a plataforma {product}. Assim, o `Upgrade Controller` foi desenvolvido. Ele simplifica o processo de atualização ao introduzir um único `user-facing resource` que conduz a atualização. Os usuários só precisam gerenciar esse recurso, enquanto o `Upgrade Controller` cuida do resto.
+
+[#components-upgrade-controller-installation]
+== Instalando o Upgrade Controller
+
+=== Pré-requisitos
+
+* link:https://helm.sh/docs/intro/install/[Helm]
+
+* link:{link-cert-manager-installation}[cert-manager]
+
+* <<components-system-upgrade-controller-install, System Upgrade Controller>>
+
+* Um cluster Kubernetes; K3s ou RKE2
+
+=== Etapas
+
+. Instale o chart Helm do Upgrade Controller no seu cluster de gerenciamento:
++
+[,bash,subs="attributes"]
+----
+helm install upgrade-controller oci://registry.suse.com/edge/charts/upgrade-controller --version {version-upgrade-controller-chart} --create-namespace --namespace upgrade-controller-system
+----
+
+. Valide a implantação do Upgrade Controller:
++
+[,bash]
+----
+kubectl get deployment -n upgrade-controller-system
+----
+
+. Valide o pod do Upgrade Controller:
++
+[,bash]
+----
+kubectl get pods -n upgrade-controller-system
+----
+
+. Valide os logs do pod do Upgrade Controller:
++
+[,bash]
+----
+kubectl logs <pod_name> -n upgrade-controller-system
+----
+
+[#components-upgrade-controller-installation-eib]
+== Instalando o Upgrade Controller via Edge Image Builder
+
+Como alternativa à instalação manual descrita acima, é possível instalar o Upgrade Controller como parte da implantação inicial orquestrada pelo <<components-eib, Edge Image Builder>>.
+
+Nesse caso, é necessário adicionar a seguinte configuração de chart helm ao arquivo de configuração do EIB:
+
+[,yaml]
+----
+kubernetes:
+  helm:
+    charts:
+      - name: cert-manager
+        repositoryName: jetstack
+        version: {version-cert-manager}
+        targetNamespace: cert-manager
+        valuesFile: certmanager-values.yaml
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: upgrade-controller
+        version: {version-upgrade-controller-chart}
+        repositoryName: suse-edge-charts
+        targetNamespace: upgrade-controller-system
+        createNamespace: true
+        installationNamespace: kube-system
+----
+
+[#components-upgrade-controller-how]
+== Como funciona o Upgrade Controller?
+
+Para realizar uma atualização de versão do Edge, o Upgrade Controller introduz dois novos link:https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/[recursos personalizados] do Kubernetes:
+
+* <<components-upgrade-controller-extensions-upgrade-plan, UpgradePlan>> - criado pelo usuário; contém configurações referentes a uma atualização de versão do Edge.
+
+* <<components-upgrade-controller-extensions-release-manifest, ReleaseManifest>> - criado pelo Upgrade Controller; contém versões de componentes específicas para uma determinada versão de lançamento do Edge. *Este arquivo não deve ser editado pelos usuários.*
+
+O Upgrade Controller prossegue criando um recurso `ReleaseManifest` que contém os dados do componente para a versão de lançamento do Edge especificada pelo usuário na propriedade `releaseVersion` no recurso `UpgradePlan`.
+
+Usando os dados do componente do `ReleaseManifest`, o Upgrade Controller prossegue com a atualização dos componentes da versão do Edge na seguinte ordem:
+
+. <<components-upgrade-controller-how-os,Sistema operacional (SO)>>.
+
+. <<components-upgrade-controller-how-k8s, Kubernetes>>.
+
+. <<components-upgrade-controller-how-additional,Componentes adicionais>>.
+
+[NOTE]
+====
+Durante o processo de atualização, o Upgrade Controller gera continuamente informações de atualização para o `UpgradePlan` criado. Para obter mais informações sobre como acompanhar o processo de atualização, consulte <<components-upgrade-controller-how-track,Acompanhando o processo de atualização>>.
+====
+
+[#components-upgrade-controller-how-os]
+=== Atualização do Sistema operacional
+
+Para atualizar o sistema operacional, o Upgrade Controller cria planos <<components-system-upgrade-controller,SUC>> que possuem o seguinte modelo de nomenclatura:
+
+* Para planos SUC relacionados a atualizações do SO dos nós do plano de controle - `control-plane-<os-name>-<os-version>-<suffix>`.
+
+* Para planos SUC relacionados a atualizações do SO dos nós de trabalho - `workers-<os-name>-<os-version>-<suffix>`.
+
+Com base nesses planos, o SUC prossegue criando cargas de trabalho em cada nó do cluster que realizam a atualização do SO propriamente dita.
+
+Dependendo do `ReleaseManifest`, a atualização do SO pode incluir:
+
+* Atualizações apenas de pacotes - para casos de uso em que a versão do SO não muda entre as versões do Edge.
+
+* Migração completa do SO - para casos de uso em que a versão do SO muda entre as versões do Edge.
+
+A atualização é executada *um* nó por vez, começando pelos nós do plano de controle. Somente se a atualização do nó do plano de controle terminar, os nós de trabalho começarão a ser atualizados.
+
+[NOTE]
+====
+O Controlador de Atualização configura os Planos SUC do SO para realizar um link:https://kubernetes.io/docs/reference/kubectl/generated/kubectl_drain/[dreno] dos nós do cluster se o cluster tiver mais de *um* nó do tipo especificado.
+
+Para clusters onde os nós do plano de controle são *maiores que* um e há *apenas um* nó de trabalho, um dreno será realizado apenas para os nós do plano de controle e vice-versa.
+
+Para obter informações sobre como desativar completamente os drenos de nós, consulte a seção <<components-upgrade-controller-extensions-upgrade-plan,UpgradePlan>>.
+====
+
+[#components-upgrade-controller-how-k8s]
+=== Fazer upgrade do Kubernetes
+
+Para fazer upgrade da distribuição Kubernetes de um cluster, o Upgrade Controller cria Planos <<components-system-upgrade-controller,SUC>> que possuem o seguinte modelo de nomenclatura:
+
+* Para Planos SUC relacionados a atualizações do Kubernetes de nós do plano de controle - `control-plane-<k8s-version>-<suffix>`.
+
+* Para Planos SUC relacionados a atualizações do Kubernetes de nós de trabalho - `workers-<k8s-version>-<suffix>`.
+
+Com base nesses planos, o SUC prossegue criando cargas de trabalho em cada nó do cluster que realizam a atualização real do Kubernetes.
+
+A atualização do Kubernetes ocorrerá *um* nó por vez, começando pelos nós do plano de controle. Somente se a atualização do nó do plano de controle terminar, os nós de trabalho começarão a ser atualizados.
+
+[NOTE]
+====
+O Controlador de Atualização configura os Planos SUC do Kubernetes para realizar um link:https://kubernetes.io/docs/reference/kubectl/generated/kubectl_drain/[dreno] dos nós do cluster se o cluster tiver mais de *um* nó do tipo especificado.
+
+Para clusters onde os nós do plano de controle são *maiores que* um e há *apenas um* nó de trabalho, um dreno será realizado apenas para os nós do plano de controle e vice-versa.
+
+Para obter informações sobre como desativar completamente os drenos de nós, consulte <<components-upgrade-controller-extensions-upgrade-plan>>.
+====
+
+[#components-upgrade-controller-how-additional]
+=== Atualizações de Componentes Adicionais
+
+Atualmente, todos os componentes adicionais são instalados via charts Helm. Para obter uma lista completa dos componentes de uma versão específica, consulte as <<release-notes,Release Notes>>.
+
+Para charts Helm implantados por meio do <<components-eib,EIB>>, o Upgrade Controller atualiza o link:https://docs.rke2.io/helm#using-the-helm-crd[HelmChart CR] existente de cada componente.
+
+Para charts Helm implantados fora do EIB, o Upgrade Controller cria um recurso `HelmChart` para cada componente.
+
+Após a criação/atualização do recurso `HelmChart`, o Upgrade Controller depende do link:https://github.com/k3s-io/helm-controller/[helm-controller] para detectar essa alteração e prosseguir com a atualização real do componente.
+
+Os charts serão atualizados sequencialmente com base na ordem deles no `ReleaseManifest`. Valores adicionais também podem ser passados através do `UpgradePlan`. Se a versão de um chart permanecer inalterada na nova release {product}, ele não será atualizado. Para obter mais informações sobre isso, consulte a <<components-upgrade-controller-extensions-upgrade-plan>>.
+
+[#components-upgrade-controller-extensions]
+== Extensões da API do Kubernetes
+
+Extensões para a API do Kubernetes introduzidas pelo Upgrade Controller.
+
+[#components-upgrade-controller-extensions-upgrade-plan]
+=== UpgradePlan
+
+O Upgrade Controller introduz um novo link:https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/[recurso personalizado] do Kubernetes chamado `UpgradePlan`.
+
+O `UpgradePlan` serve como um mecanismo de instrução para o Upgrade Controller e suporta as seguintes configurações:
+
+* `releaseVersion` - Versão da release do Edge para a qual o cluster deve ser atualizado. A versão da release deve seguir o versionamento link:https://semver.org[semântico] e deve ser obtida nas <<release-notes,Release Notes>>.
+
+* `disableDrain` - *Opcional*; instrui o Upgrade Controller sobre desabilitar os link:https://kubernetes.io/docs/reference/kubectl/generated/kubectl_drain/[drains] de nós. Útil para quando você tem cargas de trabalho com link:https://kubernetes.io/docs/tasks/run-application/configure-pdb/[Orçamentos de Interrupção].
+
+** Exemplo para desativação da drenagem de nós do plano de controle:
++
+[,yaml]
+----
+spec:
+  disableDrain:
+    controlPlane: true
+----
+
+** Exemplo para desativação da drenagem dos nós do plano de controle e dos nós worker:
++
+[,yaml]
+----
+spec:
+  disableDrain:
+    controlPlane: true
+    worker: true
+----
+
+* `helm` - *Opcional*; especifica valores adicionais para componentes instalados via Helm.
++
+[WARNING]
+====
+É aconselhável usar este campo apenas para valores que são críticos para atualizações. Atualizações padrão de valores de chart devem ser realizadas após os respectivos charts terem sido atualizados para a próxima versão.
+====
+
+** Exemplo:
++
+[,yaml]
+----
+spec:
+  helm:
+  - chart: foo
+    values:
+      bar: baz
+----
+
+[#components-upgrade-controller-extensions-release-manifest]
+=== ReleaseManifest
+
+O Upgrade Controller introduz um novo link:https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/[recurso personalizado] do Kubernetes chamado `ReleaseManifest`.
+
+O recurso `ReleaseManifest` é criado pelo Upgrade Controller e mantém dados de componentes para *uma* versão de lançamento do Edge específica. Isso significa que cada upgrade da versão de lançamento do Edge será representado por um recurso `ReleaseManifest` diferente.
+
+[WARNING]
+====
+O Manifesto de Lançamento deve ser sempre criado pelo Upgrade Controller. 
+
+Não é aconselhável criar ou editar manualmente os recursos `ReleaseManifest`. Usuários que decidirem fazer isso devem fazê-lo *por sua própria conta e risco*.
+====
+
+Os dados do componente que o Manifesto de Lançamento envia incluem, mas não estão limitados a:
+
+* Dados do Sistema Operacional - versão, arquiteturas suportadas, dados adicionais de atualização, etc.
+
+* Dados de distribuição do Kubernetes - versões suportadas do link:https://docs.rke2.io[RKE2]/link:https://k3s.io[K3s]
+
+* Dados de componentes adicionais - dados do gráfico Helm da SUSE (localização, versão, nome, etc.)
+
+Para um exemplo de como um Manifesto de Lançamento pode parecer, consulte a {link-lifecycle-example}documentação [upstream]. _Observe que este é apenas um exemplo e não se destina a ser criado como um recurso `ReleaseManifest` válido._
+
+[#components-upgrade-controller-how-track]
+== Acompanhando o processo de atualização
+
+Esta seção serve como um meio para rastrear e depurar o processo de atualização que o Controlador de Atualização inicia assim que o usuário cria um recurso `UpgradePlan`.
+
+[#components-upgrade-controller-how-track-general]
+=== Geral
+
+Informações gerais sobre o estado do processo de atualização podem ser visualizadas nas condições de status do Plano de Atualização.
+
+O status do recurso Plano de Atualização pode ser visualizado da seguinte forma:
+[,bash]
+----
+kubectl get upgradeplan <upgradeplan_name> -n upgrade-controller-system -o yaml
+----
+
+[#ex-running-upgrade-plan]
+.Exemplo de Plano de Atualização em execução:
+====
+[,yaml,subs="attributes"]
+----
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
+metadata:
+  name: upgrade-plan-mgmt
+  namespace: upgrade-controller-system
+spec:
+  releaseVersion: {version-edge}
+status:
+  conditions:
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: Control plane nodes are being upgraded
+    reason: InProgress
+    status: "False"
+    type: OSUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: Kubernetes upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: KubernetesUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: Rancher upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: RancherUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: Longhorn upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: LonghornUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: MetalLB upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: MetalLBUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: CDI upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: CDIUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: KubeVirt upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: KubeVirtUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: NeuVector upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: NeuVectorUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: EndpointCopierOperator upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: EndpointCopierOperatorUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: Elemental upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: ElementalUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: SRIOV upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: SRIOVUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: Metal3 upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: Metal3Upgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: RancherTurtles upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: RancherTurtlesUpgraded
+  observedGeneration: 1
+  sucNameSuffix: 90315a2b6d
+----
+====
+
+Aqui você pode visualizar cada componente para o qual o Controlador de Atualização tentará agendar uma atualização. Cada condição segue o modelo abaixo:
+
+* `lastTransitionTime` - a última vez que esta condição de componente transitou de um status para outro.
+
+* `message` - mensagem que indica o estado atual de atualização da condição específica do componente.
+
+* `reason` - o estado atual de atualização da condição específica do componente. Possíveis `reasons` incluem:
+
+** `Succeeded` - a atualização do componente específico foi bem-sucedida.
+
+** `Failed` - a atualização do componente específico falhou.
+
+** `InProgress` - o fazer upgrade do componente específico está em andamento.
+
+** `Pending` - o fazer upgrade do componente específico ainda não está agendado.
+
+** `Skipped` - o componente específico não foi encontrado no cluster, portanto, seu fazer upgrade será ignorado.
+
+** `Error` - o componente específico encontrou um erro transitório durante o fazer upgrade.
+ 
+* `status` - status da condição atual `type`, uma das `True`, `False`, `Unknown`.
+
+* `type` - indicador para o componente atualmente em fazer upgrade.
+
+O Upgrade Controller cria Planos SUC para condições de componente do tipo `OSUpgraded` e `KubernetesUpgraded`. Para acompanhar melhor os Planos SUC criados para esses componentes, consulte <<components-system-upgrade-controller-monitor-plans>>.
+
+Todos os outros tipos de condição de componente podem ser acompanhados visualizando os recursos criados para eles pelo link:https://github.com/k3s-io/helm-controller/[helm-controller]. Para obter mais informações, consulte <<components-upgrade-controller-how-track-helm>>.
+
+Um Plano de Atualização agendado pelo Upgrade Controller pode ser marcado como `successful` quando:
+
+. Não há condições de componente `Pending` ou `InProgress`.
+
+. A propriedade `lastSuccessfulReleaseVersion` aponta para o `releaseVersion` que é especificado na configuração do Plano de Atualização. _Esta propriedade é adicionada ao status do Plano de Atualização pelo Upgrade Controller assim que o processo de fazer upgrade for bem-sucedido._
+
+[#ex-succesful-upgrade-plan]
+.Exemplo de `UpgradePlan` bem-sucedida:
+====
+[,yaml,subs="attributes"]
+----
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
+metadata:
+  name: upgrade-plan-mgmt
+  namespace: upgrade-controller-system
+spec:
+  releaseVersion: {version-edge}
+status:
+  conditions:
+  - lastTransitionTime: "2024-10-01T06:26:48Z"
+    message: All cluster nodes are upgraded
+    reason: Succeeded
+    status: "True"
+    type: OSUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:59Z"
+    message: All cluster nodes are upgraded
+    reason: Succeeded
+    status: "True"
+    type: KubernetesUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:13Z"
+    message: Chart rancher upgrade succeeded
+    reason: Succeeded
+    status: "True"
+    type: RancherUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:13Z"
+    message: Chart longhorn is not installed
+    reason: Skipped
+    status: "False"
+    type: LonghornUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:13Z"
+    message: Specified version of chart metallb is already installed
+    reason: Skipped
+    status: "False"
+    type: MetalLBUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:13Z"
+    message: Chart cdi is not installed
+    reason: Skipped
+    status: "False"
+    type: CDIUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:13Z"
+    message: Chart kubevirt is not installed
+    reason: Skipped
+    status: "False"
+    type: KubeVirtUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:13Z"
+    message: Chart neuvector-crd is not installed
+    reason: Skipped
+    status: "False"
+    type: NeuVectorUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:14Z"
+    message: Specified version of chart endpoint-copier-operator is already installed
+    reason: Skipped
+    status: "False"
+    type: EndpointCopierOperatorUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:14Z"
+    message: Chart elemental-operator upgrade succeeded
+    reason: Succeeded
+    status: "True"
+    type: ElementalUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:15Z"
+    message: Chart sriov-crd is not installed
+    reason: Skipped
+    status: "False"
+    type: SRIOVUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:19Z"
+    message: Chart metal3 is not installed
+    reason: Skipped
+    status: "False"
+    type: Metal3Upgraded
+  - lastTransitionTime: "2024-10-01T06:27:27Z"
+    message: Chart rancher-turtles is not installed
+    reason: Skipped
+    status: "False"
+    type: RancherTurtlesUpgraded
+  lastSuccessfulReleaseVersion: {version-edge}
+  observedGeneration: 1
+  sucNameSuffix: 90315a2b6d
+----
+====
+
+[#components-upgrade-controller-how-track-helm]
+=== Helm Controller
+
+Esta seção aborda como rastrear recursos criados pelo link:https://github.com/k3s-io/helm-controller/[helm-controller].
+
+[NOTE]
+====
+As etapas abaixo pressupõem que o `kubectl` foi configurado para se conectar ao cluster onde o Upgrade Controller foi implantado.
+====
+
+. Localize o recurso `HelmChart` para o componente específico:
++
+[,bash]
+----
+kubectl get helmcharts -n kube-system
+----
+
+. Usando o nome do recurso `HelmChart`, localize o Pod de fazer upgrade que foi criado pelo `helm-controller`:
++
+[,bash]
+----
+kubectl get pods -l helmcharts.helm.cattle.io/chart=<helmchart_name> -n kube-system
+
+# Example for Rancher
+kubectl get pods -l helmcharts.helm.cattle.io/chart=rancher -n kube-system
+NAME                         READY   STATUS      RESTARTS   AGE
+helm-install-rancher-tv9wn   0/1     Completed   0          16m
+----
+
+. Visualize os logs do pod específico de fazer upgrade do componente:
++
+[,bash]
+----
+kubectl logs <pod_name> -n kube-system
+----
+
+[#components-upgrade-controller-known-issues]
+== Limitações conhecidas
+
+ifeval::["{flavor}" == "edge"]
+* As atualizações de clusters downstream ainda não são gerenciadas pelo Upgrade Controller. Para obter informações sobre como fazer upgrade de clusters downstream, consulte <<day2-downstream-clusters>>.
+endif::[]
+
+* O Upgrade Controller espera que quaisquer gráficos Helm {product} adicionais implantados por meio do <<components-eib,EIB>> tenham seu link:https://docs.rke2.io/helm#using-the-helm-crd[HelmChart CR] implantado no namespace `kube-system`. Para fazer isso, configure a propriedade `installationNamespace` no seu arquivo de definição EIB. Para obter mais informações, consulte a documentação link:https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md#kubernetes[upstream].
+
+* Atualmente, o Upgrade Controller não tem como determinar a versão de lançamento do Edge atualmente em execução no cluster de gerenciamento. Certifique-se de fornecer uma versão de lançamento do Edge que seja superior à versão de lançamento do Edge atualmente em execução no cluster.
+
+* Atualmente, o Upgrade Controller oferece suporte apenas a fazer upgrade de ambientes *non air-gapped*. Fazer upgrade em ambientes *air-gapped* ainda não é possível.

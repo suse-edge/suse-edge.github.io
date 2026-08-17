@@ -1,0 +1,587 @@
+[#components-kubevirt]
+= virtualização de borda
+:revdate: 2025-05-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+
+// for GitHub rendering only, do not modify
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+:imagesdir: ../images/
+
+Esta seção descreve como você pode usar a virtualização de borda para executar máquinas virtuais em seus nós de borda. A virtualização de borda foi projetada para casos de uso de virtualização leve, onde se espera que um fluxo de trabalho comum para a implantação e gerenciamento de aplicativos virtualizados e conteinerizados seja utilizado.
+
+{product} A virtualização suporta dois métodos de execução de máquinas virtuais:
+
+1. Implantar as máquinas virtuais manualmente via libvirt+qemu-kvm no nível do host (onde o Kubernetes não está envolvido)
+2. Implantar o operador KubeVirt para gerenciamento de máquinas virtuais baseado em Kubernetes
+
+Ambas as opções são válidas, mas apenas a segunda é abordada abaixo. Se você deseja usar os mecanismos de virtualização padrão prontos para uso fornecidos pelo SUSE Linux Micro, um guia abrangente pode ser encontrado https://documentation.suse.com/sles/15-SP6/html/SLES-all/chap-virtualization-introduction.html[aqui], e embora tenha sido escrito principalmente para o SUSE Linux Enterprise Server, os conceitos são quase idênticos.
+
+Este guia explica inicialmente como implantar os componentes de virtualização adicionais em um sistema que já foi pré-implantado, mas segue com uma seção que descreve como incorporar essa configuração na implantação inicial via Edge Image Builder. Se você não quiser passar pelo básico e configurar as coisas manualmente, pule direto para essa seção.
+
+== Visão geral do KubeVirt
+
+O KubeVirt permite gerenciar Máquinas Virtuais com o Kubernetes juntamente com o restante de suas cargas de trabalho conteinerizadas. Ele faz isso executando a parte do espaço do usuário da pilha de virtualização do Linux em um contêiner. Isso minimiza os requisitos no sistema host, permitindo uma configuração e gerenciamento mais fáceis. 
+
+[Note]
+====
+Detalhes sobre a arquitetura do KubeVirt podem ser encontrados em link:https://kubevirt.io/user-guide/architecture/[na documentação upstream.]
+====
+
+== Pré-requisitos
+
+Se você está seguindo este guia, presumimos que você já tenha o seguinte disponível:
+
+* Pelo menos um host físico com SUSE Linux Micro {version-operatingsystem} instalado e com extensões de virtualização habilitadas no BIOS (veja {link-virtualization-sles}[aqui] para detalhes).
+* Em seus nós, um cluster Kubernetes K3s/RKE2 já implantado e com um `kubeconfig` apropriado que permite acesso de superusuário ao cluster.
+* Acesso ao usuário root — estas instruções presumem que você é o usuário root e _não_ está elevando seus privilégios via `sudo`.
+* Você tem https://helm.sh/docs/intro/install/[Helm] disponível localmente com uma conexão de rede adequada para conseguir enviar configurações para seu cluster Kubernetes e baixar as imagens necessárias.
+
+== Instalação manual da virtualização de borda
+
+Este guia não o conduzirá pela implantação do Kubernetes, mas pressupõe que você tenha instalado a versão apropriada do {product} de https://k3s.io/[K3s] ou https://docs.rke2.io/install/quickstart[RKE2] e que você tenha seu kubeconfig configurado adequadamente para que comandos `kubectl` padrão possam ser executados como superusuário. Presumimos que seu nó forma um cluster de nó único, embora não sejam esperadas diferenças significativas para implantação de vários nós.
+
+{product} A virtualização é implantada por meio de três charts Helm separados, especificamente:
+
+* *KubeVirt*: Os componentes principais de virtualização, ou seja, CRDs do Kubernetes, operadores e outros componentes necessários para permitir que o Kubernetes implante e gerencie máquinas virtuais.
+* *Extensão do Painel do KubeVirt*: Uma extensão opcional da interface do Rancher que permite o gerenciamento básico de máquinas virtuais, por exemplo, iniciar/parar máquinas virtuais, bem como acessar o console.
+* *Importador de Dados Conteinerizados (CDI)*: Um componente adicional que permite a integração de armazenamento persistente para o KubeVirt, fornecendo recursos para que as máquinas virtuais usem back-ends de armazenamento do Kubernetes existentes para dados, mas também permitindo que os usuários importem ou clonem volumes de dados para máquinas virtuais.
+
+Cada um desses gráficos Helm é versionado de acordo com a versão do {product} que você está usando atualmente. Para uso em produção/suportado, empregue os artefatos que podem ser encontrados no Registro SUSE.
+
+Primeiro, certifique-se de que seu acesso `kubectl` esteja funcionando:
+
+[,shell]
+----
+$ kubectl get nodes
+----
+
+Isso deve mostrar algo semelhante ao seguinte:
+
+[,shell]
+----
+NAME                   STATUS   ROLES                       AGE     VERSION
+node1.edge.rdo.wales   Ready    control-plane,etcd,master   4h20m   v1.30.5+rke2r1
+node2.edge.rdo.wales   Ready    control-plane,etcd,master   4h15m   v1.30.5+rke2r1
+node3.edge.rdo.wales   Ready    control-plane,etcd,master   4h15m   v1.30.5+rke2r1
+----
+
+Agora você pode prosseguir para instalar os gráficos Helm *KubeVirt* e *Importador de Dados Conteinerizados (CDI)*:
+
+[,shell,subs="attributes"]
+----
+$ helm install kubevirt oci://registry.suse.com/edge/charts/kubevirt --namespace kubevirt-system --create-namespace
+$ helm install cdi oci://registry.suse.com/edge/charts/cdi --namespace cdi-system --create-namespace
+----
+
+Em alguns minutos, você deverá ter todos os componentes do KubeVirt e do CDI implantados. Você pode validar isso verificando todos os recursos implantados nos namespaces `kubevirt-system` e `cdi-system`.
+
+Verifique os recursos do KubeVirt:
+
+[,shell]
+----
+$ kubectl get all -n kubevirt-system
+----
+
+Isso deve mostrar algo semelhante ao seguinte:
+
+[,shell]
+----
+NAME                                   READY   STATUS    RESTARTS      AGE
+pod/virt-operator-5fbcf48d58-p7xpm     1/1     Running   0             2m24s
+pod/virt-operator-5fbcf48d58-wnf6s     1/1     Running   0             2m24s
+pod/virt-handler-t594x                 1/1     Running   0             93s
+pod/virt-controller-5f84c69884-cwjvd   1/1     Running   1 (64s ago)   93s
+pod/virt-controller-5f84c69884-xxw6q   1/1     Running   1 (64s ago)   93s
+pod/virt-api-7dfc54cf95-v8kcl          1/1     Running   1 (59s ago)   118s
+
+NAME                                  TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
+service/kubevirt-prometheus-metrics   ClusterIP   None            <none>        443/TCP   2m1s
+service/virt-api                      ClusterIP   10.43.56.140    <none>        443/TCP   2m1s
+service/kubevirt-operator-webhook     ClusterIP   10.43.201.121   <none>        443/TCP   2m1s
+service/virt-exportproxy              ClusterIP   10.43.83.23     <none>        443/TCP   2m1s
+
+NAME                          DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR            AGE
+daemonset.apps/virt-handler   1         1         1       1            1           kubernetes.io/os=linux   93s
+
+NAME                              READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/virt-operator     2/2     2            2           2m24s
+deployment.apps/virt-controller   2/2     2            2           93s
+deployment.apps/virt-api          1/1     1            1           118s
+
+NAME                                         DESIRED   CURRENT   READY   AGE
+replicaset.apps/virt-operator-5fbcf48d58     2         2         2       2m24s
+replicaset.apps/virt-controller-5f84c69884   2         2         2       93s
+replicaset.apps/virt-api-7dfc54cf95          1         1         1       118s
+
+NAME                            AGE     PHASE
+kubevirt.kubevirt.io/kubevirt   2m24s   Deployed
+----
+
+Verifique os recursos do CDI:
+
+[,shell]
+----
+$ kubectl get all -n cdi-system
+----
+
+Isso deve mostrar algo semelhante ao seguinte:
+
+[,shell]
+----
+NAME                                   READY   STATUS    RESTARTS   AGE
+pod/cdi-operator-55c74f4b86-692xb      1/1     Running   0          2m24s
+pod/cdi-apiserver-db465b888-62lvr      1/1     Running   0          2m21s
+pod/cdi-deployment-56c7d74995-mgkfn    1/1     Running   0          2m21s
+pod/cdi-uploadproxy-7d7b94b968-6kxc2   1/1     Running   0          2m22s
+
+NAME                             TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)    AGE
+service/cdi-uploadproxy          ClusterIP   10.43.117.7    <none>        443/TCP    2m22s
+service/cdi-api                  ClusterIP   10.43.20.101   <none>        443/TCP    2m22s
+service/cdi-prometheus-metrics   ClusterIP   10.43.39.153   <none>        8080/TCP   2m21s
+
+NAME                              READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/cdi-operator      1/1     1            1           2m24s
+deployment.apps/cdi-apiserver     1/1     1            1           2m22s
+deployment.apps/cdi-deployment    1/1     1            1           2m21s
+deployment.apps/cdi-uploadproxy   1/1     1            1           2m22s
+
+NAME                                         DESIRED   CURRENT   READY   AGE
+replicaset.apps/cdi-operator-55c74f4b86      1         1         1       2m24s
+replicaset.apps/cdi-apiserver-db465b888      1         1         1       2m21s
+replicaset.apps/cdi-deployment-56c7d74995    1         1         1       2m21s
+replicaset.apps/cdi-uploadproxy-7d7b94b968   1         1         1       2m22s
+----
+
+Para verificar se as definições de recursos personalizados (CRDs) `VirtualMachine` estão implantadas, você pode validar com:
+
+[,shell]
+----
+$ kubectl explain virtualmachine
+----
+
+Isso deve imprimir a definição do objeto `VirtualMachine`, que deve ser exibida da seguinte forma:
+
+[,shell]
+----
+GROUP:      kubevirt.io
+KIND:       VirtualMachine
+VERSION:    v1
+
+DESCRIPTION:
+    VirtualMachine handles the VirtualMachines that are not running or are in a
+    stopped state The VirtualMachine contains the template to create the
+    VirtualMachineInstance. It also mirrors the running state of the created
+    VirtualMachineInstance in its status.
+(snip)
+----
+
+== Implantando máquinas virtuais
+
+Agora que o KubeVirt e o CDI estão implantados, vamos definir uma máquina virtual simples baseada no https://get.opensuse.org/tumbleweed/[openSUSE Tumbleweed]. Esta máquina virtual tem a mais simples das configurações, usando "rede de pod" padrão para uma configuração de rede idêntica a qualquer outro pod. Ela também emprega armazenamento não persistente, garantindo que o armazenamento seja efêmero, assim como em qualquer contêiner que não possua um https://kubernetes.io/docs/concepts/storage/persistent-volumes/[PVC].
+
+[,shell, literal]
+----
+$ cat <<EOF > user-data.yaml
+#cloud-config
+disable_root: false
+ssh_pwauth: True
+users:
+  - default
+  - name: suse
+    groups: sudo
+    shell: /bin/bash
+    sudo:  ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: False
+    plain_text_passwd: 'suse'
+EOF
+$ kubectl apply -f - <<EOF
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: tumbleweed
+  namespace: default
+spec:
+  runStrategy: Always
+  template:
+    spec:
+      domain:
+        devices: {}
+        machine:
+          type: q35
+        memory:
+          guest: 2Gi
+        resources: {}
+      volumes:
+      - containerDisk:
+          image: quay.io/containerdisks/opensuse-tumbleweed:1.0.0
+        name: tumbleweed-containerdisk-0
+      - cloudInitNoCloud:
+          userDataBase64: $(cat user-data.yaml | base64 -w 0)
+        name: cloudinitdisk
+EOF
+----
+
+Isso deve exibir que um `VirtualMachine` foi criado:
+
+[,shell]
+----
+virtualmachine.kubevirt.io/tumbleweed created
+----
+
+Esta definição de `VirtualMachine` é mínima, especificando pouco sobre a configuração. Ela simplesmente descreve que é um tipo de máquina "https://wiki.qemu.org/Features/Q35[q35]" com 2 GB de memória que usa uma imagem de disco baseada em um `https://kubevirt.io/user-guide/virtual_machines/disks_and_volumes/#containerdisk[containerDisk]` efêmero (ou seja, uma imagem de disco que é armazenada em uma imagem de contêiner de um repositório de imagens remoto), e especifica um disco cloudInit codificado em base64, que usamos apenas para criação de usuário e imposição de senha no momento da inicialização (use `base64 -d` para decodificá-lo).
+
+> NOTE: Esta imagem de máquina virtual é apenas para teste. A imagem não é oficialmente suportada e destina-se apenas a um exemplo de documentação.
+
+Esta máquina leva alguns minutos para inicializar, pois precisa baixar a imagem de disco do openSUSE Tumbleweed, mas assim que o fizer, você poderá visualizar mais detalhes sobre a máquina virtual verificando as informações da máquina virtual:
+
+[,shell]
+----
+$ kubectl get vmi
+----
+
+Isso deve exibir o nó no qual a máquina virtual foi iniciada e o endereço IP da máquina virtual. Lembre-se, como ela usa rede de pod, o endereço IP relatado será igual ao de qualquer outro pod, e roteável como tal:
+
+[,shell]
+----
+NAME         AGE     PHASE     IP           NODENAME               READY
+tumbleweed   4m24s   Running   10.42.2.98   node3.edge.rdo.wales   True
+----
+
+Ao executar esses comandos nos próprios nós do cluster Kubernetes, com uma CNI que roteia o tráfego diretamente para os pods (por exemplo, Cilium), você deve conseguir `ssh` diretamente para a própria máquina. Substitua o seguinte endereço IP pelo que foi atribuído à sua máquina virtual:
+
+[,shell]
+----
+$ ssh suse@10.42.2.98
+(password is "suse")
+----
+
+Uma vez dentro desta máquina virtual, você pode explorar, mas lembre-se de que ela é limitada em termos de recursos e possui apenas 1 GB de espaço em disco. Quando terminar, `Ctrl-D` ou `exit` para desconectar da sessão SSH.
+
+O processo da máquina virtual ainda está envolvido em um pod padrão do Kubernetes. O CRD `VirtualMachine` é uma representação da máquina virtual desejada, mas o processo no qual a máquina virtual é realmente iniciada é via pod `https://github.com/kubevirt/kubevirt/blob/main/docs/components.md#virt-launcher[virt-launcher]`, um pod padrão do Kubernetes, assim como qualquer outra aplicação. Para cada máquina virtual iniciada, você pode ver que existe um pod `virt-launcher`:
+
+[,shell]
+----
+$ kubectl get pods
+----
+
+Isso deve mostrar o único pod `virt-launcher` para a máquina Tumbleweed que definimos:
+
+[,shell]
+----
+NAME                             READY   STATUS    RESTARTS   AGE
+virt-launcher-tumbleweed-8gcn4   3/3     Running   0          10m
+----
+
+Se dermos uma olhada neste pod `virt-launcher`, você verá que ele está executando os processos `libvirt` e `qemu-kvm`. Podemos entrar no próprio pod e dar uma olhada nos bastidores, observando que você precisa adaptar o seguinte comando para o nome do seu pod:
+
+[,shell]
+----
+$ kubectl exec -it virt-launcher-tumbleweed-8gcn4 -- bash
+----
+
+Assim que estiver no pod, tente executar comandos `virsh` juntamente com a observação dos processos. Você verá o binário `qemu-system-x86_64` em execução, juntamente com certos processos para monitorar a máquina virtual. Você também verá a localização da imagem de disco e como a rede está conectada (como um dispositivo tap):
+
+[,shell]
+----
+qemu@tumbleweed:/> ps ax
+  PID TTY      STAT   TIME COMMAND
+    1 ?        Ssl    0:00 /usr/bin/virt-launcher-monitor --qemu-timeout 269s --name tumbleweed --uid b9655c11-38f7-4fa8-8f5d-bfe987dab42c --namespace default --kubevirt-share-dir /var/run/kubevirt --ephemeral-disk-dir /var/run/kubevirt-ephemeral-disks --container-disk-dir /var/run/kube
+   12 ?        Sl     0:01 /usr/bin/virt-launcher --qemu-timeout 269s --name tumbleweed --uid b9655c11-38f7-4fa8-8f5d-bfe987dab42c --namespace default --kubevirt-share-dir /var/run/kubevirt --ephemeral-disk-dir /var/run/kubevirt-ephemeral-disks --container-disk-dir /var/run/kubevirt/con
+   24 ?        Sl     0:00 /usr/sbin/virtlogd -f /etc/libvirt/virtlogd.conf
+   25 ?        Sl     0:01 /usr/sbin/virtqemud -f /var/run/libvirt/virtqemud.conf
+   83 ?        Sl     0:31 /usr/bin/qemu-system-x86_64 -name guest=default_tumbleweed,debug-threads=on -S -object {"qom-type":"secret","id":"masterKey0","format":"raw","file":"/var/run/kubevirt-private/libvirt/qemu/lib/domain-1-default_tumbleweed/master-key.aes"} -machine pc-q35-7.1,usb
+  286 pts/0    Ss     0:00 bash
+  320 pts/0    R+     0:00 ps ax
+
+qemu@tumbleweed:/> virsh list --all
+ Id   Name                 State
+------------------------------------
+ 1    default_tumbleweed   running
+
+qemu@tumbleweed:/> virsh domblklist 1
+ Target   Source
+---------------------------------------------------------------------------------------------
+ sda      /var/run/kubevirt-ephemeral-disks/disk-data/tumbleweed-containerdisk-0/disk.qcow2
+ sdb      /var/run/kubevirt-ephemeral-disks/cloud-init-data/default/tumbleweed/noCloud.iso
+
+qemu@tumbleweed:/> virsh domiflist 1
+ Interface   Type       Source   Model                     MAC
+------------------------------------------------------------------------------
+ tap0        ethernet   -        virtio-non-transitional   e6:e9:1a:05:c0:92
+
+qemu@tumbleweed:/> exit
+exit
+----
+
+Finalmente, vamos excluir esta máquina virtual para limpar:
+
+[,shell]
+----
+$ kubectl delete vm/tumbleweed
+virtualmachine.kubevirt.io "tumbleweed" deleted
+----
+
+== Usando o virtctl
+
+Junto com as ferramentas de CLI padrão do Kubernetes, isto é, `kubectl`, o KubeVirt vem com um utilitário de CLI complementar que permite interagir com seu cluster de uma maneira que preenche algumas lacunas entre o mundo da virtualização e o mundo para o qual o Kubernetes foi projetado. Por exemplo, a ferramenta `virtctl` oferece a capacidade de gerenciar o ciclo de vida de máquinas virtuais (iniciar, parar, reiniciar etc.), fornecendo acesso aos consoles virtuais, fazendo upload de imagens de máquinas virtuais, bem como interagindo com recursos do Kubernetes, como serviços, sem usar a API ou os CRDs diretamente.
+
+Vamos baixar a versão estável mais recente da ferramenta `virtctl`:
+
+[,shell,subs="attributes"]
+----
+$ export VERSION={version-kubevirt-release}
+$ wget https://github.com/kubevirt/kubevirt/releases/download/$VERSION/virtctl-$VERSION-linux-amd64
+----
+
+Se você estiver usando uma arquitetura diferente ou uma máquina que não seja Linux, poderá encontrar outras versões https://github.com/kubevirt/kubevirt/releases[aqui]. Você precisa tornar isso executável antes de prosseguir, e pode ser útil movê-lo para um local dentro do seu `$PATH`:
+
+[,shell]
+----
+$ mv virtctl-$VERSION-linux-amd64 /usr/local/bin/virtctl
+$ chmod a+x /usr/local/bin/virtctl
+----
+
+Você pode então usar a ferramenta de linha de comando `virtctl` para criar máquinas virtuais. Vamos replicar nossa máquina virtual anterior, observando que estamos enviando a saída diretamente para o `kubectl apply`:
+
+[,shell, literal]
+----
+$ cat <<EOF >  user-data.yaml 
+#cloud-config
+disable_root: false
+ssh_pwauth: True
+users:
+  - default
+  - name: suse
+    groups: sudo
+    shell: /bin/bash
+    sudo:  ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: False
+    plain_text_passwd: 'suse'
+EOF
+$ alias virtctl=echo
+$ virtctl create vm --name virtctl-example --memory=1Gi \
+    --volume-containerdisk=src:quay.io/containerdisks/opensuse-tumbleweed:1.0.0 \
+    --cloud-init-user-data "$(cat user-data.yaml | base64 -w 0)"
+----
+
+Isso deve mostrar a máquina virtual em execução (ela deve iniciar muito mais rápido desta vez, já que a imagem do contêiner estará em cache):
+
+[,shell]
+----
+$ kubectl get vmi
+NAME              AGE   PHASE     IP           NODENAME               READY
+virtctl-example   52s   Running   10.42.2.29   node3.edge.rdo.wales   True
+----
+
+Agora podemos usar `virtctl` para conectar diretamente à máquina virtual:
+
+[,shell]
+----
+$ virtctl ssh suse@virtctl-example
+(password is "suse" - Ctrl-D to exit)
+----
+
+Existem muitos outros comandos que podem ser usados pela `virtctl`. Por exemplo, `virtctl console` pode lhe dar acesso ao console serial se a rede não estiver funcionando, e você pode usar `virtctl  guestosinfo` para obter informações abrangentes do SO, desde que o convidado tenha o `qemu-guest-agent` instalado e em execução.
+
+Finalmente, vamos pausar e retomar a máquina virtual:
+
+[,shell]
+----
+$ virtctl pause vm virtctl-example
+VMI virtctl-example was scheduled to pause
+----
+
+Você descobre que o objeto `VirtualMachine` aparece como *Pausada* e o objeto `VirtualMachineInstance` aparece como *Em execução*, mas *READY=False*:
+
+[,shell]
+----
+$ kubectl get vm
+NAME              AGE     STATUS   READY
+virtctl-example   8m14s   Paused   False
+
+$ kubectl get vmi
+NAME              AGE     PHASE     IP           NODENAME               READY
+virtctl-example   8m15s   Running   10.42.2.29   node3.edge.rdo.wales   False
+----
+
+Você também descobre que não consegue mais se conectar à máquina virtual:
+
+[,shell]
+----
+$ virtctl ssh suse@virtctl-example
+can't access VMI virtctl-example: Operation cannot be fulfilled on virtualmachineinstance.kubevirt.io "virtctl-example": VMI is paused
+----
+
+Vamos retomar a máquina virtual e tentar novamente:
+
+[,shell]
+----
+$ virtctl unpause vm virtctl-example
+VMI virtctl-example was scheduled to unpause
+----
+
+Agora devemos ser capazes de restabelecer uma conexão:
+
+[,shell]
+----
+$ virtctl ssh suse@virtctl-example
+suse@vmi/virtctl-example.default's password:
+suse@virtctl-example:~> exit
+logout
+----
+
+Finalmente, vamos remover a máquina virtual:
+
+[,shell]
+----
+$ kubectl delete vm/virtctl-example
+virtualmachine.kubevirt.io "virtctl-example" deleted
+----
+
+== Rede de entrada simples
+
+Nesta seção, mostramos como você pode expor máquinas virtuais como serviços padrão do Kubernetes e disponibilizá-las por meio do serviço de entrada do Kubernetes, por exemplo, https://docs.rke2.io/networking/networking_services#ingress-controller[Traefik com RKE2] ou https://docs.k3s.io/networking/networking-services#traefik-ingress-controller[Traefik com K3s]. Este documento pressupõe que esses componentes já estejam configurados adequadamente e que você tenha um ponteiro DNS apropriado, por exemplo, via curinga, para apontar para seus nós de servidor Kubernetes ou seu IP virtual de entrada para a resolução de entrada adequada.
+
+> NOTE: Em {product} 3.1+, se você estiver usando o K3s em uma configuração de nó de servidor múltiplo, talvez tenha precisado configurar um VIP baseado em MetalLB para Ingress; isso não é necessário para o RKE2.
+
+No ambiente de exemplo, outra máquina virtual openSUSE Tumbleweed é implantada, o cloud-init é usado para instalar o NGINX como um servidor Web simples no momento da inicialização, e uma mensagem simples é configurada para ser retornada para verificar se funciona conforme o esperado quando uma chamada é feita. Para ver como isso é feito, simplesmente `base64 -d` a seção cloud-init na saída abaixo.
+
+Vamos criar esta máquina virtual agora:
+
+[,shell, literal]
+----
+$ cat <<EOF > user-data.yaml
+#cloud-config
+disable_root: false
+ssh_pwauth: True
+users:
+  - default
+  - name: suse
+    groups: sudo
+    shell: /bin/bash
+    sudo:  ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: False
+    plain_text_passwd: 'suse'
+EOF
+$ kubectl apply -f - <<EOF
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: ingress-example
+  namespace: default
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      domain:
+        devices: {}
+        machine:
+          type: q35
+        memory:
+          guest: 2Gi
+        resources: {}
+      volumes:
+      - containerDisk:
+          image: quay.io/containerdisks/opensuse-tumbleweed:1.0.0
+        name: tumbleweed-containerdisk-0
+      - cloudInitNoCloud:
+          userDataBase64: $(cat user-data.yaml | base64 -w 0)
+        name: cloudinitdisk
+EOF
+----
+
+Quando esta máquina virtual tiver iniciado com sucesso, podemos usar o comando `virtctl` para expor a `VirtualMachineInstance` com uma porta externa de `8080` e uma porta de destino de `80` (onde o NGINX escuta por padrão). Usamos o comando `virtctl` aqui, pois ele entende o mapeamento entre o objeto da máquina virtual e o pod. Isso cria um novo serviço para nós:
+
+[,shell]
+----
+$ virtctl expose vmi ingress-example --port=8080 --target-port=80 --name=ingress-example
+Service ingress-example successfully exposed for vmi ingress-example
+----
+
+Teremos então um serviço apropriado criado automaticamente:
+
+[,shell]
+----
+$ kubectl get svc/ingress-example
+NAME              TYPE           CLUSTER-IP      EXTERNAL-IP       PORT(S)                         AGE
+ingress-example   ClusterIP      10.43.217.19    <none>            8080/TCP                        9s
+----
+
+Em seguida, se você usar `kubectl create ingress`, podemos criar um objeto ingress que aponte para este serviço. Adapte a URL (conhecida como "host" no objeto https://kubernetes.io/docs/reference/kubectl/generated/kubectl_create/kubectl_create_ingress/[ingress]) aqui para corresponder à sua configuração de DNS e certifique-se de apontá-la para a porta `8080`:
+
+[,shell]
+----
+$ kubectl create ingress ingress-example --rule=ingress-example.suse.local/=ingress-example:8080
+----
+
+Com o DNS configurado corretamente, você deve conseguir usar o curl na URL imediatamente:
+
+[,shell]
+----
+$ curl ingress-example.suse.local
+It works!
+----
+
+Vamos fazer uma limpeza removendo esta máquina virtual e seus recursos de serviço e ingress:
+
+[,shell]
+----
+$ kubectl delete vm/ingress-example svc/ingress-example ingress/ingress-example
+virtualmachine.kubevirt.io "ingress-example" deleted
+service "ingress-example" deleted
+ingress.networking.k8s.io "ingress-example" deleted
+----
+
+== Usando a extensão da interface do usuário do Rancher
+
+{product} A extensão de Virtualização fornece uma extensão da interface do usuário para o Rancher Manager, permitindo o gerenciamento básico de máquinas virtuais usando o painel do Rancher.
+
+=== Instalação
+
+Consulte <<components-rancher-dashboard-extensions,Rancher Dashboard Extensions>> para obter orientações de instalação.
+
+[#kubevirt-dashboard-extension-usage]
+=== Usando a Extensão do Painel do Rancher para KubeVirt
+
+A extensão introduz uma nova seção *KubeVirt* ao Cluster Explorer. Esta seção é adicionada a qualquer cluster gerenciado que tenha o KubeVirt instalado.
+
+A extensão permite que você interaja diretamente com os recursos de Máquina Virtual do KubeVirt para gerenciar o ciclo de vida das Máquinas Virtuais.
+
+==== Criando uma máquina virtual
+
+1. Navegue até *Cluster Explorer* clicando em um cluster gerenciado habilitado para KubeVirt na navegação à esquerda.
+2. Navegue até a página *KubeVirt > Virtual Machines* e clique em `Create from YAML` no canto superior direito da tela.
+3. Preencha ou cole uma definição de máquina virtual e pressione `Create`. Use a definição de máquina virtual da seção Implantando Máquinas Virtuais como inspiração.
+
+image::virtual-machines-page.png[scaledwidth=100%]
+
+==== Ações de Máquina Virtual
+
+Você pode usar o menu de ações acessado a partir da lista suspensa *⋮* à direita de cada máquina virtual para realizar ações de iniciar, parar, pausar ou reinicialização suave. Alternativamente, você também pode usar ações em grupo na parte superior da lista selecionando as máquinas virtuais nas quais deseja realizar a ação.
+
+A execução das ações pode ter um efeito na Estratégia de Execução da Máquina Virtual. https://kubevirt.io/user-guide/compute/run_strategies/#virtctl[Consulte a tabela na documentação do KubeVirt] para obter mais detalhes.
+
+==== Acessando o console da máquina virtual
+
+A lista de "Máquinas virtuais" fornece uma lista suspensa `Console` que permite conectar à máquina usando *VNC ou Console Serial*. Esta ação só está disponível para máquinas em execução.
+
+Em alguns casos, leva um pouco de tempo até que o console esteja acessível em uma máquina virtual recém-iniciada.
+
+image::vnc-console-ui.png[scaledwidth=100%]
+
+== Instalando com o Edge Image Builder
+
+{product} está usando <<components-eib>> para personalizar imagens base do SUSE Linux Micro OS.
+Siga <<kubevirt-install>> para uma instalação air-gapped do KubeVirt e do CDI sobre clusters Kubernetes provisionados pelo EIB.

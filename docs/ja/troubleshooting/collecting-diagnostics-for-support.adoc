@@ -1,0 +1,96 @@
+[#collecting-diagnostics-for-support]
+== サポートのための診断情報の収集
+:revdate: 2025-06-17
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+include::../edge-book/versions.adoc[]
+
+SUSEサポートに問い合わせる際は、包括的な診断情報を提供することが不可欠です。
+
+.収集すべき重要な情報
+
+* *詳細な問題の説明*:何が起きたのか、いつ起きたのか、何をしていたのか、期待される動作は何か、そして実際の動作は何か？
+* *再現手順*:その問題を確実に再現できますか？再現できる場合は、正確な手順をリストアップしてください。
+* *コンポーネントバージョン*: {product} バージョン、コンポーネントバージョン（RKE2/K3、EIB、Metal^3^、Elementalなど）。
+* *関連ログ*:
+** `journalctl` 出力（可能であればサービスでフィルタリングしたもの、または完全なブートログ）。
+** Kubernetesポッドログ（kubectl logs）。
+** Metal³/Elementalコンポーネントログ。
+** EIBビルドログおよびその他のログ
+* *システム情報*:
+** `uname -a`
+** `df -h`
+** `ip a`
+** `/etc/os-release`
+* *設定ファイル*:Elemental、Metal^3^、EIBに関連する設定ファイル（helmチャートの値、configmapなど）。
+* *Kubernetes情報*:ノード、サービス、デプロイメントなど。
+* *影響を受けるKubernetesオブジェクト*:BMH、MachineRegistrationなど。
+
+.収集方法
+
+* *ログの場合*:コマンドの出力をファイルにリダイレクトします（例: `journalctl -u k3s > k3s_logs.txt`）。
+* *Kubernetesリソースの場合*:詳細なYAML定義を取得するには、`kubectl get <resource> -o yaml > <resource_name>.yaml`を使用します。
+* *システム情報の場合*:上記にリストされているコマンドの出力を収集します。
+* *SL Microの場合*:`supportconfig`のサポートのためのシステム情報収集方法については、 https://documentation.suse.com/sle-micro/5.5/html/SLE-Micro-all/cha-adm-support-slemicro.html[SUSE Linux Micro Troubleshooting Guide]のドキュメントを確認してください。
+* *RKE2/Rancherの場合*:https://www.suse.com/support/kb/doc/?id=000020191[The Rancher v2.x Linux log collector script]の記事を確認して、Rancher v2.x Linuxログ収集スクリプトを実行してください。
+
+* *Edge (Nessie) の場合*:Nessie {version-nessie}は、{product}環境からログと設定データを収集するように設計された強力な診断ツールです。ホストシステムとKubernetesクラスターの両方から包括的な情報を収集するため、トラブルシューティングやサポートに非常に役立ちます。
+** Nessieには、Kubernetesモードとシステムモードという2つの「モード」があります。
+*** {product}クラスターからログを収集するには、（ローカルでkubeconfigファイルにアクセスできることを前提として）以下を実行します。
++
+[,bash,subs="attributes"]
+----
+podman run --rm --privileged \
+  -v /etc/rancher/k3s/k3s.yaml:/etc/rancher/k3s/k3s.yaml:ro \
+  -v /var/log/journal:/var/log/journal:ro \
+  -v /run/systemd:/run/systemd:ro \
+  -v /etc/machine-id:/etc/machine-id:ro \
+  -v /tmp:/tmp \
+  -e NESSIE_LOG_DIR="/tmp" \
+  -e NESSIE_ZIP_DIR="/tmp" \
+  registry.suse.com/edge/{version-edge}/nessie:{version-nessie}
+----
++
+[NOTE]
+====
+必要に応じて`k3s.yaml/rke2.yaml`ファイルのパスを調整してください。詳細については、 https://github.com/suse-edge/support-tools/blob/main/nessie/README.md[Nessie]を参照してください。
+適切な権限がある場合は、非特権モードでこのコンテナを実行できるはずです（通常、`k3s.yaml` / `rke2-server.yaml`ファイルはルートが所有しています）。
+====
+*** 実際のオペレーティングシステムからシステムモードでログを収集するには、次を実行してください：
++
+[,bash,subs="attributes"]
+----
+podman run --rm --privileged \
+  -v /var/log/journal:/var/log/journal:ro \
+  -v /run/systemd:/run/systemd:ro \
+  -v /etc/machine-id:/etc/machine-id:ro \
+  -v /tmp:/tmp \
+  -e NESSIE_LOG_DIR="/tmp" \
+  -e NESSIE_ZIP_DIR="/tmp" \
+  -e NESSIE_VERBOSE="1" \
+  -e NESSIE_SKIP_POD_LOGS="true" \
+  -e NESSIE_SKIP_K8S_CONFIGS="true" \
+  -e NESSIE_SKIP_METRICS="true" \
+  registry.suse.com/edge/{version-edge}/nessie:{version-nessie}
+----
++
+[NOTE]
+====
+環境でNessieを実行する方法の詳細や情報については、必ず https://github.com/suse-edge/support-tools/blob/main/nessie/README.md[Nessie]を確認してください。
+同様に、適切な権限があれば、非特権モードでこのコンテナを実行できるはずです。
+====
+
+
+.[技術サポートの連絡先]
+SUSEサポートへの連絡方法の詳細については、 https://www.suse.com/support/kb/doc/?id=000019452[ハウツー: SUSE Technical Supportとの効果的な連携方法]で入手可能な記事と、 https://www.suse.com/support/handbook/[SUSE Technical Support Handbook]にあるサポートハンドブックを確認してください。

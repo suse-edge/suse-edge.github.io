@@ -1,0 +1,339 @@
+[#guides-metallb-kubernetes]
+= Kubernetes APIサーバーの前にあるMetalLB
+:revdate: 2025-05-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+このガイドでは、MetalLBサービスを使用して、3つのコントロールプレーンノードを持つHAクラスター上でRKE2/K3s APIを外部に公開する方法を説明します。
+これを実現するために、タイプ`LoadBalancer`のKubernetesサービスを手動で作成します。次に、クラスター内のすべてのコントロールプレーンノードのIPを保持する`EndpointSlices`オブジェクトが自動的に作成されます。
+EndpointSlicesをクラスター内で発生するイベント（ノードの追加/削除、またはノードのオフライン化）と継続的に同期させるために、<<components-eco,Endpoint Copier Operator>>をデプロイします。このオペレーターは、デフォルトの`kubernetes` EndpointSlicesで発生するイベントを監視し、管理対象のEndpointSlicesを自動的に更新して同期を維持します。
+管理対象サービスはタイプ`LoadBalancer`であるため、MetalLBはそれに静的な`ExternalIP`を割り当てます。この`ExternalIP`は、APIサーバーとの通信に使用されます。
+
+== 前提条件
+
+* RKE2/K3sをデプロイするための3つのホスト。
+ ** ホスト名がそれぞれ異なることを確認してください。
+ ** テスト目的であれば、これらは仮想マシンでも構いません。
+* ネットワーク内に少なくとも2つの利用可能なIPアドレス（Traefik Ingressコントローラーの公開サービス用に1つ、管理対象サービス用に1つ）。
+* Helm
+
+== RKE2/K3sのインストール
+
+[NOTE]
+====
+新規クラスターではなく既存のクラスターを使用する場合は、このステップをスキップして次のステップに進んでください。
+====
+
+まず、後で管理対象サービスの`ExternalIP`に使用するネットワーク内の空きIPアドレスを確保する必要があります。
+
+最初のホストにSSHで接続し、目的のディストリビューションをクラスターモードでインストールします。
+
+RKE2の場合:
+[,bash]
+----
+# As a root user, create the /etc/rancher/rke2/config.yaml config file with the following content:
+
+mkdir -p /etc/rancher/rke2/
+cat <<EOF > /etc/rancher/rke2/config.yaml
+# An example of the config.yaml file for a server node: 
+write-kubeconfig-mode: "0644"
+ingress-controller: traefik
+tls-san:
+  - "${VIP_SERVICE_IP}"
+  - "https://${VIP_SERVICE_IP}.sslip.io"
+EOF
+
+# Install RKE2
+curl -sfL https://get.rke2.io | INSTALL_RKE2_EXEC="server" sh -
+
+# Enable and start the RKE2 service with the configuration specified in the config.yaml file
+systemctl enable rke2-server.service
+systemctl start rke2-server.service
+
+# Fetch the cluster token to be used later:
+RKE2_TOKEN=$(tr -d '\n' < /var/lib/rancher/rke2/server/node-token)
+----
+
+
+K3sの場合:
+[,bash]
+----
+# Export the free IP mentioned above
+export VIP_SERVICE_IP=<ip>
+export INSTALL_K3S_SKIP_START=false
+
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --cluster-init \
+ --disable=servicelb --write-kubeconfig-mode=644 --tls-san=${VIP_SERVICE_IP} \
+ --tls-san=https://${VIP_SERVICE_IP}.sslip.io" K3S_TOKEN=foobar sh -
+----
+
+[NOTE]
+====
+`k3s server`コマンドで`--disable=servicelb`フラグが指定されていることを確認してください。
+====
+
+[IMPORTANT]
+====
+これ以降、コマンドはローカルマシンで実行してください。
+====
+
+外部からAPIサーバーにアクセスするには、RKE2/K3s VMのIPが使用されます。
+
+[,bash]
+----
+# Replace <node-ip> with the actual IP of the machine
+export NODE_IP=<node-ip>
+export KUBE_DISTRIBUTION=<k3s/rke2>
+
+scp ${NODE_IP}:/etc/rancher/${KUBE_DISTRIBUTION}/${KUBE_DISTRIBUTION}.yaml ~/.kube/config && sed \
+ -i '' "s/127.0.0.1/${NODE_IP}/g" ~/.kube/config && chmod 600 ~/.kube/config
+----
+
+== 既存のクラスターの設定
+
+[NOTE]
+====
+この手順は、既存のRKE2/K3sクラスターを使用する場合にのみ有効です。
+====
+
+既存のクラスターを使用するには、`tls-san`フラグを変更する必要があります。さらに、K3sの場合は`servicelb` LBを無効にする必要があります。
+
+RKE2またはK3sサーバーのフラグを変更するには、ディストリビューションに応じて、クラスター内のすべてのVM上の`/etc/systemd/system/rke2.service`または`/etc/systemd/system/k3s.service`ファイルのいずれかを変更する必要があります。
+
+フラグは`ExecStart`に挿入する必要があります。次に例を示します。
+
+RKE2の場合:
+[,shell]
+----
+# Replace the <vip-service-ip> with the actual ip
+ExecStart=/usr/local/bin/rke2 \
+    server \
+        '--write-kubeconfig-mode=644' \
+        '--tls-san=<vip-service-ip>' \
+        '--tls-san=https://<vip-service-ip>.sslip.io' \
+----
+
+K3sの場合:
+[,shell]
+----
+# Replace the <vip-service-ip> with the actual ip
+ExecStart=/usr/local/bin/k3s \
+    server \
+        '--cluster-init' \
+        '--write-kubeconfig-mode=644' \
+        '--disable=servicelb' \
+        '--tls-san=<vip-service-ip>' \
+        '--tls-san=https://<vip-service-ip>.sslip.io' \
+----
+
+次に、新しい設定を読み込むために以下のコマンドを実行する必要があります。
+
+[,bash]
+----
+systemctl daemon-reload
+systemctl restart ${KUBE_DISTRIBUTION}
+----
+
+== MetalLBのインストール
+
+`MetalLB`をデプロイするには、<<guides-metallb-k3s,MetalLB on K3s>>ガイドを使用できます。
+
+*NOTE:*`VIP_SERVICE_IP`のIPアドレスが、クラスター内の既存の`IPAddressPools`と重複しないようにしてください。
+
+管理対象サービス専用の`IpAddressPool`と`L2Advertisement`を作成します。
+
+*NOTE:*以下のIPAddressPoolは、`default`ネームスペース内のタイプ`LoadBalancer`のサービスに割り当てられます。そこに複数の`LoadBalancer`サービスが存在する場合は、このVIPサービスを明示的に一致させるために、追加の https://metallb.universe.tf/configuration/_advanced_ipaddresspool_configuration/#reduce-scope-of-address-allocation-to-specific-namespace-and-service[ServiceSelectors]を設定できます。
+
+[,yaml]
+----
+# Export the VIP_SERVICE_IP on the local machine
+# Replace with the actual IP
+export VIP_SERVICE_IP=<ip>
+
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: kubernetes-vip-ip-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - ${VIP_SERVICE_IP}/32
+  serviceAllocation:
+    priority: 100
+    namespaces:
+      - default
+EOF
+----
+
+[,yaml]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: kubernetes-vip-l2-adv
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - kubernetes-vip-ip-pool
+EOF
+----
+
+== Endpoint Copier Operatorのインストール
+
+[,bash,subs="attributes"]
+----
+helm install \
+endpoint-copier-operator oci://registry.suse.com/edge/charts/endpoint-copier-operator \
+--namespace endpoint-copier-operator \
+--create-namespace
+----
+
+上記のコマンドにより、2つのレプリカを持つ`endpoint-copier-operator`オペレーターのデプロイメントがデプロイされます。一方がリーダーとなり、もう一方が必要に応じてリーダーの役割を引き継ぎます。
+
+次に`kubernetes-vip`サービスをデプロイする必要があります。これにより、オペレーターによって調整が行われ、設定されたポートとIPを持つEndpointSlicesが作成されます。
+
+RKE2の場合:
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubernetes-vip
+  namespace: default
+spec:
+  ports:
+  - name: rke2-api
+    port: 9345
+    protocol: TCP
+    targetPort: 9345
+  - name: k8s-api
+    port: 6443
+    protocol: TCP
+    targetPort: 6443
+  type: LoadBalancer
+EOF
+----
+
+K3sの場合:
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubernetes-vip
+  namespace: default
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: https
+    port: 6443
+    protocol: TCP
+    targetPort: 6443
+  sessionAffinity: None
+  type: LoadBalancer
+EOF
+----
+
+
+`kubernetes-vip`サービスが正しいIPアドレスを持っていることを確認します。
+
+[,bash]
+----
+kubectl get service kubernetes-vip -n default \
+ -o=jsonpath='{.status.loadBalancer.ingress[0].ip}'
+----
+
+`default`ネームスペース内の`kubernetes-vip-*`および`kubernetes`EndpointSlicesリソースが同じIPを指していることを確認してください。
+
+[,bash]
+----
+kubectl get endpointslices | grep kubernetes
+----
+
+すべてが正しい場合、最後にすべきことは、`Kubeconfig`内で`VIP_SERVICE_IP`を使用することです。
+
+[,bash]
+----
+sed -i '' "s/${NODE_IP}/${VIP_SERVICE_IP}/g" ~/.kube/config
+----
+
+これ以降、すべての `kubectl` は `kubernetes-vip` サービスを経由します。
+
+== コントロールプレーンノードの追加
+
+プロセス全体を監視するために、ターミナルタブをあと2つ開くことができます。
+
+1つ目のターミナル:
+
+[,bash]
+----
+watch kubectl get nodes
+----
+
+2つ目のターミナル:
+
+[,bash]
+----
+watch kubectl get endpointslices
+----
+
+次に、2番目と3番目のノードで以下のコマンドを実行します。
+
+RKE2の場合:
+[,bash]
+----
+# As a root user, create the /etc/rancher/rke2/config.yaml config file with the following content:
+
+mkdir -p /etc/rancher/rke2/
+cat <<EOF > /etc/rancher/rke2/config.yaml
+# An example of the config.yaml file for an additional server node: 
+server: https://${VIP_SERVICE_IP}:9345
+write-kubeconfig-mode: "0644"
+ingress-controller: traefik
+tls-san:
+  - "${VIP_SERVICE_IP}"
+  - "https://${VIP_SERVICE_IP}.sslip.io"
+# The one from above
+token: ${RKE2_TOKEN}
+EOF
+
+# Install RKE2
+curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE="server" sh -
+
+# Enable the RKE2 service with the configuration specified in the config.yaml file
+
+systemctl enable --now rke2-server.service
+
+# Fetch the cluster token to be used later:
+RKE2_TOKEN=$(tr -d '\n' < /var/lib/rancher/rke2/server/node-token)
+----
+
+K3sの場合:
+[,bash]
+----
+# Export the VIP_SERVICE_IP in the VM
+# Replace with the actual IP
+export VIP_SERVICE_IP=<ip>
+export INSTALL_K3S_SKIP_START=false
+
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server \
+ --server https://${VIP_SERVICE_IP}:6443 --disable=servicelb \
+ --write-kubeconfig-mode=644" K3S_TOKEN=foobar sh -
+----

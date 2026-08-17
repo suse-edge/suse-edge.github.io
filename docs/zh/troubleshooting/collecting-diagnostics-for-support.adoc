@@ -1,0 +1,96 @@
+[#collecting-diagnostics-for-support]
+== 收集用于支持的诊断信息
+:revdate: 2025-06-17
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+include::../edge-book/versions.adoc[]
+
+在联系 SUSE 支持部门时，提供全面的诊断信息至关重要。
+
+.需要收集的基本信息
+
+* *详细的问题描述*:发生了什么、何时发生、您当时在做什么、预期的行为是什么，以及实际的行为是什么？
+* *重现步骤*:您能否可靠地重现该问题？如果可以，请列出确切的步骤。
+* *组件版本*: {product} 版本，组件版本（RKE2/K3、EIB、Metal^3^、Elemental 等）。
+* *相关日志*:
+** `journalctl` 输出（如果可能，按服务过滤，或提供完整的引导日志）。
+** Kubernetes pod 日志 (kubectl logs)。
+** Metal³/Elemental 组件日志。
+** EIB 构建日志及其他日志
+* *系统信息*:
+** `uname -a`
+** `df -h`
+** `ip a`
+** `/etc/os-release`
+* *配置文件*:Elemental、Metal^3^、EIB 的相关配置文件，例如 helm chart 的 values 文件、configmap 等。
+* *Kubernetes 信息*:节点、服务、部署等。
+* *受影响的 Kubernetes 对象*:BMH、MachineRegistration 等。
+
+.如何收集
+
+* *对于日志*：将命令输出重定向到文件（例如，`journalctl -u k3s > k3s_logs.txt`）。
+* *对于 Kubernetes 资源*：使用 `kubectl get <resource> -o yaml > <resource_name>.yaml` 获取详细的 YAML 定义。
+* *对于系统信息*：收集上述命令的输出。
+* *对于 SL Micro*：请查阅 https://documentation.suse.com/sle-micro/5.5/html/SLE-Micro-all/cha-adm-support-slemicro.html[SUSE Linux Micro 故障排除指南] 文档，了解如何收集用于 `supportconfig` 支持的系统信息。
+* *对于 RKE2/Rancher*：请查阅 https://www.suse.com/support/kb/doc/?id=000020191[Rancher v2.x Linux 日志收集脚本] 文章以运行 Rancher v2.x Linux 日志收集脚本。
+
+* *对于 Edge (Nessie)*：Nessie {version-nessie} 是一款功能强大的诊断工具，旨在从 {product} 环境中收集日志和配置数据。它从主机系统和 Kubernetes 集群中收集全面信息，对于故障排除和支持非常有用。
+** Nessie 有两种“模式”：kubernetes 模式和系统模式。
+*** 要从 {product} 集群收集日志，请运行（前提是您在本地拥有 kubeconfig 文件的访问权限）：
++
+[,bash,subs="attributes"]
+----
+podman run --rm --privileged \
+  -v /etc/rancher/k3s/k3s.yaml:/etc/rancher/k3s/k3s.yaml:ro \
+  -v /var/log/journal:/var/log/journal:ro \
+  -v /run/systemd:/run/systemd:ro \
+  -v /etc/machine-id:/etc/machine-id:ro \
+  -v /tmp:/tmp \
+  -e NESSIE_LOG_DIR="/tmp" \
+  -e NESSIE_ZIP_DIR="/tmp" \
+  registry.suse.com/edge/{version-edge}/nessie:{version-nessie}
+----
++
+[NOTE]
+====
+如果需要，请调整 `k3s.yaml/rke2.yaml` 文件的路径。有关更多信息，请参阅 https://github.com/suse-edge/support-tools/blob/main/nessie/README.md[Nessie]。
+如果您拥有适当的权限（通常 `k3s.yaml` / `rke2-server.yaml` 文件由 root 用户所有），则应该能够在非特权模式下运行此容器。
+====
+*** 若要从实际操作系统中以系统模式收集日志，请运行：
++
+[,bash,subs="attributes"]
+----
+podman run --rm --privileged \
+  -v /var/log/journal:/var/log/journal:ro \
+  -v /run/systemd:/run/systemd:ro \
+  -v /etc/machine-id:/etc/machine-id:ro \
+  -v /tmp:/tmp \
+  -e NESSIE_LOG_DIR="/tmp" \
+  -e NESSIE_ZIP_DIR="/tmp" \
+  -e NESSIE_VERBOSE="1" \
+  -e NESSIE_SKIP_POD_LOGS="true" \
+  -e NESSIE_SKIP_K8S_CONFIGS="true" \
+  -e NESSIE_SKIP_METRICS="true" \
+  registry.suse.com/edge/{version-edge}/nessie:{version-nessie}
+----
++
+[NOTE]
+====
+请务必查看 https://github.com/suse-edge/support-tools/blob/main/nessie/README.md[Nessie]，以获取有关如何在您的环境中运行 Nessie 的更多详细信息。
+同样，如果您拥有适当的权限，应该能够在非特权模式下运行此容器。
+====
+
+
+.与支持部门联系
+请查看 https://www.suse.com/support/kb/doc/?id=000019452[如何有效利用 SUSE 技术支持] 中提供的文章，以及位于 https://www.suse.com/support/handbook/[SUSE 技术支持手册] 的支持手册，以了解有关如何联系 SUSE 支持部门的更多详细信息。

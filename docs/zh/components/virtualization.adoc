@@ -1,0 +1,587 @@
+[#components-kubevirt]
+= 边缘虚拟化
+:revdate: 2025-05-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+
+// for GitHub rendering only, do not modify
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+:imagesdir: ../images/
+
+本节介绍如何使用边缘虚拟化在边缘节点上运行虚拟机。边缘虚拟化专为轻量级虚拟化用例而设计，旨在利用通用的工作流程来部署和管理虚拟化及容器化应用程序。
+
+{product} 虚拟化支持两种运行虚拟机的方法：
+
+1. 通过 libvirt+qemu-kvm 在主机级别手动部署虚拟机（不涉及 Kubernetes）
+2. 部署 KubeVirt 操作器以实现基于 Kubernetes 的虚拟机管理
+
+这两种选项均有效，但下文仅介绍第二种。如果您想使用 SUSE Linux Micro 提供的标准开箱即用虚拟化机制，可以在 https://documentation.suse.com/sles/15-SP6/html/SLES-all/chap-virtualization-introduction.html[此处] 找到综合指南，虽然它主要是为 SUSE Linux Enterprise Server 编写的，但其概念几乎相同。
+
+本指南首先说明如何将额外的虚拟化组件部署到已预先部署的系统上，随后介绍如何通过 Edge Image Builder 将此配置嵌入到初始部署中。如果您不想了解基础知识并手动进行设置，请直接跳至该部分。
+
+== KubeVirt 概述
+
+KubeVirt 允许在 Kubernetes 中与您的其他容器化工作负载一起管理虚拟机。它通过在容器中运行 Linux 虚拟化堆栈的用户空间部分来实现这一点。这最大限度地减少了对主机系统的要求，从而简化了设置和管理。
+
+[Note]
+====
+有关 KubeVirt 架构的详细信息，请参阅 link:https://kubevirt.io/user-guide/architecture/[上游文档。]
+====
+
+== 先决条件
+
+如果您正在遵循本指南，我们假设您已具备以下条件：
+
+* 至少一台安装了 SUSE Linux Micro {version-operatingsystem} 且在 BIOS 中启用了虚拟化扩展的物理主机（有关详细信息，请参阅 {link-virtualization-sles}[此处]）。
+* 在您的节点上，已部署好 K3s/RKE2 Kubernetes 集群，并具有适当的 `kubeconfig`，可授予对集群的超级用户访问权限。
+* root 用户访问权限 — 这些说明假设您是 root 用户，并且 _没有_ 通过 `sudo` 提升您的权限。
+* 您在本地安装了 https://helm.sh/docs/intro/install/[Helm]，并且拥有足够的网络连接，能够将配置推送到您的 Kubernetes 集群并下载所需的镜像。
+
+== 手动安装边缘虚拟化
+
+本指南不会引导您完成 Kubernetes 的部署，但它假设您已经安装了 {product} 对应版本的 https://k3s.io/[K3s] 或 https://docs.rke2.io/install/quickstart[RKE2]，并且您已相应地配置了 kubeconfig，以便可以以超级用户身份执行标准的 `kubectl` 命令。我们假设您的节点构成一个单节点集群，尽管对于多节点部署，预计不会有重大差异。
+
+{product} 虚拟化通过三个独立的 Helm chart 进行部署，具体如下：
+
+* *KubeVirt*：核心虚拟化组件，即启用 Kubernetes 部署和管理虚拟机所需的 Kubernetes CRDs、Operator 和其他组件。
+* *KubeVirt Dashboard Extension*：一个可选的 Rancher UI 扩展，允许进行基本的虚拟机管理，例如启动/停止虚拟机以及访问控制台。
+* *Containerized Data Importer (CDI)*：一个额外的组件，为 KubeVirt 启用持久存储集成，使虚拟机能够使用现有的 Kubernetes 存储后端来存储数据，同时也允许用户为虚拟机导入或克隆数据卷。
+
+这些 Helm chart 中的每一个都根据您当前使用的 {product} 版本进行版本控制。对于生产/受支持的使用场景，请使用可在 SUSE Registry 中找到的制品。
+
+首先，确保您的 `kubectl` 访问正常：
+
+[,shell]
+----
+$ kubectl get nodes
+----
+
+这应该显示类似于以下内容：
+
+[,shell]
+----
+NAME                   STATUS   ROLES                       AGE     VERSION
+node1.edge.rdo.wales   Ready    control-plane,etcd,master   4h20m   v1.30.5+rke2r1
+node2.edge.rdo.wales   Ready    control-plane,etcd,master   4h15m   v1.30.5+rke2r1
+node3.edge.rdo.wales   Ready    control-plane,etcd,master   4h15m   v1.30.5+rke2r1
+----
+
+现在，您可以继续安装 *KubeVirt* 和 *Containerized Data Importer (CDI)* Helm chart：
+
+[,shell,subs="attributes"]
+----
+$ helm install kubevirt oci://registry.suse.com/edge/charts/kubevirt --namespace kubevirt-system --create-namespace
+$ helm install cdi oci://registry.suse.com/edge/charts/cdi --namespace cdi-system --create-namespace
+----
+
+几分钟后，您应该就部署好了所有 KubeVirt 和 CDI 组件。您可以通过检查 `kubevirt-system` 和 `cdi-system` 名称空间中所有已部署的资源来验证这一点。
+
+验证 KubeVirt 资源：
+
+[,shell]
+----
+$ kubectl get all -n kubevirt-system
+----
+
+这应该显示类似于以下内容：
+
+[,shell]
+----
+NAME                                   READY   STATUS    RESTARTS      AGE
+pod/virt-operator-5fbcf48d58-p7xpm     1/1     Running   0             2m24s
+pod/virt-operator-5fbcf48d58-wnf6s     1/1     Running   0             2m24s
+pod/virt-handler-t594x                 1/1     Running   0             93s
+pod/virt-controller-5f84c69884-cwjvd   1/1     Running   1 (64s ago)   93s
+pod/virt-controller-5f84c69884-xxw6q   1/1     Running   1 (64s ago)   93s
+pod/virt-api-7dfc54cf95-v8kcl          1/1     Running   1 (59s ago)   118s
+
+NAME                                  TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
+service/kubevirt-prometheus-metrics   ClusterIP   None            <none>        443/TCP   2m1s
+service/virt-api                      ClusterIP   10.43.56.140    <none>        443/TCP   2m1s
+service/kubevirt-operator-webhook     ClusterIP   10.43.201.121   <none>        443/TCP   2m1s
+service/virt-exportproxy              ClusterIP   10.43.83.23     <none>        443/TCP   2m1s
+
+NAME                          DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR            AGE
+daemonset.apps/virt-handler   1         1         1       1            1           kubernetes.io/os=linux   93s
+
+NAME                              READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/virt-operator     2/2     2            2           2m24s
+deployment.apps/virt-controller   2/2     2            2           93s
+deployment.apps/virt-api          1/1     1            1           118s
+
+NAME                                         DESIRED   CURRENT   READY   AGE
+replicaset.apps/virt-operator-5fbcf48d58     2         2         2       2m24s
+replicaset.apps/virt-controller-5f84c69884   2         2         2       93s
+replicaset.apps/virt-api-7dfc54cf95          1         1         1       118s
+
+NAME                            AGE     PHASE
+kubevirt.kubevirt.io/kubevirt   2m24s   Deployed
+----
+
+验证 CDI 资源：
+
+[,shell]
+----
+$ kubectl get all -n cdi-system
+----
+
+这应该显示类似于以下内容：
+
+[,shell]
+----
+NAME                                   READY   STATUS    RESTARTS   AGE
+pod/cdi-operator-55c74f4b86-692xb      1/1     Running   0          2m24s
+pod/cdi-apiserver-db465b888-62lvr      1/1     Running   0          2m21s
+pod/cdi-deployment-56c7d74995-mgkfn    1/1     Running   0          2m21s
+pod/cdi-uploadproxy-7d7b94b968-6kxc2   1/1     Running   0          2m22s
+
+NAME                             TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)    AGE
+service/cdi-uploadproxy          ClusterIP   10.43.117.7    <none>        443/TCP    2m22s
+service/cdi-api                  ClusterIP   10.43.20.101   <none>        443/TCP    2m22s
+service/cdi-prometheus-metrics   ClusterIP   10.43.39.153   <none>        8080/TCP   2m21s
+
+NAME                              READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/cdi-operator      1/1     1            1           2m24s
+deployment.apps/cdi-apiserver     1/1     1            1           2m22s
+deployment.apps/cdi-deployment    1/1     1            1           2m21s
+deployment.apps/cdi-uploadproxy   1/1     1            1           2m22s
+
+NAME                                         DESIRED   CURRENT   READY   AGE
+replicaset.apps/cdi-operator-55c74f4b86      1         1         1       2m24s
+replicaset.apps/cdi-apiserver-db465b888      1         1         1       2m21s
+replicaset.apps/cdi-deployment-56c7d74995    1         1         1       2m21s
+replicaset.apps/cdi-uploadproxy-7d7b94b968   1         1         1       2m22s
+----
+
+要验证 `VirtualMachine` 自定义资源定义 (CRD) 是否已部署，您可以使用以下命令进行验证：
+
+[,shell]
+----
+$ kubectl explain virtualmachine
+----
+
+这应该会打印出 `VirtualMachine` 对象的定义，其打印结果如下：
+
+[,shell]
+----
+GROUP:      kubevirt.io
+KIND:       VirtualMachine
+VERSION:    v1
+
+DESCRIPTION:
+    VirtualMachine handles the VirtualMachines that are not running or are in a
+    stopped state The VirtualMachine contains the template to create the
+    VirtualMachineInstance. It also mirrors the running state of the created
+    VirtualMachineInstance in its status.
+(snip)
+----
+
+== 部署虚拟机
+
+现在 KubeVirt 和 CDI 已经部署完毕，让我们定义一个基于 https://get.opensuse.org/tumbleweed/[openSUSE Tumbleweed] 的简单虚拟机。此虚拟机具有最简单的配置，使用标准的“pod 网络”来实现与任何其他 pod 相同的网络配置。它还采用了非持久性存储，确保存储是临时的，就像任何没有 https://kubernetes.io/docs/concepts/storage/persistent-volumes/[PVC] 的容器一样。
+
+[,shell, literal]
+----
+$ cat <<EOF > user-data.yaml
+#cloud-config
+disable_root: false
+ssh_pwauth: True
+users:
+  - default
+  - name: suse
+    groups: sudo
+    shell: /bin/bash
+    sudo:  ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: False
+    plain_text_passwd: 'suse'
+EOF
+$ kubectl apply -f - <<EOF
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: tumbleweed
+  namespace: default
+spec:
+  runStrategy: Always
+  template:
+    spec:
+      domain:
+        devices: {}
+        machine:
+          type: q35
+        memory:
+          guest: 2Gi
+        resources: {}
+      volumes:
+      - containerDisk:
+          image: quay.io/containerdisks/opensuse-tumbleweed:1.0.0
+        name: tumbleweed-containerdisk-0
+      - cloudInitNoCloud:
+          userDataBase64: $(cat user-data.yaml | base64 -w 0)
+        name: cloudinitdisk
+EOF
+----
+
+这应该会打印出已创建 `VirtualMachine` 的信息：
+
+[,shell]
+----
+virtualmachine.kubevirt.io/tumbleweed created
+----
+
+此 `VirtualMachine` 定义非常简单，几乎没有指定任何配置。它只是简单地概述了它是一种内存为 2 GB 的“ https://wiki.qemu.org/Features/Q35[q35]”机器类型，使用基于临时 `https://kubevirt.io/user-guide/virtual_machines/disks_and_volumes/#containerdisk[containerDisk]` 的磁盘镜像（即存储在远程镜像仓库的容器镜像中的磁盘镜像），并指定了一个 base64 编码的 cloudInit 磁盘，我们仅将其用于在启动时创建用户和强制执行密码（使用 `base64 -d` 进行解码）。
+
+> NOTE: 此虚拟机镜像仅用于测试。该镜像不受官方支持，仅作为文档示例。
+
+这台机器需要几分钟才能启动，因为它需要下载 openSUSE Tumbleweed 磁盘镜像，但一旦下载完成，您可以通过查看虚拟机信息来了解有关该虚拟机的更多详细信息：
+
+[,shell]
+----
+$ kubectl get vmi
+----
+
+这应该会打印出启动该虚拟机的节点以及该虚拟机的 IP 地址。请记住，由于它使用 pod 网络，报告的 IP 地址将与任何其他 pod 一样，并且可以进行相应的路由：
+
+[,shell]
+----
+NAME         AGE     PHASE     IP           NODENAME               READY
+tumbleweed   4m24s   Running   10.42.2.98   node3.edge.rdo.wales   True
+----
+
+当在 Kubernetes 集群节点本身上运行这些命令，且 CNI 将流量直接路由到 pod（例如 Cilium）时，您应该能够直接 `ssh` 到机器本身。将以下 IP 地址替换为您分配给虚拟机的 IP 地址：
+
+[,shell]
+----
+$ ssh suse@10.42.2.98
+(password is "suse")
+----
+
+进入此虚拟机后，您可以随意操作，但请记住它的资源有限，且仅有 1 GB 磁盘空间。完成后，`Ctrl-D` 或 `exit` 以断开 SSH 会话。
+
+虚拟机进程仍然封装在标准的 Kubernetes pod 中。`VirtualMachine` CRD 是所需虚拟机的表示，但实际启动虚拟机的过程是通过 `https://github.com/kubevirt/kubevirt/blob/main/docs/components.md#virt-launcher[virt-launcher]` pod（一个标准的 Kubernetes pod，就像任何其他应用程序一样）进行的。对于启动的每个虚拟机，您可以看到有一个 `virt-launcher` pod：
+
+[,shell]
+----
+$ kubectl get pods
+----
+
+这应该会显示我们定义的 Tumbleweed 机器的那个 `virt-launcher` pod：
+
+[,shell]
+----
+NAME                             READY   STATUS    RESTARTS   AGE
+virt-launcher-tumbleweed-8gcn4   3/3     Running   0          10m
+----
+
+如果我们查看这个 `virt-launcher` pod，您会发现它正在执行 `libvirt` 和 `qemu-kvm` 进程。我们可以进入 pod 本身并查看其内部，请注意您需要根据您的 pod 名称调整以下命令：
+
+[,shell]
+----
+$ kubectl exec -it virt-launcher-tumbleweed-8gcn4 -- bash
+----
+
+进入 pod 后，尝试运行 `virsh` 命令并查看处理。您将看到正在运行的 `qemu-system-x86_64` 二进制文件，以及用于监控虚拟机的某些处理。您还将看到磁盘镜像的位置以及网络是如何连接的（作为 tap 设备）：
+
+[,shell]
+----
+qemu@tumbleweed:/> ps ax
+  PID TTY      STAT   TIME COMMAND
+    1 ?        Ssl    0:00 /usr/bin/virt-launcher-monitor --qemu-timeout 269s --name tumbleweed --uid b9655c11-38f7-4fa8-8f5d-bfe987dab42c --namespace default --kubevirt-share-dir /var/run/kubevirt --ephemeral-disk-dir /var/run/kubevirt-ephemeral-disks --container-disk-dir /var/run/kube
+   12 ?        Sl     0:01 /usr/bin/virt-launcher --qemu-timeout 269s --name tumbleweed --uid b9655c11-38f7-4fa8-8f5d-bfe987dab42c --namespace default --kubevirt-share-dir /var/run/kubevirt --ephemeral-disk-dir /var/run/kubevirt-ephemeral-disks --container-disk-dir /var/run/kubevirt/con
+   24 ?        Sl     0:00 /usr/sbin/virtlogd -f /etc/libvirt/virtlogd.conf
+   25 ?        Sl     0:01 /usr/sbin/virtqemud -f /var/run/libvirt/virtqemud.conf
+   83 ?        Sl     0:31 /usr/bin/qemu-system-x86_64 -name guest=default_tumbleweed,debug-threads=on -S -object {"qom-type":"secret","id":"masterKey0","format":"raw","file":"/var/run/kubevirt-private/libvirt/qemu/lib/domain-1-default_tumbleweed/master-key.aes"} -machine pc-q35-7.1,usb
+  286 pts/0    Ss     0:00 bash
+  320 pts/0    R+     0:00 ps ax
+
+qemu@tumbleweed:/> virsh list --all
+ Id   Name                 State
+------------------------------------
+ 1    default_tumbleweed   running
+
+qemu@tumbleweed:/> virsh domblklist 1
+ Target   Source
+---------------------------------------------------------------------------------------------
+ sda      /var/run/kubevirt-ephemeral-disks/disk-data/tumbleweed-containerdisk-0/disk.qcow2
+ sdb      /var/run/kubevirt-ephemeral-disks/cloud-init-data/default/tumbleweed/noCloud.iso
+
+qemu@tumbleweed:/> virsh domiflist 1
+ Interface   Type       Source   Model                     MAC
+------------------------------------------------------------------------------
+ tap0        ethernet   -        virtio-non-transitional   e6:e9:1a:05:c0:92
+
+qemu@tumbleweed:/> exit
+exit
+----
+
+最后，让我们删除此虚拟机以进行清理：
+
+[,shell]
+----
+$ kubectl delete vm/tumbleweed
+virtualmachine.kubevirt.io "tumbleweed" deleted
+----
+
+== 使用 virtctl
+
+除了标准的 Kubernetes CLI 工具（即 `kubectl`）外，KubeVirt 还附带了一个 CLI 实用程序，它允许您以一种弥合虚拟化世界与 Kubernetes 设计初衷之间的某些差距的方式与集群进行交互。例如，`virtctl` 工具提供了管理虚拟机生命周期（启动、停止、重启等）、提供对虚拟控制台的访问、上传虚拟机镜像以及与 Kubernetes 结构（如服务）进行交互的功能，而无需直接使用 API 或 CRD。
+
+让我们下载 `virtctl` 工具的最新稳定版本：
+
+[,shell,subs="attributes"]
+----
+$ export VERSION={version-kubevirt-release}
+$ wget https://github.com/kubevirt/kubevirt/releases/download/$VERSION/virtctl-$VERSION-linux-amd64
+----
+
+如果您使用的是不同的架构或非 Linux 机器，可以在 https://github.com/kubevirt/kubevirt/releases[此处]找到其他版本。在继续之前，您需要使其可执行，将其移动到`$PATH`中的某个位置可能会很有用：
+
+[,shell]
+----
+$ mv virtctl-$VERSION-linux-amd64 /usr/local/bin/virtctl
+$ chmod a+x /usr/local/bin/virtctl
+----
+
+然后，您可以使用 `virtctl` 命令行工具来创建虚拟机。让我们复制之前的虚拟机，注意我们将输出直接通过管道传输到`kubectl apply`：
+
+[,shell, literal]
+----
+$ cat <<EOF >  user-data.yaml 
+#cloud-config
+disable_root: false
+ssh_pwauth: True
+users:
+  - default
+  - name: suse
+    groups: sudo
+    shell: /bin/bash
+    sudo:  ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: False
+    plain_text_passwd: 'suse'
+EOF
+$ alias virtctl=echo
+$ virtctl create vm --name virtctl-example --memory=1Gi \
+    --volume-containerdisk=src:quay.io/containerdisks/opensuse-tumbleweed:1.0.0 \
+    --cloud-init-user-data "$(cat user-data.yaml | base64 -w 0)"
+----
+
+此时应该会显示虚拟机正在运行（鉴于容器镜像已被缓存，这次启动速度应该会快得多）：
+
+[,shell]
+----
+$ kubectl get vmi
+NAME              AGE   PHASE     IP           NODENAME               READY
+virtctl-example   52s   Running   10.42.2.29   node3.edge.rdo.wales   True
+----
+
+现在我们可以使用 `virtctl` 直接连接到虚拟机：
+
+[,shell]
+----
+$ virtctl ssh suse@virtctl-example
+(password is "suse" - Ctrl-D to exit)
+----
+
+`virtctl` 还可以使用许多其他命令。例如，如果网络无法正常工作，`virtctl console` 可以让您访问串行控制台，并且您可以使用 `virtctl  guestosinfo` 获取全面的操作系统信息，前提是客户机已安装并运行 `qemu-guest-agent`。
+
+最后，让我们暂停并恢复虚拟机：
+
+[,shell]
+----
+$ virtctl pause vm virtctl-example
+VMI virtctl-example was scheduled to pause
+----
+
+您会发现 `VirtualMachine` 对象显示为 *Paused*，而 `VirtualMachineInstance` 对象显示为 *Running*，但 *READY=False*：
+
+[,shell]
+----
+$ kubectl get vm
+NAME              AGE     STATUS   READY
+virtctl-example   8m14s   Paused   False
+
+$ kubectl get vmi
+NAME              AGE     PHASE     IP           NODENAME               READY
+virtctl-example   8m15s   Running   10.42.2.29   node3.edge.rdo.wales   False
+----
+
+您还会发现无法再连接到该虚拟机：
+
+[,shell]
+----
+$ virtctl ssh suse@virtctl-example
+can't access VMI virtctl-example: Operation cannot be fulfilled on virtualmachineinstance.kubevirt.io "virtctl-example": VMI is paused
+----
+
+让我们恢复虚拟机并重试：
+
+[,shell]
+----
+$ virtctl unpause vm virtctl-example
+VMI virtctl-example was scheduled to unpause
+----
+
+现在我们应该能够重新建立连接：
+
+[,shell]
+----
+$ virtctl ssh suse@virtctl-example
+suse@vmi/virtctl-example.default's password:
+suse@virtctl-example:~> exit
+logout
+----
+
+最后，让我们去除该虚拟机：
+
+[,shell]
+----
+$ kubectl delete vm/virtctl-example
+virtualmachine.kubevirt.io "virtctl-example" deleted
+----
+
+== 简单的入口网络
+
+在本节中，我们将展示如何将虚拟机作为标准 Kubernetes 服务公开，并通过 Kubernetes 入口服务使其可用，例如 https://docs.rke2.io/networking/networking_services#ingress-controller[Traefik with RKE2]或 https://docs.k3s.io/networking/networking-services#traefik-ingress-controller[Traefik with K3s]。本文档假设这些组件已正确配置，并且您拥有适当的 DNS 指针（例如通过通配符），指向您的 Kubernetes 服务器节点或入口虚拟 IP，以便进行正确的入口解析。
+
+> NOTE: 在 {product} 3.1+ 版本中，如果您在多服务器节点配置中使用 K3s，可能需要为 Ingress 配置基于 MetalLB 的 VIP；RKE2 则不需要这样做。
+
+在示例环境中，部署了另一台 openSUSE Tumbleweed 虚拟机，使用 cloud-init 在启动时安装 NGINX 作为简单的 Web 服务器，并配置了一条简单的消息，以便在调用时验证其是否按预期工作。要了解具体操作，只需`base64 -d`下方输出中的 cloud-init 部分即可。
+
+现在让我们创建这台虚拟机：
+
+[,shell, literal]
+----
+$ cat <<EOF > user-data.yaml
+#cloud-config
+disable_root: false
+ssh_pwauth: True
+users:
+  - default
+  - name: suse
+    groups: sudo
+    shell: /bin/bash
+    sudo:  ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: False
+    plain_text_passwd: 'suse'
+EOF
+$ kubectl apply -f - <<EOF
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: ingress-example
+  namespace: default
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      domain:
+        devices: {}
+        machine:
+          type: q35
+        memory:
+          guest: 2Gi
+        resources: {}
+      volumes:
+      - containerDisk:
+          image: quay.io/containerdisks/opensuse-tumbleweed:1.0.0
+        name: tumbleweed-containerdisk-0
+      - cloudInitNoCloud:
+          userDataBase64: $(cat user-data.yaml | base64 -w 0)
+        name: cloudinitdisk
+EOF
+----
+
+当该虚拟机成功启动后，我们可以使用 `virtctl` 命令来公开 `VirtualMachineInstance`，其外部端口为 `8080`，目标端口为 `80`（NGINX 默认侦听该端口）。我们在此处使用 `virtctl` 命令，因为它能够理解虚拟机对象与 Pod 之间的映射关系。这为我们创建了一个新服务：
+
+[,shell]
+----
+$ virtctl expose vmi ingress-example --port=8080 --target-port=80 --name=ingress-example
+Service ingress-example successfully exposed for vmi ingress-example
+----
+
+然后，我们将自动创建一个相应的服务：
+
+[,shell]
+----
+$ kubectl get svc/ingress-example
+NAME              TYPE           CLUSTER-IP      EXTERNAL-IP       PORT(S)                         AGE
+ingress-example   ClusterIP      10.43.217.19    <none>            8080/TCP                        9s
+----
+
+接下来，如果您随后使用 `kubectl create ingress`，我们可以创建一个指向此服务的 ingress 对象。在此处调整 URL（在 https://kubernetes.io/docs/reference/kubectl/generated/kubectl_create/kubectl_create_ingress/[ingress] 对象中称为“host”），以匹配您的 DNS 配置，并确保将其指向端口 `8080`：
+
+[,shell]
+----
+$ kubectl create ingress ingress-example --rule=ingress-example.suse.local/=ingress-example:8080
+----
+
+在正确配置 DNS 后，您应该能够立即 curl 该 URL：
+
+[,shell]
+----
+$ curl ingress-example.suse.local
+It works!
+----
+
+让我们通过去除此虚拟机及其服务和 ingress 资源来进行清理：
+
+[,shell]
+----
+$ kubectl delete vm/ingress-example svc/ingress-example ingress/ingress-example
+virtualmachine.kubevirt.io "ingress-example" deleted
+service "ingress-example" deleted
+ingress.networking.k8s.io "ingress-example" deleted
+----
+
+== 使用 Rancher UI 扩展
+
+{product} Virtualization 为 Rancher Manager 提供了一个 UI 扩展，支持使用 Rancher 仪表板 UI 进行基本的虚拟机管理。
+
+=== 安装
+
+有关安装指南，请参阅 <<components-rancher-dashboard-extensions,Rancher Dashboard Extensions>>。
+
+[#kubevirt-dashboard-extension-usage]
+=== 使用 KubeVirt Rancher 仪表板扩展
+
+该扩展在集群资源管理器中引入了一个新的 *KubeVirt* 部分。此部分将添加到任何安装了 KubeVirt 的托管集群中。
+
+该扩展允许您直接与 KubeVirt 虚拟机资源交互，以管理虚拟机的生命周期。
+
+==== 创建虚拟机
+
+1. 导航至 *Cluster Explorer*，点击左侧导航栏中启用了 KubeVirt 的托管集群。
+2. 导航至 *KubeVirt > Virtual Machines* 页面，然后点击屏幕右上角的 `Create from YAML`。
+3. 填写或粘贴虚拟机定义，然后按 `Create`。使用“部署虚拟机”部分中的虚拟机定义作为参考。
+
+image::virtual-machines-page.png[scaledwidth=100%]
+
+==== 虚拟机操作
+
+您可以使用每个虚拟机右侧 *⋮* 下拉列表中的操作菜单来执行启动、停止、暂停或软重启操作。或者，您也可以通过选择要对其执行操作的虚拟机，使用列表顶部的组操作。
+
+执行这些操作可能会对虚拟机运行策略产生影响。 https://kubevirt.io/user-guide/compute/run_strategies/#virtctl[请参阅 KubeVirt 文档中的表格]以了解更多详细信息。
+
+==== 访问虚拟机控制台
+
+“虚拟机”列表提供了一个 `Console` 下拉列表，允许使用 *VNC 或串行控制台* 连接到机器。此操作仅适用于正在运行的机器。
+
+在某些情况下，刚启动的虚拟机需要片刻时间才能访问控制台。
+
+image::vnc-console-ui.png[scaledwidth=100%]
+
+== 使用 Edge Image Builder 进行安装
+
+{product} 正在使用 <<components-eib>> 来定制基础 SUSE Linux Micro OS 镜像。
+请遵循 <<kubevirt-install>>，以便在 EIB 配置的 Kubernetes 集群之上进行 KubeVirt 和 CDI 的隔离的安装。

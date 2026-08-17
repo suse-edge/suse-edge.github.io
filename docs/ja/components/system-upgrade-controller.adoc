@@ -1,0 +1,378 @@
+[#components-system-upgrade-controller]
+= System Upgrade Controller
+:revdate: 2025-02-24
+:revnumber: 3.6
+:page-revdate: {revdate}
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+link:https://github.com/rancher/system-upgrade-controller[System Upgrade Controllerのドキュメント]を参照してください。
+
+[quote]
+____
+System Upgrade Controller（SUC）は、汎用的なKubernetesネイティブのアップグレードコントローラー（ノード用）を提供することを目的としています。これは、アップグレードポリシーや要件を定義するための新しいCRDである「Plan」を導入します。Planとは、クラスター内のノードの変更を意図した計画です。
+____
+
+== {product}はどのようにSystem Upgrade Controllerを使用しますか？
+
+{product}は`SUC`を使用して、管理クラスターおよびダウンストリームクラスターにおけるOSとKubernetesのバージョンアップグレードに関連するさまざまな「Day 2」オペレーションを促進します。
+
+「Day 2」オペレーションは`SUC Plans`を通じて定義されます。これらのプランに基づいて、`SUC`は各ノードにワークロードをデプロイし、それぞれの「Day 2」オペレーションを実行します。
+
+`SUC`は<<components-upgrade-controller>>内でも使用されます。SUCとUpgrade Controllerの主な違いの詳細については、<<components-upgrade-controller-uc-vs-suc>>を参照してください。
+
+[#components-system-upgrade-controller-install]
+== System Upgrade Controllerのインストール
+
+[IMPORTANT]
+====
+Rancher link:https://github.com/rancher/rancher/releases/tag/v2.10.0[v2.10.0]以降、`System Upgrade Controller`は自動的にインストールされます。
+
+以下の手順は、環境がRancherによって管理されていない場合、またはRancherのバージョンが`v2.10.0`より低い場合のみ実行してください。
+====
+
+link:https://github.com/suse-edge/fleet-examples[suse-edge/fleet-examples]リポジトリにある<<components-fleet, Fleet>>を使用してSUCをインストールすることをお勧めします。
+
+[NOTE]
+====
+`suse-edge/fleet-examples`リポジトリによって提供されるリソースは、*必ず*有効なlink:https://github.com/suse-edge/fleet-examples/releases[fleet-examplesリリース]から使用する必要があります。使用する必要があるリリースを確認するには、<<release-notes,リリースノート>>を参照してください。
+====
+
+Fleetを使用してSUCをインストールできない場合は、RancherのHelmチャートリポジトリからインストールするか、RancherのHelmチャートを独自のサードパーティGitOpsワークフローに組み込むことができます。
+
+このセクションでは、次の内容について説明します。
+
+* <<components-system-upgrade-controller-fleet, Fleetのインストール>>
+
+* <<components-system-upgrade-controller-helm,Helmインストール>>
+
+[#components-system-upgrade-controller-fleet]
+=== System Upgrade Controller Fleetのインストール
+
+Fleetを使用する場合、SUCのデプロイに使用できるリソースは2つあります：
+
+* link:https://fleet.rancher.io/ref-gitrepo[GitRepo]リソース - 外部/ローカルのGitサーバーが利用可能なユースケース用。インストール手順については、<<components-system-upgrade-controller-fleet-gitrepo,System Upgrade Controllerのインストール - GitRepo>>を参照してください。
+
+* link:https://fleet.rancher.io/bundle-add[Bundle]リソース - ローカルのGitサーバーオプションをサポートしていないエアギャップ(された)ユースケース用。インストール手順については、<<components-system-upgrade-controller-fleet-bundle,System Upgrade Controllerのインストール - Bundle>>を参照してください。
+
+[#components-system-upgrade-controller-fleet-gitrepo]
+==== System Upgrade Controllerのインストール - GitRepo
+
+[NOTE]
+====
+このプロセスは、Rancher UIが利用可能な場合は、それを通じて行うこともできます。詳細については、link:https://ranchermanager.docs.rancher.com/{rancher-docs-version}/integrations-in-rancher/fleet/overview#accessing-fleet-in-the-rancher-ui[Rancher UIでのFleetへのアクセス]を参照してください。
+====
+
+*管理*クラスターで：
+
+. SUCをデプロイするクラスターを決定します。これは、*管理*クラスター上の適切なFleetワークスペースにSUC `GitRepo`リソースをデプロイすることで実行されます。デフォルトでは、Fleetには2つのワークスペースがあります：
+
+** `fleet-local` - *管理*クラスターにデプロイする必要があるリソース用。
+
+** `fleet-default` - *ダウンストリーム*クラスターにデプロイする必要があるリソース用。
++
+Fleetワークスペースの詳細については、link:https://fleet.rancher.io/namespaces#gitrepos-bundles-clusters-clustergroups[アップストリーム]のドキュメントを参照してください。
+
+. `GitRepo`リソースをデプロイします：
+
+** 管理クラスターにSUCをデプロイするには：
++
+[,bash,subs="attributes,specialchars"]
+----
+kubectl apply -n fleet-local -f - <<EOF
+apiVersion: fleet.cattle.io/v1alpha1
+kind: GitRepo
+metadata:
+  name: system-upgrade-controller
+spec:
+  revision: {release-tag-fleet-examples}
+  paths:
+  - fleets/day2/system-upgrade-controller
+  repo: https://github.com/suse-edge/fleet-examples.git
+EOF
+----
+
+** ダウンストリームクラスターにSUCをデプロイするには：
++
+[NOTE]
+====
+以下のリソースをデプロイする前に、Fleetがどのダウンストリームクラスターにリソースをデプロイすべきかを認識できるよう、有効な `targets` 設定を *指定する必要があります*。ダウンストリームクラスターへのマッピング方法については、link:https://fleet.rancher.io/gitrepo-targets[ダウンストリームクラスターへのマッピング] を参照してください。
+====
++
+[,bash,subs="attributes,specialchars"]
+----
+kubectl apply -n fleet-default -f - <<EOF
+apiVersion: fleet.cattle.io/v1alpha1
+kind: GitRepo
+metadata:
+  name: system-upgrade-controller
+spec:
+  revision: {release-tag-fleet-examples}
+  paths:
+  - fleets/day2/system-upgrade-controller
+  repo: https://github.com/suse-edge/fleet-examples.git
+  targets:
+  - clusterSelector: CHANGEME
+  # Example matching all clusters:
+  # targets:
+  # - clusterSelector: {}
+EOF
+----
+
+. `GitRepo` リソースがデプロイされていることを確認します:
++
+[,bash,subs="attributes,specialchars"]
+----
+# Namespace will vary based on where you want to deploy SUC
+kubectl get gitrepo system-upgrade-controller -n <fleet-local/fleet-default>
+
+NAME                        REPO                                              COMMIT          BUNDLEDEPLOYMENTS-READY   STATUS
+system-upgrade-controller   https://github.com/suse-edge/fleet-examples.git   {release-tag-fleet-examples}   1/1
+----
+
+. System Upgrade Controllerのデプロイメントを検証します:
++
+[,bash]
+----
+kubectl get deployment system-upgrade-controller -n cattle-system
+NAME                        READY   UP-TO-DATE   AVAILABLE   AGE
+system-upgrade-controller   1/1     1            1           2m20s
+----
+
+[#components-system-upgrade-controller-fleet-bundle]
+==== System Upgrade Controllerのインストール - Bundle
+
+このセクションでは、link:https://fleet.rancher.io/cli/fleet-cli/fleet[fleet-cli] を使用して、標準のFleet構成から `Bundle` リソースをビルドおよびデプロイする方法を説明します。
+
+. ネットワークアクセスが可能なマシンで `fleet-cli` をダウンロードします:
++
+[NOTE]
+====
+ダウンロードするfleet-cliのバージョンが、クラスターにデプロイされているFleetのバージョンと一致していることを確認してください。
+====
+
+** Macユーザー向けには、link:https://formulae.brew.sh/formula/fleet-cli[fleet-cli] のHomebrew Formulaeが用意されています。
+
+** LinuxおよびWindowsユーザー向けには、各Fleet link:https://github.com/rancher/fleet/releases[リリース]の *assets* としてバイナリが提供されています。
+
+*** Linux AMD：
++
+[,bash,subs="attributes"]
+----
+curl -L -o fleet-cli https://github.com/rancher/fleet/releases/download/v{version-fleet}/fleet-linux-amd64
+----
+
+*** Linux ARM：
++
+[,bash,subs="attributes"]
+----
+curl -L -o fleet-cli https://github.com/rancher/fleet/releases/download/v{version-fleet}/fleet-linux-arm64
+----
+
+. `fleet-cli` を実行可能にしてください:
++
+[,bash]
+----
+chmod +x fleet-cli
+----
+
+. 使用する `suse-edge/fleet-examples` link:https://github.com/suse-edge/fleet-examples/releases[リリース] をクローンします:
++
+[,bash,subs="attributes"]
+----
+git clone -b {release-tag-fleet-examples} https://github.com/suse-edge/fleet-examples.git
+----
+
+. `fleet-examples` リポジトリにあるSUC fleetに移動します:
++
+[,bash]
+----
+cd fleet-examples/fleets/day2/system-upgrade-controller
+----
+
+. SUCをデプロイするクラスターを決定します。これは、管理クラスター内の適切なFleetワークスペースにSUCバンドルをデプロイすることで実行されます。デフォルトでは、Fleetには2つのワークスペースがあります：
+
+** `fleet-local` - *管理*クラスターにデプロイする必要があるリソース用。
+
+** `fleet-default` - *ダウンストリーム*クラスターにデプロイする必要があるリソース用。
++
+Fleetワークスペースの詳細については、link:https://fleet.rancher.io/namespaces#gitrepos-bundles-clusters-clustergroups[アップストリーム]のドキュメントを参照してください。
+
+. SUCをダウンストリームクラスターのみにデプロイする場合は、特定のクラスターに一致する `targets.yaml` ファイルを作成してください:
++
+[,bash]
+----
+cat > targets.yaml <<EOF
+targets:
+- clusterSelector: CHANGEME
+EOF
+----
++
+ダウンストリームクラスターへのマッピング方法については、link:https://fleet.rancher.io/gitrepo-targets[ダウンストリームクラスターへのマッピング] を参照してください。
+
+. バンドルのビルドに進みます:
++
+[NOTE]
+====
+`fleet-examples/fleets/day2/system-upgrade-controller` ディレクトリにfleet-cliを*ダウンロードしない*ように注意してください。そうしないと、バンドルに同梱されてしまい、推奨されません。
+====
+
+** 管理クラスターにSUCをデプロイするには、以下を実行します。
++
+[,bash]
+----
+fleet-cli apply --compress -n fleet-local -o - system-upgrade-controller . > system-upgrade-controller-bundle.yaml
+----
+
+** ダウンストリームクラスターにSUCをデプロイするには、以下を実行します。
++
+[,bash]
+----
+fleet-cli apply --compress --targets-file=targets.yaml -n fleet-default -o - system-upgrade-controller . > system-upgrade-controller-bundle.yaml
+----
++
+このプロセスの詳細については、link:https://fleet.rancher.io/bundle-add#convert-a-helm-chart-into-a-bundle[Helmチャートをバンドルに変換する]を参照してください。
++
+`fleet-cli apply` コマンドの詳細については、link:https://fleet.rancher.io/cli/fleet-cli/fleet_apply[fleet apply]を参照してください。
+
+. `system-upgrade-controller-bundle.yaml` バンドルを管理クラスターのマシンに転送します。
++
+[,bash]
+----
+scp system-upgrade-controller-bundle.yaml <machine-address>:<filesystem-path>
+----
+
+. 管理クラスター上で、`system-upgrade-controller-bundle.yaml` バンドルをデプロイします。
++
+[,bash]
+----
+kubectl apply -f system-upgrade-controller-bundle.yaml
+----
+
+. 管理クラスター上で、バンドルがデプロイされていることを検証します。
++
+[,bash]
+----
+# Namespace will vary based on where you want to deploy SUC
+kubectl get bundle system-upgrade-controller -n <fleet-local/fleet-default>
+
+NAME                        BUNDLEDEPLOYMENTS-READY   STATUS
+system-upgrade-controller   1/1 
+----
+
+. バンドルをデプロイしたFleetワークスペースに基づいて、クラスターに移動し、SUCのデプロイを検証します。
++
+[NOTE]
+====
+SUCは常に *cattle-system* ネームスペースにデプロイされます。
+====
++
+[,bash]
+----
+kubectl get deployment system-upgrade-controller -n cattle-system
+NAME                        READY   UP-TO-DATE   AVAILABLE   AGE
+system-upgrade-controller   1/1     1            1           111s
+----
+
+[#components-system-upgrade-controller-helm]
+=== System Upgrade ControllerのHelmインストール
+
+. Rancherチャートリポジトリを追加します。
++
+[,bash]
+----
+helm repo add rancher-charts https://charts.rancher.io/
+----
+
+. SUCチャートをデプロイします。
++
+[,bash,subs="attributes"]
+----
+helm install system-upgrade-controller rancher-charts/system-upgrade-controller --version {version-suc-chart} --set global.cattle.psp.enabled=false -n cattle-system --create-namespace
+----
++
+これにより、Edge {version-edge} プラットフォームで必要とされるSUCバージョン {version-suc} がインストールされます。
+
+. SUCのデプロイメントを検証します。
++
+[,bash]
+----
+kubectl get deployment system-upgrade-controller -n cattle-system
+NAME                        READY   UP-TO-DATE   AVAILABLE   AGE
+system-upgrade-controller   1/1     1            1           37s
+----
+
+[#components-system-upgrade-controller-monitor-plans]
+== System Upgrade Controllerプランの監視
+
+SUCプランは、以下の方法で確認できます。
+
+* <<components-system-upgrade-controller-monitor-plans-rancher, Rancher UI>> を使用する。
+
+* クラスター内部の<<components-system-upgrade-controller-monitor-plans-manual,手動監視>>を通じて
+
+[IMPORTANT]
+====
+SUCプラン用にデプロイされたポッドは、実行成功後 *15* 分間保持されます。その後、それらを作成した対応するジョブによって削除されます。この期間を過ぎてもPodのログにアクセスできるようにするには、クラスターのログ記録を有効にする必要があります。Rancherでこれを行う方法の詳細については、{link-rancher-logging}[Rancher Integration with Logging Services]を参照してください。
+====
+
+[#components-system-upgrade-controller-monitor-plans-rancher]
+=== Upgrade Controllerプランの監視 - Rancher UI
+
+特定のSUCプランのPodログを確認するには：
+
+. 左上隅にある*☰ -> <your-cluster-name>*
+
+. [Workloads] -> > [Pods]を選択します。
+
+. `Only User Namespaces`ドロップダウンメニューを選択し、`cattle-system`ネームスペースを追加します。
+
+. Podフィルターバーに、SUCプランPodの名前を入力します。名前は次のテンプレート形式になります：`apply-<plan_name>-on-<node_name>`
++
+[NOTE]
+====
+特定のSUCプランに対して、`Completed`と`Unknown`の両方のPodが存在する場合があります。これは想定される動作であり、一部のアップグレードの性質上発生します。
+====
+
+. ログを確認するPodを選択し、*⋮ → View Logs*に移動します。
+
+[#components-system-upgrade-controller-monitor-plans-manual]
+=== Upgrade Controllerプランの監視 - 手動
+
+[NOTE]
+====
+以下の手順では、`kubectl`が*SUC Plans*がデプロイされているクラスターに接続するように構成されていることを前提としています。
+====
+
+. デプロイされた*SUC*プランを一覧表示します：
++
+[,bash]
+----
+kubectl get plans -n cattle-system
+----
+
+. *SUC*プランのPodを取得します：
++
+[,bash]
+----
+kubectl get pods -l upgrade.cattle.io/plan=<plan_name> -n cattle-system
+----
++
+[NOTE]
+====
+特定のSUCプランに対して、`Completed`と`Unknown`の両方のPodが存在する場合があります。これは想定される動作であり、一部のアップグレードの性質上発生します。
+====
+
+. Podのログを取得します：
++
+[,bash]
+----
+kubectl logs <pod_name> -n cattle-system
+----

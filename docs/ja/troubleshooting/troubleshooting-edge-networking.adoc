@@ -1,0 +1,65 @@
+[#troubleshooting-edge-networking]
+== エッジネットワークのトラブルシューティング (NMC)
+:revdate: 2025-06-17
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+NMCはSL Micro EIBイメージに注入され、combustionを介して起動時にエッジホストのネットワークを設定します。また、検査プロセスの一環としてMetal3ワークフローでも実行されます。ホストの初回起動時やMetal3検査プロセスで問題が発生することがあります。
+
+.よくある問題
+
+* *初回起動時にホストが正常に起動できない*:ネットワーク定義ファイルが不正な場合、combustionフェーズが失敗し、ホストがルートシェルをドロップすることがあります。
+* *ファイルが正しく生成されない*:ネットワークファイルが https://nmstate.io/examples.html[NMState]形式と一致していることを確認してください。
+* *ネットワークインタフェースが正しく設定されていない*:ホストで使用されているネットワークインタフェースとMACアドレスが一致していることを確認してください。
+* *ネットワークインタフェース名の不一致*:SL Microはデフォルトで https://documentation.suse.com/smart/network/html/network-interface-predictable-naming/index.html[ネットワークインターフェースの予測可能な命名スキーム]を有効にしているため、`eth0`は存在せず、代わりに`enp2s0`のような他の命名スキームが使用されます。
+
+.ログ
+
+* *Combustionログ*:nmcはCombustion時に使用されるため、プロビジョニング中のホストで`journalctl -u combustion`を使用してCombustionログを確認してください。
+ifeval::["{flavor}" == "telco"]
+* *NetworkManagerログ*:Metal^3^デプロイメントワークフローでは、nmcはIPA実行の一部であり、systemdのExecStartPre機能を使用してNetworkManagerサービスの依存関係として実行されます。`journalctl -u NetworkManager`としてIPAホスト上のNetworkManagerログを確認してください（IPAで起動したホストへのアクセス方法については、<<troubleshooting-directed-network-provisioning,ダイレクトネットワークプロビジョニングのトラブルシューティング>>セクションを参照してください）。
+endif::[]
+
+.問題の対策の手順
+
+. *yaml構文の検証*: nmc設定ファイルはyamlファイルです。`yamllint`や同様のツールを使用して適切な構文であることを確認してください。
+. *nmcの手動実行*:nmcはEIBコンテナの一部であるため、問題をデバッグするにはローカルのpodmanコマンドを使用できます。
+.. nmcファイルを保存するための一時フォルダーを作成してください。
++
+[,bash]
+----
+mkdir -p ${HOME}/tmp/foo
+----
+
+.. その場所にnmcファイルを保存してください。
++
+[,bash]
+----
+❯ tree --noreport ${HOME}/tmp/foo
+/Users/johndoe/tmp/foo
+├── host1.example.com.yaml
+└── host2.example.com.yaml
+----
+.. nmcをエントリーポイントとし、generateコマンドを指定してEIBコンテナを実行し、コンバッション時にnmcが行うのと同じタスクを実行してください：
++
+[,bash,subs="attributes"]
+----
+podman run -it --rm -v $\{HOME\}/tmp/foo:/tmp/foo:Z --entrypoint=/usr/bin/nmc registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} generate --config-dir /tmp/foo --output-dir /tmp/foo/
+
+[2025-06-04T11:58:37Z INFO  nmc::generate_conf] Generating config from "/tmp/foo/host2.example.com.yaml"...
+[2025-06-04T11:58:37Z INFO  nmc::generate_conf] Generating config from "/tmp/foo/host1.example.com.yaml"...
+[2025-06-04T11:58:37Z INFO  nmc] Successfully generated and stored network config
+----
+
+.. ログと、一時フォルダーに生成されるファイルを確認してください。
+

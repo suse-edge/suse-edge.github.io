@@ -1,0 +1,348 @@
+[#tips-metal3]
+= *Metal^3^*
+:revdate: 2026-03-06
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+:imagesdir: ../images/
+include::../edge-book/versions.adoc[]
+
+== `BareMetalHost` 选择和集群关联
+
+一旦创建了 Metalˆ3ˆ 集群对象及其相应的关联对象，就会执行一个处理来选择哪些 `BareMetalHost` 将成为集群的一部分。
+此处理使用标准的 https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/[Kubernetes 标签] 和选择器将 `BareMetalHost` 与特定的 `Metal3MachineTemplate` 连接起来。
+
+例如，每个 `BareMetalHost` 都被标记以识别其属性和预期的集群（例如，其集群角色、集群名称、位置等）：
+
+[,yaml]
+----
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode1
+  labels:
+    cluster-role: control-plane
+    cluster: foobar
+    location: madrid
+    datacenter: xyz
+<snip>
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode2
+  labels:
+    cluster-role: worker
+    cluster: foobar
+    location: madrid
+    datacenter: xyz
+<snip>
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode3
+  labels:
+    cluster-role: worker
+    cluster: foobar2
+    location: madrid
+    datacenter: xyz
+<snip>
+...
+----
+
+然后，`Metal3MachineTemplate` 对象使用 https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector[`spec.hostSelector`] 字段来匹配所需的 `BareMetalHost`。
+
+https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector-matchLabels[`matchLabels`]（用于精确的键值匹配）和 https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector-matchExpressions[`matchExpressions`]（用于更复杂的规则）均可使用：
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
+kind: Metal3MachineTemplate
+metadata:
+  name: foobar-cluster-controlplane
+  namespace: mynamespace
+spec:
+  template:
+    spec:
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+          cluster: foobar
+<snip>
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
+kind: Metal3MachineTemplate
+metadata:
+  name: foobar-cluster-worker
+  namespace: mynamespace
+spec:
+  template:
+    spec:
+      hostSelector:
+        matchExpressions:
+          - { key: cluster-role, operator: In, values: [worker] }
+          - { key: cluster, operator: In, values: [foobar] }
+<snip>
+----
+
+[NOTE]
+====
+Kubernetes 名称空间也可用于更好地组织不同的对象。
+====
+
+== 清理旧的 EFI 引导条目
+
+有时， https://en.wikipedia.org/wiki/UEFI#UEFI_booting[UEFI 引导管理器]会包含多个不再需要的旧操作系统条目（特别是对于多次重新配置的主机）。
+您可以按照以下任一程序清理这些旧条目：
+
+* 直接在 BIOS/EFI 设置界面上删除它们（具体步骤取决于硬件）。
+* 运行 UEFI https://uefi.org/sites/default/files/resources/UEFI_Shell_2_2.pdf[`bcfg`] 外壳，命令如下：
++
+[,console]
+----
+# List the entries
+bcfg boot dump -b
+# Delete entry number X
+bcfg boot rm X
+# X is the number associated the entry to remove. For example, if the entry is "Boot0002 foobar", then X is 2.
+----
+
+* 在 Linux 系统上使用 `efibootmgr`，命令如下：
++
+[,bash]
+----
+# List the entries
+efibootmgr -v
+# Delete entry number X
+efibootmgr -b X -B
+----
+
+该处理可能会在 EFI 系统分区 (ESP) 上留下孤立文件，这些文件通常位于以供应商命名的子目录下（例如 `EFI/opensuse` 或 `EFI/Microsoft`）。
+虽然这些文件通常无害，但如果它们占用了过多空间，则应将其删除，因为这可能会妨碍新操作系统或引导管理器的更新。
+删除可能需要显式挂载 ESP，在 Linux 系统上通常挂载为 `/boot/efi/EFI`。
+
+[#tips-metal3-two-secrets]
+== 使用双密钥方法的自定义网络配置
+
+当 Metal^3^ 配置裸机节点时，它会经历两个不同的阶段，每个阶段可能需要不同的网络配置：
+
+* *IPA 阶段*，即 Ironic Python Agent (IPA) 内存盘在硬件检查和配置期间运行的阶段
+* *目标操作系统阶段*，即部署的 SLE Micro 系统在首次启动后运行的阶段
+
+双密钥方法通过允许为每个阶段使用单独的网络配置密钥来解决此问题，即使用 `preprovisioningNetworkDataName` 字段进行 IPA 阶段配置，使用 `networkData` 字段进行目标操作系统阶段配置。
+当接口名称在不同阶段之间不同时，这特别有用；这种情况可能会发生，因为 IPA 内核和 SLE Micro 内核可能会以不同的名称发现相同的硬件。
+
+=== VLAN 接口重命名示例
+
+一种常见的情况是硬件获取了较长的基于 PCI 的接口名称，例如 `enp1s0np123`。
+在其之上添加 VLAN 可能会超过 Linux 内核对接口名称 *15 个字符* 的硬性限制：
+
+[,console]
+----
+enp1s0np123.100   = 15 chars  (barely fits, risky)
+enp1s0np123.3669  = 17 chars  (exceeds limit, fails)
+eth0.3669         =  9 chars  (works)
+----
+
+IPA 阶段必须引用 `enp1s0np123`（内核发现的名称），而目标操作系统应使用像 `eth0` 这样的短名称，以便 `eth0.3669` 保持在限制之内。`nmc` (nm-configurator) 通过 MAC 地址而非名称来匹配接口，从而连接这两个阶段 — 您可以声明 `name: eth0` 以及硬件 MAC 地址，`nmc` 会创建具有所需名称的 NetworkManager 控制文件，而无需考虑内核分配的名称。
+
+=== 先决条件：
+
+==== EIB 镜像设置
+
+根据 https://documentation.suse.com/suse-edge/{version-edge}/html/edge/quickstart-metal3.html#id-configuring-static-ips[静态网络配置指南]，EIB 镜像必须包含一个首次启动脚本，该脚本从 Metal^3^ 在配置期间写入的 `config-2` 分区读取网络配置。
+在 `/opt/EIB/network/configure-network.sh` 处创建以下脚本：
+
+[,bash]
+----
+#!/bin/bash
+set -eux
+
+# Source: https://documentation.suse.com/suse-edge/3.6/html/edge/quickstart-metal3.html#metal3-add-network-eib
+
+CONFIG_DRIVE=$(blkid --label config-2 || true)
+if [ -z "${CONFIG_DRIVE}" ]; then
+  echo "No config-2 device found, skipping network configuration"
+  exit 0
+fi
+
+mount -o ro $CONFIG_DRIVE /mnt
+
+NETWORK_DATA_FILE="/mnt/openstack/latest/network_data.json"
+
+if [ ! -f "${NETWORK_DATA_FILE}" ]; then
+  umount /mnt
+  echo "No network_data.json found, skipping network configuration"
+  exit 0
+fi
+
+DESIRED_HOSTNAME=$(cat /mnt/openstack/latest/meta_data.json | tr ',{}' '\n' | grep '\"metal3-name\"' | sed 's/.*\"metal3-name\": \"\(.*\)\"/\1/')
+echo "${DESIRED_HOSTNAME}" > /etc/hostname
+
+mkdir -p /tmp/nmc/{desired,generated}
+cp ${NETWORK_DATA_FILE} /tmp/nmc/desired/_all.yaml
+umount /mnt
+
+./nmc generate --config-dir /tmp/nmc/desired --output-dir /tmp/nmc/generated
+./nmc apply --config-dir /tmp/nmc/generated
+----
+
+然后使其可执行并照常构建 EIB 镜像：
+
+[,bash]
+----
+mkdir -p /opt/EIB/network
+chmod +x /opt/EIB/network/configure-network.sh
+----
+
+[NOTE]
+=== +
+EIB 会自动从 `network/` 目录中获取脚本。Combustion 会在首次启动时的 initramfs 中运行这些脚本，此时完整的操作系统尚未启动。 +
+===
+
+[NOTE]
+=== +
+该脚本还从 Metal^3^ 的 `metal3-name` 元数据字段设置节点主机名。 +
+=== +
+=== 配置两个密钥
+
+以下示例通篇使用虚拟值：数据网卡 MAC `aa:bb:cc:11:22:33`、引导网卡 MAC `aa:bb:cc:44:55:66`、节点 IP `10.0.0.10/24`、网关 `10.0.0.1`、DNS `10.0.0.53`、VLAN ID `100` 以及 BMC 地址 `10.1.0.10`。
+
+*密钥 1 — IPA 阶段* (`static-networkdata-ipa.yaml`)：引用内核分配的接口名称。此处使用 DHCP 以在硬件发现期间保持简单：
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: static-networkdata-ipa
+  namespace: default
+type: Opaque
+stringData:
+  networkData: |
+    interfaces:
+    - name: enp1s0np123
+      type: ethernet
+      state: up
+      mac-address: "aa:bb:cc:11:22:33"
+      ipv4:
+        enabled: true
+        dhcp: true
+    dns-resolver:
+      config:
+        server:
+        - 10.0.0.53
+----
+
+*密钥 2 — 目标操作系统阶段* (`static-networkdata-os.yaml`)：引用所需的短名称并声明 VLAN。使用相同的 MAC 地址，以便 `nmc` 可以匹配该接口：
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: static-networkdata-os
+  namespace: default
+type: Opaque
+stringData:
+  networkData: |
+    interfaces:
+    - name: eth0
+      type: ethernet
+      state: up
+      mac-address: "aa:bb:cc:11:22:33"
+      mtu: 1500
+      ipv4:
+        enabled: false
+        dhcp: false
+    - name: eth0.100
+      type: vlan
+      state: up
+      mtu: 1500
+      vlan:
+        base-iface: eth0
+        id: 100
+      ipv4:
+        address:
+        - ip: 10.0.0.10
+          prefix-length: 24
+        enabled: true
+        dhcp: false
+    dns-resolver:
+      config:
+        server:
+        - 10.0.0.53
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-address: 10.0.0.1
+        next-hop-interface: eth0.100
+----
+
+`BareMetalHost` 对象引用了这两个密钥：
+
+[,yaml]
+----
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: my-node
+  namespace: default
+spec:
+  online: true
+  bootMACAddress: "aa:bb:cc:44:55:66"
+  rootDeviceHints:
+    deviceName: /dev/nvme0n1
+  bmc:
+    address: redfish-virtualmedia://10.1.0.10/redfish/v1/Systems/1/
+    disableCertificateVerification: true
+    credentialsName: my-node-credentials
+  preprovisioningNetworkDataName: static-networkdata-ipa
+  networkData:
+    name: static-networkdata-os
+----
+
+[WARNING]
+====
+`preprovisioningNetworkDataName` 是一个普通字符串字段，而 `networkData` 是一个需要 `name:` 子键的 SecretReference 对象。
+两者的语法不同，这是常见的错误来源。
+====
+
+应用所有对象：
+
+[,bash]
+----
+kubectl apply -f bmc-credentials.yaml
+kubectl apply -f static-networkdata-ipa.yaml
+kubectl apply -f static-networkdata-os.yaml
+kubectl apply -f baremetalhost.yaml
+----
+
+配置完成后，通过 SSH 连接到节点并验证：
+
+[,console]
+----
+# Interface names
+ip link show
+# Expected: eth0 and eth0.100@eth0
+
+# IP on VLAN interface
+ip addr show eth0.100
+
+# NetworkManager profiles
+nmcli connection show
+
+# VLAN details
+nmcli connection show eth0.100 | grep -E '(vlan.parent|vlan.id)'
+----

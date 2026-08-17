@@ -1,0 +1,65 @@
+[#troubleshooting-edge-networking]
+== Solução de problemas de rede de borda (NMC)
+:revdate: 2025-06-17
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+O NMC é injetado em imagens SL Micro EIB para configurar a rede dos hosts de borda no momento da inicialização via combustion. Ele também está sendo executado no fluxo de trabalho Metal3 como parte do processo de inspeção. Problemas podem ocorrer quando o host está sendo inicializado pela primeira vez ou no processo de inspeção do Metal3.
+
+.Problemas comuns
+
+* *Host não consegue inicializar corretamente na primeira vez*: Arquivos de definição de rede malformados podem levar a falha na fase de combustion e, então, o host abre um shell root.
+* *Os arquivos não são gerados corretamente*: Certifique-se de que os arquivos de rede correspondam ao formato https://nmstate.io/examples.html[NMState].
+* *As interfaces de rede não estão configuradas corretamente*: Certifique-se de que os endereços MAC correspondam às interfaces sendo usadas no host.
+* *Incompatibilidade entre os nomes das interfaces*: O SL Micro habilita o https://documentation.suse.com/smart/network/html/network-interface-predictable-naming/index.html[Esquema de Nomenclatura Previsível para Interfaces de Rede] por padrão, portanto, não existe mais `eth0`, mas outros esquemas de nomenclatura, como `enp2s0`.
+
+.Registros
+
+* *Logs do combustion*: Como o NMC é usado no momento do combustion, verifique os logs do combustion com `journalctl -u combustion` no host que está sendo provisionado.
+ifeval::["{flavor}" == "telco"]
+* *Logs do NetworkManager*: No fluxo de trabalho de implantação do Metal^3^, o NMC faz parte da execução do IPA e é executado como uma dependência do serviço NetworkManager usando a funcionalidade ExecStartPre do systemd. Verifique os logs do NetworkManager no host IPA como `journalctl -u NetworkManager` (consulte a seção <<troubleshooting-directed-network-provisioning,Solução de problemas de provisionamento de rede direcionado>> para entender como acessar o host quando inicializado com o IPA).
+endif::[]
+
+.Etapas de solução de problemas
+
+. *Verifique a sintaxe yaml*: os arquivos de configuração do NMC são arquivos yaml, verifique a sintaxe correta com `yamllint` ou ferramentas similares.
+. *Execute o NMC manualmente*: Como o NMC faz parte do contêiner EIB, para depurar quaisquer problemas, um comando podman local pode ser usado.
+.. Crie uma pasta temporária para armazenar os arquivos do NMC.
++
+[,bash]
+----
+mkdir -p ${HOME}/tmp/foo
+----
+
+.. Salve os arquivos do NMC nesse local.
++
+[,bash]
+----
+❯ tree --noreport ${HOME}/tmp/foo
+/Users/johndoe/tmp/foo
+├── host1.example.com.yaml
+└── host2.example.com.yaml
+----
+.. Execute o contêiner EIB com o NMC como o ponto de entrada e o comando generate para realizar as mesmas tarefas que o NMC faria no momento do combustion:
++
+[,bash,subs="attributes"]
+----
+podman run -it --rm -v $\{HOME\}/tmp/foo:/tmp/foo:Z --entrypoint=/usr/bin/nmc registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} generate --config-dir /tmp/foo --output-dir /tmp/foo/
+
+[2025-06-04T11:58:37Z INFO  nmc::generate_conf] Generating config from "/tmp/foo/host2.example.com.yaml"...
+[2025-06-04T11:58:37Z INFO  nmc::generate_conf] Generating config from "/tmp/foo/host1.example.com.yaml"...
+[2025-06-04T11:58:37Z INFO  nmc] Successfully generated and stored network config
+----
+
+.. Observe os logs e os arquivos sendo gerados na pasta temporária.
+

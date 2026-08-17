@@ -1,0 +1,220 @@
+[#{cluster-type}-day2-upgrade-controller]
+== Upgrade Controller
+:revdate: 2025-01-16
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+[IMPORTANT]
+====
+`Upgrade Controller` 目前仅支持 *非隔离的管理* 集群的 `Day 2` 操作。
+====
+
+本节介绍了如何执行与将 `management` 集群从一个 `{product}` 平台版本升级到另一个版本相关的各种 `Day 2` 操作。
+
+`Day 2` 操作由 <<components-upgrade-controller, 升级控制器>> 自动执行，包括：
+
+* <<components-slmicro, SUSE Linux Micro>> 操作系统升级
+ifeval::["{flavor}" == "edge"]
+* <<components-rke2>> 或 <<components-k3s>> Kubernetes 升级
+endif::[]
+ifeval::["{flavor}" == "telco"]
+* <<components-rke2>> Kubernetes 升级
+endif::[]
+* SUSE 附加组件（SUSE Rancher Prime、SUSE Security 等）升级
+
+=== 先决条件
+
+在升级您的 `management` 集群之前，必须满足以下先决条件：
+
+. `SCC registered nodes` - 确保您的集群节点操作系统已使用支持您打算升级到的 `{product}` <<release-notes,版本>> 中指定的操作系统版本的订阅密钥进行注册。
+
+. `Upgrade Controller` - 确保 `Upgrade Controller` 已部署在您的 `management` 集群上。有关安装步骤，请参阅 <<components-upgrade-controller-installation>>。
+
+=== 升级
+
+. 确定您希望将 `management` 集群升级到的 `{product}` <<release-notes,版本>>。
+
+. 在 `management` 集群中，部署一个指定所需 `UpgradePlan` 的 `release version`。`UpgradePlan` 必须部署在 `Upgrade Controller` 的名称空间中。
++
+[,bash]
+----
+kubectl apply -n <upgrade_controller_namespace> -f - <<EOF
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
+metadata:
+  name: upgrade-plan-mgmt
+spec:
+  # Version retrieved from release notes
+  releaseVersion: 3.X.Y
+EOF
+----
++
+[NOTE]
+====
+在某些用例中，您可能希望对 `UpgradePlan` 进行额外配置。有关所有可能的配置，请参考 <<components-upgrade-controller-extensions-upgrade-plan>>。
+====
+
+. 将 `UpgradePlan` 部署到 `Upgrade Controller's` 名称空间将开始 `upgrade process`。
++
+[NOTE]
+====
+有关实际 `upgrade process` 的详细信息，请参考 <<components-upgrade-controller-how>>。
+
+有关如何跟踪 `upgrade process` 的信息，请参考 <<components-upgrade-controller-how-track>>。
+====
+
+=== 升级后步骤
+从最新的 `{product}` z-stream 升级到 `{previous-edge-version}` 的 `{static-edge-version}` 升级可能需要在 `Upgrade Controller` 完成升级过程后执行一些最终的手动步骤。这些步骤与从 `{product}` 版本开始将 Ingress-NGINX 替换为 Traefik 作为 `{version}` 中唯一受支持的入口控制器有关。
+
+[NOTE]
+====
+集成到 RKE2/K3s 中的 `Traefik` 入口提供程序是 `{product} {version}` 版本中唯一受支持的入口控制器，虽然仍然可以暂时将 `Ingress-NGINX` 与 `Traefik` 一起运行以支持复杂的入口迁移场景，但这仅能在 `{product}` 管理集群和/或下游集群升级到版本 `{version}` 之后，且仅在执行该迁移所需的时间内进行。
+
+RKE2 https://docs.rke2.io/reference/ingress_migration[从 Ingress NGINX 迁移到 Traefik] 指南提供了有关 `Traefik` 入口控制器取代已停用的 `Ingress-NGINX` 后可用入口迁移路径的详细信息。
+====
+
+如果刚升级的管理集群在触发升级之前未运行 `Traefik` ingress 控制器（而是运行默认的 Ingress-NGINX 控制器），则现在需要手动部署 `Traefik`。
+
+首先，我们将确保已部署的 ingress-NGINX 实例配置正确（例如，避免两个 ingress 控制器的 Pod 之间出现不必要的 hostPort 冲突）：
+
+[,shell]
+----
+kubectl apply -f - <<- EOF
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-ingress-nginx
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    controller:
+      hostPort:
+        enabled: false  # not needed when exposing through a type:LoadBalancer service
+      config:
+        use-forwarded-headers: "true"
+        enable-real-ip: "true"
+      publishService:
+        enabled: true
+      service:
+        enabled: true
+        type: LoadBalancer
+        externalTrafficPolicy: Local
+EOF
+----
+
+现在，我们可以通过安装 `Traefik` 和 `rke2-traefik-crd` Helm charts 来继续部署 `rke2-traefik`。
+[NOTE]
+====
+通过 `HelmChart` 清单部署这些 Helm chart（如下所示），以确保 `Upgrade Controller` 在未来的管理集群升级中也会负责升级这些 Helm chart。
+====
+
+[,shell]
+----
+kubectl apply -f - <<- EOF
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: rke2-traefik-crd
+  namespace: kube-system
+spec:
+  chart: rke2-traefik-crd
+  version: {rke2-traefik-crd Helm chart version}
+  repo: https://rke2-charts.rancher.io
+  bootstrap: false
+  failurePolicy: reinstall
+  backOffLimit: 20
+  targetNamespace: kube-system
+  set:
+    global.cattle.systemDefaultRegistry: registry.rancher.com
+    global.rke2DataDir: /var/lib/rancher/rke2
+    global.systemDefaultRegistry: registry.rancher.com
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: rke2-traefik
+  namespace: kube-system
+spec:
+  chart: rke2-traefik
+  version: {rke2-traefik Helm chart version}
+  repo: https://rke2-charts.rancher.io
+  bootstrap: false
+  failurePolicy: reinstall
+  backOffLimit: 20
+  targetNamespace: kube-system
+  set:
+    global.cattle.systemDefaultRegistry: registry.rancher.com
+    global.rke2DataDir: /var/lib/rancher/rke2
+    global.systemDefaultRegistry: registry.rancher.com
+  valuesContent: |-
+    ingressClass:
+      isDefaultClass: false  # if traefik deployed alongside ingress-nginx
+    ports:
+      web:
+        hostPort: null    # disallow hostPort
+        exposedPort: 80
+      websecure:
+        hostPort: null    # disallow hostPort
+        exposedPort: 443
+    service:
+      enabled: true
+      type: LoadBalancer
+      spec:
+        externalTrafficPolicy: Local
+        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+    providers:
+      kubernetesIngressNginx:  # this provider allows traefik to "understand" most of the ingress-nginx annotations
+        enabled: true
+        ingressClass: "rke2-ingress-nginx-migration"
+        controllerClass: "rke2.​cattle.​io/ingress-nginx-migration"
+EOF
+----
+
+`{rke2-traefik-crd Helm chart version}` 和 `{rke2-traefik-crd Helm chart version}` 由我们已升级到的 RKE2/K3s 版本决定。
+
+在最后一步中，我们最终创建 MetalLB 所需的对象，以通过 LoadBalancer 类型服务公开 `Traefik` 服务：
+
+[,shell]
+----
+kubectl apply -f - <<- EOF
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: ingress-ippool-traefik
+  namespace: metallb-system
+spec:
+  addresses:
+  - {EXTERNAL_IP_FOR_TRAEFIK_SERVICE}/32
+  serviceAllocation:
+    priority: 100
+    serviceSelectors:
+    - matchExpressions:
+      - {key: app.kubernetes.io/name, operator: In, values: [rke2-traefik]}
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: ingress-l2-adv-traefik
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - ingress-ippool-traefik
+EOF
+----
+
+现在 `Traefik` 和 `Ingress-NGINX` 可以并排运行，使您可以安全地将 ingress 从一个迁移到另一个。
+
+[IMPORTANT]
+====
+一旦所有 ingress 都已迁移且您不再需要 `Ingress-NGINX`，请务必卸载它并清理所有相关资源，以避免集群上出现不必要的资源消耗。
+====
