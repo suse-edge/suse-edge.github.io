@@ -1,0 +1,361 @@
+[#atip-requirements]
+= Requisitos y suposiciones
+:revdate: 2025-08-25
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+== Hardware
+
+Los requisitos de hardware para SUSE Telco Cloud son los siguientes:
+
+* **Clúster de gestión**: El clúster de gestión contiene componentes como `SUSE Linux Micro`, `RKE2`, `SUSE Rancher Prime`, `Metal^3^`, y se utiliza para gestionar varios clústeres en sentido descendente. Dependiendo del número de clústeres en sentido descendente que se vayan a gestionar, los requisitos de hardware para el servidor podrían variar.
+  ** Los requisitos mínimos para el servidor (`VM` o `bare-metal`) son:
+     *** RAM: 8 GB mínimo (recomendamos al menos 16 GB)
+     *** CPU: 2 mínimo (recomendamos al menos 4 CPU)
+
+* **Clústeres en sentido descendente**: Los clústeres en sentido descendente son los clústeres desplegados para ejecutar cargas de trabajo de telecomunicaciones. Se necesitan requisitos específicos para habilitar ciertas capacidades de telecomunicaciones como `SR-IOV`, `CPU Performance Optimization`, etc.
+  ** SR-IOV: para conectar VF (funciones virtuales) en modo de encaminamiento a CNF/VNF, la NIC debe ser compatible con SR-IOV y VT-d/AMD-Vi debe estar habilitado en el BIOS.
+  ** Procesadores: Para ejecutar cargas de trabajo de telecomunicaciones específicas, el modelo de procesador debe adaptarse para habilitar la mayoría de las funciones disponibles en esta <<atip-features,tabla>> de referencia.
+  ** Requisitos de firmware para la instalación con medios virtuales:
++
+|===
+| Hardware de servidor | Modelo de BMC | Entorno de gestión
+
+| Hardware de Dell
+| 15.ª generación
+| iDRAC9
+
+| Hardware de Supermicro
+| 01.00.25
+| Supermicro SMC - redfish
+
+| Hardware de HPE
+| 1.50
+| iLO6
+|===
+
+
+== Red
+
+Como referencia para la arquitectura de red, el siguiente diagrama muestra una arquitectura de red típica para un entorno de telecomunicaciones:
+
+image::product-atip-requirements1.png[scaledwidth=100%]
+
+La arquitectura de red se basa en los siguientes componentes:
+
+* **Red de gestión**: Esta red se utiliza para la gestión de los nodos de clúster en sentido descendente. Se utiliza para la gestión fuera de banda. Normalmente, esta red también está conectada a un conmutador de gestión independiente, pero puede conectarse al mismo conmutador de servicio mediante VLAN para aislar el tráfico.
+* **Red de plano de control**: Esta red se utiliza para la comunicación entre los nodos de clúster descendentes y los servicios que se ejecutan en ellos. Esta red también se utiliza para la comunicación entre los nodos y los servicios externos, como los servidores `DHCP` o `DNS`. En algunos casos, para entornos conectados, el conmutador/enrutador puede gestionar el tráfico a través de Internet.
+* **Otras redes**: En algunos casos, los nodos podrían estar conectados a otras redes para fines específicos.
+
+[NOTE]
+====
+Para utilizar el flujo de trabajo de aprovisionamiento de red dirigido, el clúster de gestión debe tener conectividad de red con el controlador de gestión de placa base (BMC) del servidor de clúster descendente para que la preparación y el aprovisionamiento del host puedan automatizarse.
+====
+
+== Requisitos de puerto
+
+Para funcionar correctamente, un despliegue de SUSE Telco Cloud requiere que varios puertos sean accesibles en los nodos del clúster de gestión y en los nodos del clúster de Kubernetes en sentido descendente.
+
+[NOTE]
+====
+La lista exacta depende de los componentes opcionales desplegados y de las opciones de despliegue seleccionadas (p. ej., el complemento CNI).
+====
+
+=== Nodos de gestión
+
+La siguiente tabla enumera los puertos abiertos en los nodos que ejecutan el clúster de gestión:
+
+[NOTE]
+====
+Para los puertos relacionados con el complemento CNI, véase <<cni-specific-port-requirements,Requisitos de puerto específicos de CNI>>.
+====
+
+
+.Reglas de red de entrada para nodos de gestión
+[#table-inbound-network-rules-for-management-nodes]
+|===
+| Protocolo | Puerto | Fuente | Descripción
+
+| TCP
+| 22
+| Cualquier origen que requiera acceso SSH
+| Acceso SSH a los nodos del clúster de gestión
+
+| TCP
+| 80
+| Equilibrador de carga/proxy que realiza la terminación TLS externa
+| Interfaz de usuario/API de Rancher cuando se utiliza la terminación TLS externa
+
+| TCP
+| 443
+| Cualquier origen que requiera acceso TLS a la interfaz de usuario/API de Rancher
+| Agente de Rancher, interfaz de usuario/API de Rancher
+
+| TCP
+| 2379
+| Nodos de servidor de RKE2 (clúster de gestión)
+| `etcd` Puerto de cliente
+
+| TCP
+| 2380
+| Nodos de servidor de RKE2 (clúster de gestión)
+| `etcd` Puerto de par
+
+| TCP
+| 6180
+| Cualquier BMC^(1)^ al que `Metal^3^/ironic` haya indicado previamente que extraiga una imagen de disco RAM de IPA^(2)^ de este puerto expuesto (sin TLS)
+| `Ironic` Servidor web httpd sin TLS que sirve imágenes ISO de IPA^(2)^ para el arranque basado en medios virtuales +
+ +
+ En caso de que este puerto esté habilitado, el funcionalmente equivalente pero habilitado para TLS (véase más abajo) no se abre
+
+| TCP
+| 6185
+| Cualquier BMC^(1)^ al que `Metal^3^/ironic` haya indicado previamente que extraiga una imagen de disco RAM de IPA^(2)^ de este puerto expuesto (TLS)
+| `Ironic` Servidor web habilitado para TLS que sirve imágenes ISO de IPA^(2)^ para el arranque basado en medios virtuales +
+ +
+ En caso de que este puerto esté habilitado, el funcionalmente equivalente pero sin TLS (véase más arriba) no se abre
+
+| TCP
+| 6385
+| Cualquier imagen de disco RAM de `Metal^3^/ironic` IPA^(1)^ desplegada y ejecutándose en una instancia `BareMetalHost` "inscrita"
+| API de Ironic
+
+| TCP
+| 6443
+| Cualquier nodo del clúster de gestión; cualquier cliente de Kubernetes externo (al clúster de gestión)
+| API de Kubernetes
+
+| TCP
+| 6545
+| Cualquier nodo del clúster de gestión
+| Extraer artefactos de un registro compatible con OCI (Hauler)
+
+| TCP
+| 9345
+| Nodos de servidor y agente de RKE2 (clúster de gestión)
+| API del supervisor de RKE2 para el registro de nodos (puerto abierto en todos los nodos de servidor de RKE2)
+
+| TCP
+| 10250
+| Cualquier nodo del clúster de gestión
+| `kubelet` métricas
+
+| TCP/UDP/SCTP
+| 30000-32767
+| Cualquier fuente externa (al clúster de gestión) que acceda a un servicio expuesto en la red principal a través de un `spec.type: NodePort` o `spec.type: LoadBalancer` https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types[objeto de API de servicio] 
+| Rango de puertos `NodePort` disponible
+|===
+^(1)^ BMC: Controlador de gestión de placa base +
+^(2)^ IPA: Ironic Python Agent 
+
+=== Nodos de sentido descendente
+
+En SUSE Telco Cloud, antes de que cualquier servidor en sentido descendente pase a formar parte de un clúster de Kubernetes en sentido descendente en ejecución (o ejecute por sí mismo un clúster de Kubernetes en sentido descendente de nodo único), es necesario que pase por algunos de los https://github.com/metal3-io/baremetal-operator/blob/main/docs/baremetalhost-states.md[estados de aprovisionamiento de BaremetalHost].
+
+* El controlador de gestión de placa base (BMC) de un servidor en sentido descendente recién declarado debe ser accesible a través de la red fuera de banda. Se dan instrucciones al BMC (desde el servicio ironic que se ejecuta en el clúster de gestión) sobre los pasos iniciales a seguir: 
+. Extraer y cargar la imagen de ramdisk de IPA indicada en el BMC ofrecido `virtual media`. 
+. Encienda el servidor.
+
+Se espera que los siguientes puertos estén expuestos desde el BMC (podrían diferir dependiendo del hardware exacto):
+
+.Reglas de red de entrada para controladores de gestión de placa base (BMC)
+[#table-inbound-network-rules-for-baseboard-management-controllers]
+|===
+| Protocolo | Puerto | Fuente | Descripción
+
+| TCP
+| 80
+| Conductor de Ironic (desde el clúster de gestión)
+| Acceso a la API de Redfish (HTTP)
+
+| TCP
+| 443
+| Conductor de Ironic (desde el clúster de gestión)
+| Acceso a la API de Redfish (HTTPS)
+|===
+
+* Una vez que la imagen de ramdisk IPA cargada en el BMC `virtual media` se utiliza para arrancar la imagen del servidor descendente, comienza la fase de inspección del hardware. La siguiente tabla enumera los puertos expuestos por una imagen de ramdisk IPA en ejecución:
+
+.Reglas de red de entrada para nodos descendentes - `Metal^3^/Ironic` Fase de aprovisionamiento
+[#table-inbound-network-rules-for-downstream-nodes-provisioning-phase]
+|===
+| Protocolo | Puerto | Fuente | Descripción
+
+| TCP
+| 22
+| Cualquier origen que requiera acceso SSH a la imagen de ramdisk IPA
+| Acceso SSH a un nodo de clúster descendente que está siendo inspeccionado
+
+| TCP
+| 9999
+| Conductor de Ironic (desde el clúster de gestión)
+| Comandos de Ironic hacia la imagen de ramdisk en ejecución
+|===
+
+* Una vez que el host baremetal esté correctamente aprovisionado y se haya unido a un clúster de Kubernetes en sentido descendente, expone los siguientes puertos:
+
+[NOTE]
+====
+Para los puertos relacionados con el complemento CNI, véase <<cni-specific-port-requirements,Requisitos de puerto específicos de CNI>>.
+====
+
+.Reglas de red de entrada para nodos descendentes
+[#table-inbound-network-rules-for-downstream-nodes]
+|===
+| Protocolo | Puerto | Fuente | Descripción
+
+| TCP
+| 22
+| Cualquier origen que requiera acceso SSH
+| Acceso SSH a nodos de clúster descendentes
+
+| TCP
+| 80
+| Equilibrador de carga/proxy que realiza la terminación TLS externa
+| Interfaz de usuario/API de Rancher cuando se utiliza la terminación TLS externa
+
+| TCP
+| 443
+| Cualquier origen que requiera acceso TLS a la interfaz de usuario/API de Rancher
+| Agente de Rancher, interfaz de usuario/API de Rancher
+
+| TCP
+| 2379
+| Nodos de servidor de RKE2 (clúster descendente)
+| `etcd` Puerto de cliente
+
+| TCP
+| 2380
+| Nodos de servidor de RKE2 (clúster descendente)
+| `etcd` Puerto de par
+
+| TCP
+| 6443
+| Cualquier nodo de clúster descendente; cualquier cliente de Kubernetes externo (al clúster descendente).
+| API de Kubernetes
+
+| TCP
+| 9345
+| Nodos de servidor y agente de RKE2 (clúster descendente)
+| API del supervisor de RKE2 para el registro de nodos (puerto abierto en todos los nodos de servidor de RKE2)
+
+| TCP
+| 10250
+| Cualquier nodo de clúster descendente
+| `kubelet` métricas
+
+| TCP
+| 10255
+| Cualquier nodo de clúster descendente
+| `kubelet` acceso de sólo lectura
+
+| TCP/UDP/SCTP
+| 30000-32767
+| Cualquier fuente externa (al clúster descendente) que acceda a un servicio expuesto en la red primaria a través de un `spec.type: NodePort` o `spec.type: LoadBalancer` https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types[objeto de API de servicio]
+| Rango de puertos `NodePort` disponible
+|===
+
+[#cni-specific-port-requirements]
+=== Requisitos de puerto específicos de CNI
+
+Cada variante de CNI compatible viene con su propio conjunto de requisitos de puerto. Para obtener más detalles, consulte https://docs.rke2.io/install/requirements#cni-specific-inbound-network-rules[Reglas de red de entrada específicas de CNI] en la documentación de RKE2.
+
+Cuando `cilium` se establece como el complemento CNI predeterminado/primario, el siguiente puerto TCP se expone adicionalmente cuando la carga de trabajo `cilium-operator` está configurada para exponer métricas fuera del clúster de Kubernetes en el que está desplegada. Esto garantiza que una instancia de servidor `Prometheus` externa que se ejecute fuera de ese clúster de Kubernetes aún pueda recopilar estas métricas.
+
+[NOTE]
+====
+Esta es la opción predeterminada al desplegar `cilium` a través del gráfico de Helm rke2-cilium.
+====
+
+.Reglas de red de entrada para nodos de gestión/sentido descendente: exposición de métricas externas desde `cilium-operator` habilitada
+[#table-inbound-network-rules-for-management-downstream-nodes-external-metrics-cilium-operator]
+|===
+| Protocolo | Puerto | Fuente | Descripción
+
+| TCP
+| 9963
+| Colector de métricas externo (al clúster de Kubernetes)
+| exposición de métricas de cilium-operator
+|===
+
+
+
+== Servicios (DHCP, DNS, etc.)
+
+Podrían requerirse algunos servicios externos como `DHCP`, `DNS`, etc., dependiendo del tipo de entorno donde se desplieguen:
+
+* **Entorno conectado**: En este caso, los nodos estarán conectados a Internet (mediante protocolos de enrutamiento L3) y los servicios externos serán proporcionados por el cliente.
+* **Entorno desconectado / entorno aislado**: En este caso, los nodos no tendrán conectividad IP a Internet y se requerirán servicios adicionales para replicar localmente el contenido necesario para el flujo de trabajo de aprovisionamiento de red dirigido.
+* **Servidor de archivos**: Se utiliza un servidor de archivos para almacenar las imágenes del SO que se aprovisionarán en los nodos del clúster en sentido descendente durante el flujo de trabajo de aprovisionamiento de red dirigido. El gráfico de Helm `Metal^3^` puede desplegar un servidor multimedia para almacenar las imágenes del SO; consulte la siguiente xref:metal3-media-server[sección], pero también es posible utilizar un servidor web local existente.
+
+== Deshabilitación de servicios de systemd
+
+Para cargas de trabajo de telecomunicaciones, es importante deshabilitar o configurar correctamente algunos de los servicios que se ejecutan en los nodos para evitar cualquier impacto en el rendimiento de la carga de trabajo que se ejecuta en los nodos (latencia).
+
+* `rebootmgr` es un servicio que permite configurar una estrategia de reinicio cuando el sistema tiene actualizaciones pendientes.
+Para cargas de trabajo de telecomunicaciones, es realmente importante deshabilitar o configurar correctamente el servicio `rebootmgr` para evitar el reinicio de los nodos en caso de actualizaciones programadas por el sistema, a fin de evitar cualquier impacto en los servicios que se ejecutan en los nodos.
+
+[NOTE]
+====
+Para obtener más información sobre `rebootmgr`, consulte https://github.com/SUSE/rebootmgr[el repositorio de GitHub de rebootmgr].
+====
+
+Verifique la estrategia que se está utilizando ejecutando:
+
+[,shell]
+----
+cat /etc/rebootmgr.conf
+[rebootmgr]
+window-start=03:30
+window-duration=1h30m
+strategy=best-effort
+lock-group=default
+----
+
+y puede deshabilitarla ejecutando:
+
+[,shell]
+----
+sed -i 's/strategy=best-effort/strategy=off/g' /etc/rebootmgr.conf
+----
+
+o utilizando el comando `rebootmgrctl`:
+
+[,shell]
+----
+rebootmgrctl strategy off
+----
+
+[NOTE]
+====
+Esta configuración para establecer la estrategia `rebootmgr` se puede automatizar utilizando el flujo de trabajo de aprovisionamiento de red dirigido. Para obtener más información, consulte la <<atip-automated-provisioning,documentación de aprovisionamiento automatizado>>.
+====
+
+* `transactional-update` es un servicio que permite actualizaciones automáticas controladas por el sistema. Para cargas de trabajo de telecomunicaciones, es importante deshabilitar las actualizaciones automáticas para evitar cualquier impacto en los servicios que se ejecutan en los nodos.
+
+Para deshabilitar las actualizaciones automáticas, puede ejecutar:
+
+[,shell]
+----
+systemctl --now disable transactional-update.timer
+systemctl --now disable transactional-update-cleanup.timer
+----
+
+* `fstrim` es un servicio que permite recortar los sistemas de archivos automáticamente cada semana. Para cargas de trabajo de telecomunicaciones, es importante deshabilitar el recorte automático para evitar cualquier impacto en los servicios que se ejecutan en los nodos.
+
+Para deshabilitar el recorte automático, puede ejecutar:
+
+[,shell]
+----
+systemctl --now disable fstrim.timer
+----

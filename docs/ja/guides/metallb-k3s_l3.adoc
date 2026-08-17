@@ -1,0 +1,240 @@
+[#guides-metallb-k3s-l3]
+= K3s上のMetalLB（レイヤー3モードを使用）
+:revdate: 2025-09-08
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+MetalLBは、標準的なルーティングプロトコルを使用する、ベアメタルKubernetesクラスター向けの負荷分散実装です。
+
+このガイドでは、MetalLBをレイヤー3（L3）BGPモードでデプロイする方法を説明します。
+
+== MetalLBを使用する理由
+
+MetalLBがベアメタルKubernetesクラスターでの負荷分散において魅力的な選択肢である理由はいくつかあります。
+
+. Kubernetesとのネイティブ統合:MetalLBはKubernetesとシームレスに統合されるため、使い慣れたKubernetesツールや手法を使用して簡単にデプロイおよび管理できます。
+. ベアメタル互換性:クラウドベースのロードバランサーとは異なり、MetalLBは、従来のロードバランサーが利用できない、または実現不可能なオンプレミス環境向けに特別に設計されています。
+. 複数のプロトコルをサポート:MetalLBはレイヤー2およびレイヤー3 BGP（Border Gateway Protocol）モードの両方をサポートしており、さまざまなネットワークアーキテクチャや要件に対して柔軟性を提供します。
+. 高可用性:負荷分散の役割を複数のノードに分散させることで、MetalLBはサービスの高可用性と信頼性を確保します。
+. スケーラビリティ:MetalLBは大規模なデプロイメントに対応でき、Kubernetesクラスターとともにスケーリングして、増大する需要に対応します。
+
+レイヤー2モードでは、1つのノードがローカルネットワークに対してサービスをアドバタイズする役割を担います。ネットワークの観点からは、そのマシンが複数のIPアドレスをネットワークインタフェースに割り当てられているように見えるだけです。
+
+レイヤー2モードの大きな利点はその汎用性です。特別なハードウェアや高度なルーターを必要とせず、あらゆるイーサネットネットワークで動作します。
+
+== K3s上のMetalLB（レイヤー3モードを使用）
+
+このクイックスタートでは、L3モードを使用します。
+これは、ネットワーク範囲内にBGP機能を持つ隣接ルーターが必要であることを意味します。
+
+== 前提条件
+
+* MetalLBをデプロイするK3sクラスター。
+* BGPプロトコルをサポートするネットワーク上のルーター。
+* サービス用のネットワーク範囲内にある空きIPアドレス。この例では、`192.168.10.100`です。
+
+[IMPORTANT]
+====
+このIPアドレスが割り当てられていないことを確認する必要があります。
+DHCP環境では、二重割り当てを避けるため、このアドレスはDHCPプールの一部であってはなりません。
+====
+
+== サービスIPアドレスをアドバタイズするための設定
+デフォルトでは、BGPは構成されているすべてのピアに対してサービスIPアドレスをアドバタイズします。通常ルーターであるこれらのピアは、32ビットのネットワークマスクを持つ各サービスIPアドレスのルートを受信します。この例では、FRRベースのルーターを使用します。これはクラスターと同じネットワーク上にあります。次に、MetalLBのBGP機能を使用して、そのFRRベースのルーターにサービスをアドバタイズします。
+
+== 展開
+
+{product}ソリューションの一部として公開されているMetalLB Helmチャートを使用します。
+
+[,bash,subs="attributes"]
+----
+helm install \
+  metallb oci://registry.suse.com/edge/charts/metallb \
+  --namespace metallb-system \
+  --create-namespace
+
+while ! kubectl wait --for condition=ready -n metallb-system $(kubectl get\
+ pods -n metallb-system -l app.kubernetes.io/component=controller -o name)\
+ --timeout=10s; do
+ sleep 2
+done
+----
+
+== 設定
+
+. この時点で、インストール作業は完了です。`IPAddressPool`を作成します。
+
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: bgp-pool
+  namespace: metallb-system
+  labels:
+    app: httpd
+spec:
+  addresses:
+  - 192.168.10.100/32
+  autoAssign: true
+  avoidBuggyIPs: false
+  serviceAllocation:
+    namespaces:
+    - metallb-system
+    priority: 100
+    serviceSelectors:
+    - matchExpressions:
+      - key: serviceType
+        operator: In
+        values:
+        - httpd
+EOF
+----
+
+[start=2]
+. `BGPPeer`を構成します。
+
+[NOTE]
+====
+FRRルーターのASNは1000で、私たちの`BGPPeer`は1001になります。また、FRRルーターのIPアドレスが192.168.3.140であることも確認できます。
+====
+
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta2
+kind: BGPPeer
+metadata:
+  namespace: metallb-system
+  name: mypeertest
+spec:
+  peerAddress: 192.168.3.140
+  peerASN: 1000
+  myASN: 1001
+  routerID: 4.4.4.4
+EOF
+----
+
+[start=3]
+. BGPAdvertisement (L3) を作成します。
+
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: BGPAdvertisement
+metadata:
+  name: bgpadvertisement-test
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - bgp-pool
+EOF
+----
+
+== 使用方法
+
+. サービスを含むサンプルアプリケーションを作成します。この場合、`IPAddressPool`からのIPアドレスは、そのサービスに対して`192.168.10.100`となります。
+
+[,bash]
+----
+cat <<- EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: httpd-deployment
+  namespace: metallb-system
+  labels:
+    app: httpd
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      pod-label: httpd
+  template:
+    metadata:
+      labels:
+        pod-label: httpd
+    spec:
+      containers:
+      - name: httpdcontainer
+        image: image: docker.io/library/httpd:2.4
+        ports:
+          - containerPort: 80
+            protocol: TCP
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: http-service
+  namespace: metallb-system
+  labels:
+    serviceType: httpd
+spec:
+  selector:
+    pod-label: httpd
+  type: LoadBalancer
+  ports:
+  - protocol: TCP
+    port: 8080
+    name: 8080-tcp
+    targetPort: 80
+EOF
+----
+
+
+[start=2]
+. 確認するには、FRRルーターにログインして、BGPアドバタイズによって作成されたルートを確認してください。
+
+[,console]
+----
+42178089cba5# show ip bgp all
+
+For address family: IPv4 Unicast
+BGP table version is 3, local router ID is 2.2.2.2, vrf id 0
+Default local pref 100, local AS 1000
+Status codes:  s suppressed, d damped, h history, * valid, > best, = multipath,
+               i internal, r RIB-failure, S Stale, R Removed
+Nexthop codes: @NNN nexthop's vrf id, < announce-nh-self
+Origin codes:  i - IGP, e - EGP, ? - incomplete
+RPKI validation codes: V valid, I invalid, N Not found
+
+   Network          Next Hop            Metric LocPrf Weight Path
+* i172.16.0.0/24    1.1.1.1                  0    100      0 i
+*>                  0.0.0.0                  0         32768 i
+* i172.17.0.0/24    3.3.3.3                  0    100      0 i
+*>                  0.0.0.0                  0         32768 i
+*= 192.168.10.100/32
+                    192.168.3.162                          0 1001 i
+*=                  192.168.3.163                          0 1001 i
+*>                  192.168.3.161                          0 1001 i
+
+Displayed  3 routes and 7 total paths
+kubectl get svc -n hello-kubernetes
+NAME               TYPE           CLUSTER-IP     EXTERNAL-IP      PORT(S)        AGE
+hello-kubernetes   LoadBalancer   10.43.127.75   192.168.122.11   80:31461/TCP   8s
+----
+
+[start=3]
+. このルーターがネットワークのデフォルトゲートウェイである場合は、そのネットワーク上のボックスから `curl` コマンドを実行して、httpdサンプルアプリに到達できることを確認できます。
+
+[,console]
+----
+# curl http://192.168.10.100:8080
+<html><body><h1>It works!</h1></body></html>
+#
+----
+

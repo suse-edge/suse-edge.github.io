@@ -1,0 +1,288 @@
+[#quickstart-suma]
+= SUSE Multi-Linux Manager
+:revdate: 20/05/2025
+:revnumber: 3.6
+:page-revdate: {revdate}
+
+:experimental:
+
+[WARNING]
+====
+La versión de SUSE Multi-Linux Manager incluida con {product} {version} (5.0.6) todavía no es compatible con SUSE Linux Micro 6.2. Se actualizará y recibirá soporte en futuras versiones de {product} {version}.
+====
+
+
+SUSE Multi-Linux Manager se incluye en {product} para proporcionar automatización y control con el fin de mantener SUSE Linux Micro como el sistema operativo subyacente constantemente actualizado en todos los nodos de vuestro edge deployment. También se puede utilizar para gestionar Kubernetes y las aplicaciones desplegadas en Kubernetes en vuestros edge nodes.
+
+Esta guía de inicio rápido tiene como objetivo que os familiaricéis con SUSE Multi-Linux Manager lo más rápido posible, con el objetivo de proporcionar actualizaciones del sistema operativo a vuestros edge nodes. La guía de inicio rápido no trata temas como el dimensionamiento del almacenamiento, la creación y gestión de canales de software adicionales para fines de puesta en escena, o la gestión de usuarios, grupos de sistemas y organizaciones para edge deployments más grandes. Para su uso en producción, recomendamos encarecidamente que os familiaricéis con la completa https://documentation.suse.com/suma/5.0/en/suse-manager/index.html[Documentación de SUSE Multi-Linux Manager].
+
+//For an introduction into using SUSE Multi-Linux Manager to manage the lifecycle of Kubernetes and your applications, see (((SCALABLE_EDGE_GUIDE))).
+
+Se requieren los siguientes pasos para preparar {product} para utilizar SUSE Multi-Linux Manager de forma eficaz:
+
+* Desplegad y configurad el servidor de SUSE Multi-Linux Manager.
+* Sincronizad los repositorios de paquetes de SUSE Linux Micro.
+* Cread grupos de sistemas.
+* Cread claves de activación.
+* Utilizad Edge Image Builder para preparar los medios de instalación para el registro de SUSE Multi-Linux Manager.
+
+== Desplegad el servidor de SUSE Multi-Linux Manager
+
+Si ya tenéis una instancia de SUSE Multi-Linux Manager {version-mlm} en ejecución, podéis omitir este paso.
+
+Podéis ejecutar el servidor de SUSE Multi-Linux Manager en un servidor físico dedicado, como máquina virtual en vuestro propio hardware o en la nube. Se proporcionan imágenes de máquina virtual preconfiguradas para SUSE Multi-Linux Server para las nubes públicas compatibles.
+
+En esta guía de inicio rápido utilizamos la imagen \"qcow2\" `SUSE-Manager-Server.x86_64-5.0.4-Qcow-5.0-2025-04.qcow2` para {x86-64} que podéis encontrar en https://www.suse.com/download/suse-manager/ o en el SUSE Customer Center. Esta imagen funcionará como máquina virtual en hipervisores como KVM. Comprobad siempre que existe la versión más reciente de la imagen y usadla para las nuevas instalaciones.
+
+También podéis instalar el servidor de SUSE Multi-Linux Manager en cualquiera de las otras arquitecturas de hardware compatibles. En ese caso, elegid la imagen que coincida con vuestra arquitectura de hardware.
+
+Una vez descargada la imagen, cread una máquina virtual que cumpla al menos las siguientes especificaciones mínimas de hardware:
+
+* 16 GB RAM
+* 4 núcleos físicos o virtuales
+* un dispositivo de bloques adicional que tenga al menos 100 GB
+
+Con la imagen qcow2, no es necesario instalar el sistema operativo. Podéis adjuntar directamente la imagen como vuestra partición root.
+
+¡Debéis configurar la red de modo que vuestros nodos edge puedan acceder más tarde al servidor de SUSE Multi-Linux Manager con un nombre de host que contenga el nombre de dominio completo ("FQDN")!
+
+Cuando iniciéis SUSE Multi-Linux Manager por primera vez, necesitaréis realizar una configuración inicial:
+
+* Seleccionad la distribución de vuestro teclado.
+* Aceptad el acuerdo de licencia.
+* Seleccionad vuestra zona horaria.
+* Introducid la contraseña de root para el sistema operativo.
+
+Realizad los siguientes pasos como usuario "root":
+
+Para el siguiente paso, necesitáis el código de registro de la extensión de SUSE Multi-Linux Manager que podéis encontrar en el SUSE Customer Center. El mismo código se puede utilizar para registrar tanto SUSE Linux Micro como SUSE Multi-Linux Manager:
+
+Registrad SUSE Linux Micro:
+[,shell]
+----
+transactional-update register -r <REGCODE> -e <your_email>
+----
+
+Registrad SUSE Multi-Linux Manager:
+[,shell]
+----
+transactional-update register -p SUSE-Manager-Server/5.0/x86_64 -r <REGCODE>
+----
+
+¡La cadena del producto depende de vuestra arquitectura de hardware! Por ejemplo, si utilizáis SUSE Multi-Linux Manager en un sistema Arm de 64 bits, la cadena es "SUSE-Manager-Server/5.0/aarch64".
+
+Reiniciar
+
+Actualizad el sistema:
+[,shell]
+----
+transactional-update
+----
+
+A menos que no haya habido cambios, reiniciad para aplicar las actualizaciones.
+
+SUSE Multi-Linux Manager se proporciona a través de un contenedor gestionado por Podman. El comando `mgradm` se encarga de la instalación y configuración por vosotros.
+
+[WARNING]
+====
+¡Es muy importante que vuestro servidor SUSE Multi-Linux Manager tenga el nombre de host configurado con un nombre de dominio completo ("FQDN") que los nodos edge que queréis gestionar puedan resolver correctamente en vuestra red!
+====
+
+Antes de instalar y configurar el contenedor del servidor SUSE Multi-Linux Manager, debéis preparar el dispositivo de bloques adicional que habéis añadido previamente. Para ello, necesitáis conocer el nombre que la máquina virtual ha asignado al dispositivo. Por ejemplo, si el dispositivo de bloque es `/dev/vdb`, podéis configurarlo para que se utilice para SUSE Multi-Linux Manager mediante el siguiente comando:
+
+[,shell]
+----
+mgr-storage-server /dev/vdb
+----
+
+Desplegad SUSE Multi-Linux Manager:
+[,shell]
+----
+mgradm install podman <FQDN>
+----
+
+Proporcionad la contraseña para el certificado de CA. Esta contraseña debe ser diferente de vuestras contraseñas de inicio de sesión. Normalmente no la necesitaréis introducir más tarde, pero debéis anotarla.
+
+Proporcionad la contraseña para el usuario "admin". Este es el usuario inicial para iniciar sesión en SUSE Multi-Linux Manager. Podéis crear usuarios adicionales con derechos completos o restringidos más tarde.
+
+== Configurad SUSE Multi-Linux Manager
+
+Una vez finalizado el despliegue, podéis iniciar sesión en la interfaz web de SUSE Multi-Linux Manager utilizando el nombre de host que proporcionasteis anteriormente. El usuario inicial es "admin". Utilizad la contraseña que proporcionasteis en el paso anterior.
+
+Para el siguiente paso necesitáis vuestras credenciales de organización que podéis encontrar en la segunda subpestaña de la pestaña «Users» de vuestra organización en SUSE Customer Center. Con esas credenciales, SUSE Multi-Linux Manager puede sincronizar todos los productos para los que tenéis suscripciones.
+
+Seleccione `Admin > Setup Wizard`.
+
+En la pestaña `Organization Credentials` cread una nueva credencial con vuestro `Username` y `Password` que encontrasteis en el SUSE Customer Center.
+
+Abrid la siguiente pestaña `SUSE Products`. Debéis esperar hasta que la primera sincronización de datos con SUSE Customer Center haya finalizado.
+
+Una vez que la lista esté rellena, utilizad el filtro para mostrar solo «Micro {version-operatingsystem}».
+Marcad la casilla de SUSE Linux Micro {version-operatingsystem} para la arquitectura de hardware en la que se ejecutarán vuestros nodos edge (`x86_64` o `aarch64`).
+
+Haga clic en `Add Products`. Esto añadirá el repositorio de paquetes principal («canal») para SUSE Linux Micro y añadirá automáticamente el canal para las herramientas de cliente de SUSE Manager como subcanal.
+
+Dependiendo de vuestra conexión a Internet, la primera sincronización tardará un tiempo. Ya podéis empezar con los pasos siguientes:
+
+En `Systems > System Groups` cread al menos un grupo al que vuestros sistemas se unirán automáticamente cuando se incorporen. Los grupos son una forma importante de categorizar sistemas, por lo que podéis aplicar configuración o acciones a todo un conjunto de sistemas a la vez. Son conceptualmente similares a las etiquetas en Kubernetes.
+
+Haga clic en `+ Create Group`
+
+Proporcionad un nombre corto, p. ej., «Edge Nodes», y una descripción larga.
+
+En `Systems > Activation Keys` cread al menos una clave de activación. Las claves de activación pueden considerarse como un perfil de configuración que se aplica automáticamente a los sistemas cuando se incorporan a SUSE Multi-Linux Manager. Si queréis que ciertos nodos edge se añadan a grupos diferentes o utilicen una configuración distinta, podéis crear claves de activación independientes para ellos y utilizarlas más adelante en Edge Image Builder para crear medios de instalación personalizados.
+
+Un caso de uso avanzado típico para las claves de activación sería asignar vuestros clústeres de prueba a los canales de software con las actualizaciones más recientes y vuestros clústeres de producción a canales de software que solo reciban esas actualizaciones más recientes una vez que las hayáis probado en el clúster de prueba.
+
+Haga clic en `+ Create Key`
+
+Elegid una descripción corta, p. ej., «Edge Nodes».
+Proporcionad un nombre único que identifique la clave, p. ej., «edge-x86_64» para vuestros nodos edge con arquitectura de hardware {x86-64}.
+Se añade automáticamente un prefijo numérico a la clave. Para la organización predeterminada, el número es siempre «1». Si creáis organizaciones adicionales en SUSE Multi-Linux Manager y creáis claves para ellas, ese número puede diferir.
+
+Si no habéis creado ningún canal de software clonado, podéis mantener el ajuste del Canal base en «SUSE Manager Default». Esto asignará automáticamente el repositorio de actualizaciones de SUSE correcto para vuestros nodos edge.
+
+Como «Canal secundario», seleccionad el control deslizante «incluir recomendado» para la arquitectura de hardware para la que se utiliza vuestra clave de activación. Esto añadirá el canal «SUSE-Manager-Tools-For-SL-Micro-{version-operatingsystem}».
+
+En la pestaña «Grupos», añadid el grupo que habéis creado anteriormente. Todos los nodos que se incorporen utilizando esta clave de activación se añadirán automáticamente a ese grupo.
+
+== Cread una imagen de instalación personalizada con Edge Image Builder
+
+Para utilizar Edge Image Builder, solo necesitáis un entorno donde podáis iniciar un contenedor basado en Linux con podman.
+
+Para una configuración de laboratorio mínima, podemos utilizar de hecho la misma máquina virtual en la que se ejecuta el servidor de SUSE Multi-Linux Manager. ¡Aseguraos de que tenéis suficiente espacio en disco en la máquina virtual! Esta no es una configuración recomendada para su uso en producción. Consultad <<id-prerequisites-2>> para conocer los sistemas operativos anfitriones con los que hemos probado Edge Image Builder.
+
+Iniciad sesión en vuestro anfitrión del servidor de SUSE Multi-Linux Manager como root.
+
+Descargad el contenedor de Edge Image Builder:
+[,shell,subs="attributes"]
+----
+podman pull registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib}
+----
+
+Cread el directorio `/opt/eib` y un subdirectorio `base-images`:
+[,shell]
+----
+mkdir -p /opt/eib/base-images
+----
+
+En esta guía de inicio rápido utilizamos la variante «self-install» de la imagen de SUSE Linux Micro. Esa imagen puede grabarse posteriormente en una memoria USB física que podéis utilizar para realizar la instalación en servidores físicos. Si vuestro servidor tiene la opción de conexión remota de ISO de instalación a través de un BMC (Baseboard Management Controller), también podéis utilizar ese enfoque. Por último, esa imagen también puede utilizarse con la mayoría de las herramientas de virtualización.
+
+Si queréis precargar la imagen directamente en un nodo físico o iniciarla directamente desde una máquina virtual, también podéis utilizar la variante de imagen «raw».
+
+Podéis encontrar esas imágenes en el SUSE Customer Center o en https://www.suse.com/download/sle-micro/
+
+Descargad o copiad la imagen `{micro-default-image-iso}` en el directorio `base-images` y llamadla «slemicro.iso».
+
+La creación de imágenes {aarch64} en un host de compilación basado en la familia de arquitecturas ARM es una vista previa tecnológica en {product} {version-edge}. Lo más probable es que funcione, pero aún no es compatible. Si queréis probarlo, debéis ejecutar Podman en una máquina Arm de 64 bits y debéis sustituir «x86_64» en todos los ejemplos y fragmentos de código por «aarch64».
+
+En `/opt/eib`, cread un archivo llamado `iso-definition.yaml`. Esta es vuestra definición de compilación para Edge Image Builder.
+
+Aquí tenéis un ejemplo sencillo que instala SL Micro {version-operatingsystem}, establece una contraseña de root, un usuario adicional y el mapa de teclas, inicia la interfaz gráfica de usuario Cockpit y registra vuestro nodo en SUSE Multi-Linux Manager:
+
+[,yaml]
+----
+apiVersion: 1.3
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+  - username: root
+    createHomeDir: true
+    encryptedPassword: $6$aaBTHyqDRUMY1HAp$pmBY7.qLtoVlCGj32XR/Ogei4cngc3f4OX7fwBD/gw7HWyuNBOKYbBWnJ4pvrYwH2WUtJLKMbinVtBhMDHQIY0
+  - username: admin
+    createHomeDir: true
+    encryptedPassword: $6$8EGZXU1iFcLiHHxk$Hs3nVtzO.yZhApT.YBHaNvLRZvXG3Iv/km92BtiNiGXhSSUG0ZbNHxlm7c//ROFj3W9M5xIkB.RLQpPKOFxP91
+  keymap: de
+  systemd:
+    enable:
+      - cockpit.socket
+  packages:
+    noGPGCheck: true
+  suma:
+    host: ${fully qualified hostname of your SUSE Multi-Linux Manager Server}
+    activationKey: 1-edge-x86_64
+----
+
+Edge Image Builder también puede configurar la red, instalar automáticamente Kubernetes en el nodo e incluso desplegar aplicaciones mediante charts de Helm. Consultad <<quickstart-eib>> para ver ejemplos más completos.
+
+Para `baseImage`, especificad el nombre real de la ISO en el directorio `base-images` que queráis utilizar.
+
+En este ejemplo, la contraseña de root sería «root». Consultad <<id-configuring-os-users>> para crear hashes de contraseña para la contraseña segura que queráis utilizar.
+
+Como Cockpit prohíbe la conexión como usuario root, es necesario un usuario adicional. En este ejemplo, ese usuario es «admin» con la contraseña «admin».
+
+Estableced el mapa de teclas en la distribución de teclado real que queráis que tenga el sistema después de la instalación.
+
+[NOTE]
+====
+Usamos la opción `noGPGCheck: true` porque no vamos a proporcionar una clave GPG para comprobar los paquetes RPM. En la {link-eib-installing-packages}[guía de instalación de paquetes upstream] podéis encontrar una guía completa con una configuración más segura que recomendamos para su uso en producción.
+====
+
+Como se ha mencionado varias veces, vuestro host de SUSE Multi-Linux Manager requiere un nombre de host totalmente cualificado que pueda resolverse en la red en la que arrancarán vuestros nodos edge.
+
+El valor para `activationKey` debe coincidir con la clave que creasteis en SUSE Multi-Linux Manager. 
+
+Para crear una imagen de instalación que registre automáticamente vuestros nodos edge en SUSE Multi-Linux Manager tras la instalación, también debéis preparar dos artefactos:
+
+* el paquete Salt minion que instala el agente de gestión para SUSE Multi-Linux Manager
+* el certificado de CA de vuestro servidor de SUSE Multi-Linux Manager
+
+=== Descargad el paquete venv-salt-minion
+
+En `/opt/eib`, cread un subdirectorio `rpms`.
+
+Descargad el paquete `venv-salt-minion` desde vuestro servidor de SUSE Multi-Linux Manager en ese directorio. Podéis obtenerlo a través de la interfaz web buscando el paquete en `Software > Channel List` y descargándolo desde el canal SUSE-Manager-Tools ... o descargarlo desde el «repositorio de arranque» de SUSE Multi-Linux Manager con una herramienta como curl:
+
+[,shell]
+----
+curl -O http://${HOSTNAME_OF_SUSE_MANAGER}/pub/repositories/slmicro/6/1/bootstrap/x86_64/venv-salt-minion-3006.0-8.1.x86_64.rpm
+----
+El nombre real del paquete puede variar si ya se ha publicado una versión más reciente. Si hay varios paquetes para elegir, elegid siempre el más reciente.
+
+Para solucionar un problema documentado en las https://www.suse.com/releasenotes/x86_64/multi-linux-manager/5.1/index.html#_bootstrapping_sl_micro_6_1_clients[notas de la versión] de SUSE Multi-Linux Manager, también debéis colocar la última versión del paquete de la clave de compilación en el directorio `rpms` (`suse-build-key-12.0-slfo.1.1_3.1.noarch.rpm` en el momento en que se creó esta documentación). Podéis encontrarlo en la sección `Software` de SUSE Multi-Linux Manager a través de la pestaña `Packages` del canal Pool de SL Micro. Hay un botón `Download` en la vista `Details`.
+
+== Descargad el certificado de CA de SUSE Multi-Linux Manager
+
+En `/opt/eib`, cread un subdirectorio `certificates`
+
+Descargad el certificado de CA desde SUSE Multi-Linux Manager en ese directorio:
+
+[,shell]
+----
+curl -O http://${HOSTNAME_OF_SUSE_MANAGER}/pub/RHN-ORG-TRUSTED-SSL-CERT
+----
+
+[WARNING]
+====
+Debéis renombrar el certificado a `RHN-ORG-TRUSTED-SSL-CERT.crt`. Edge Image Builder se asegurará entonces de que el certificado esté instalado y activado en el nodo edge durante la instalación.
+====
+
+Ahora podéis ejecutar Edge Image Builder:
+
+[,bash,subs="attributes"]
+----
+cd /opt/eib
+podman run --rm -it --privileged -v /opt/eib:/eib \
+registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+build --definition-file iso-definition.yaml
+----
+
+Si habéis utilizado un nombre diferente para vuestro archivo de definición YAML o queréis utilizar una versión diferente de Edge Image Builder, debéis adaptar el comando en consecuencia.
+
+Una vez finalizada la compilación, encontraréis la ISO de instalación en el directorio `/opt/eib` como `eib-image.iso`.
+
+Esa imagen puede utilizarse ahora para desplegar nodos que intentarán registrarse en SUSE Multi-Linux Manager.
+
+Una vez que el nodo se haya instalado por completo, veréis su clave en la lista como `pending` en la sección `Salt/Keys` de SUSE Multi-Linux Manager. Una vez que haya aceptado la clave, el nodo se incorporará automáticamente a SUSE Multi-Linux Manager y aparecerá en la lista `Systems` después de que finalice ese proceso. Tendrá asignado el grupo o grupos del sistema que hayáis proporcionado en la clave de activación.
+
+Deberéis programar un reinicio antes de aplicar cualquier configuración adicional.
+
+Tened en cuenta que la aceptación de la clave puede automatizarse por completo mediante listas de permitidos, tal como se describe https://docs.saltproject.io/en/latest/topics/tutorials/autoaccept_grains.html[aquí].
+
+
+
+

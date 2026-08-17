@@ -1,0 +1,240 @@
+[#guides-metallb-k3s-l3]
+= K3s 上的 MetalLB（使用层 3 模式）
+:revdate: 2025-09-08
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+MetalLB 是一个用于裸机 Kubernetes 集群的负载均衡器实现，它使用标准路由协议。
+
+在本指南中，我们将演示如何以第 3 层 (L3) BGP 模式部署 MetalLB。
+
+== 为什么要使用 MetalLB
+
+MetalLB 是裸机 Kubernetes 集群中负载均衡的理想选择，原因如下：
+
+. 与 Kubernetes 的原生集成：MetalLB 与 Kubernetes 无缝集成，使用户能够轻松地利用熟悉的 Kubernetes 工具和实践进行部署和管理。
+. 裸机兼容性：与基于云的负载均衡器不同，MetalLB 专为无法使用或不适合使用传统负载均衡器的本地部署而设计。
+. 支持多个协议：MetalLB 支持第 2 层和第 3 层 BGP（边界网关协议）模式，为不同的网络架构和需求提供了灵活性。
+. 高可用性：通过在多个节点间分配负载平衡职责，MetalLB 可确保服务的高可用性和可靠性。
+. 可伸缩性：MetalLB 可以处理大规模部署，并随 Kubernetes 集群一起扩展以满足不断增长的需求。
+
+在第 2 层模式下，一个节点承担向本地网络通告服务的职责。从网络的角度来看，这看起来就像该机器的网络接口分配了多个 IP 地址。
+
+第 2 层模式的主要优势在于其通用性：它适用于任何以太网，无需特殊硬件，甚至不需要花哨的路由器。
+
+== K3s 上的 MetalLB（使用 L3）
+
+在本快速入门中，使用了 L3 模式。
+这意味着我们需要在网络范围内拥有具备 BGP 功能的相邻路由器。
+
+== 先决条件
+
+* 一个将要部署 MetalLB 的 K3s 集群。
+* 网络中支持 BGP 协议的路由器。
+* 网络范围内用于该服务的空闲 IP 地址。在此示例中\n  `192.168.10.100`
+
+[IMPORTANT]
+====
+您必须确保此 IP 地址未被分配。
+在 DHCP 环境中，此地址不得属于 DHCP 地址池，以避免双重分配。
+====
+
+== 通告服务 IP 地址的配置
+开箱即用，BGP 会将服务 IP 地址通告给所有已配置的对等体。这些通常为路由器的对等体将接收每个带有 32 位网络掩码的服务 IP 地址的路由。在此示例中，我们将使用基于 FRR 的路由器，它与我们的集群位于同一网络上。然后，我们将使用 MetalLB 的 BGP 功能向该基于 FRR 的路由器通告服务。
+
+== 部署
+
+我们将使用作为 {product} 解决方案一部分发布的 MetalLB Helm chart：
+
+[,bash,subs="attributes"]
+----
+helm install \
+  metallb oci://registry.suse.com/edge/charts/metallb \
+  --namespace metallb-system \
+  --create-namespace
+
+while ! kubectl wait --for condition=ready -n metallb-system $(kubectl get\
+ pods -n metallb-system -l app.kubernetes.io/component=controller -o name)\
+ --timeout=10s; do
+ sleep 2
+done
+----
+
+== 配置
+
+. 此时，安装已完成。创建一个 `IPAddressPool`：
+
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: bgp-pool
+  namespace: metallb-system
+  labels:
+    app: httpd
+spec:
+  addresses:
+  - 192.168.10.100/32
+  autoAssign: true
+  avoidBuggyIPs: false
+  serviceAllocation:
+    namespaces:
+    - metallb-system
+    priority: 100
+    serviceSelectors:
+    - matchExpressions:
+      - key: serviceType
+        operator: In
+        values:
+        - httpd
+EOF
+----
+
+[start=2]
+. 配置一个 `BGPPeer`。
+
+[NOTE]
+====
+FRR 路由器的 ASN 为 1000，而我们的 `BGPPeer` 将为 1001。我们还可以看到 FRR 路由器的 IP 地址为 192.168.3.140。
+====
+
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta2
+kind: BGPPeer
+metadata:
+  namespace: metallb-system
+  name: mypeertest
+spec:
+  peerAddress: 192.168.3.140
+  peerASN: 1000
+  myASN: 1001
+  routerID: 4.4.4.4
+EOF
+----
+
+[start=3]
+. 创建 BGPAdvertisement (L3)：
+
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: BGPAdvertisement
+metadata:
+  name: bgpadvertisement-test
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - bgp-pool
+EOF
+----
+
+== 用法
+
+. 创建一个带有服务的示例应用程序。在此情况下，该服务的 `IPAddressPool` 中的 IP 地址为 `192.168.10.100`。
+
+[,bash]
+----
+cat <<- EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: httpd-deployment
+  namespace: metallb-system
+  labels:
+    app: httpd
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      pod-label: httpd
+  template:
+    metadata:
+      labels:
+        pod-label: httpd
+    spec:
+      containers:
+      - name: httpdcontainer
+        image: image: docker.io/library/httpd:2.4
+        ports:
+          - containerPort: 80
+            protocol: TCP
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: http-service
+  namespace: metallb-system
+  labels:
+    serviceType: httpd
+spec:
+  selector:
+    pod-label: httpd
+  type: LoadBalancer
+  ports:
+  - protocol: TCP
+    port: 8080
+    name: 8080-tcp
+    targetPort: 80
+EOF
+----
+
+
+[start=2]
+. 若要验证，请登录 FRR 路由器以查看通过 BGP 通告创建的路由。
+
+[,console]
+----
+42178089cba5# show ip bgp all
+
+For address family: IPv4 Unicast
+BGP table version is 3, local router ID is 2.2.2.2, vrf id 0
+Default local pref 100, local AS 1000
+Status codes:  s suppressed, d damped, h history, * valid, > best, = multipath,
+               i internal, r RIB-failure, S Stale, R Removed
+Nexthop codes: @NNN nexthop's vrf id, < announce-nh-self
+Origin codes:  i - IGP, e - EGP, ? - incomplete
+RPKI validation codes: V valid, I invalid, N Not found
+
+   Network          Next Hop            Metric LocPrf Weight Path
+* i172.16.0.0/24    1.1.1.1                  0    100      0 i
+*>                  0.0.0.0                  0         32768 i
+* i172.17.0.0/24    3.3.3.3                  0    100      0 i
+*>                  0.0.0.0                  0         32768 i
+*= 192.168.10.100/32
+                    192.168.3.162                          0 1001 i
+*=                  192.168.3.163                          0 1001 i
+*>                  192.168.3.161                          0 1001 i
+
+Displayed  3 routes and 7 total paths
+kubectl get svc -n hello-kubernetes
+NAME               TYPE           CLUSTER-IP     EXTERNAL-IP      PORT(S)        AGE
+hello-kubernetes   LoadBalancer   10.43.127.75   192.168.122.11   80:31461/TCP   8s
+----
+
+[start=3]
+. 如果此路由器是您网络的默认网关，您可以从该网络上的主机运行 `curl` 命令，以验证它们是否可以访问 httpd 示例应用程序。
+
+[,console]
+----
+# curl http://192.168.10.100:8080
+<html><body><h1>It works!</h1></body></html>
+#
+----
+

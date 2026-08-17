@@ -1,0 +1,255 @@
+= SUSE EdgeエンジニアリングのGitHubワークフロー:ベストプラクティス
+:revdate: 2025-07-29
+:revnumber: 3.6
+:page-revdate: {revdate}
+
+GitやGitHubのワークフローの使い方（ハウツー）、PR/MRの作成方法、特定のブランチへのコミットのチェリーピック方法など、さまざまな方法があります。
+
+本書では、SUSE Edgeエンジニアリングチームがどのように作業を進めているかを説明します。
+
+== ユーザー名とメールアドレスを設定する
+
+[,shell]
+----
+$ git config --global user.name "FIRST_NAME LAST_NAME"
+$ git config --global user.email "MY_NAME@example.com"
+----
+
+これは、`--global`フラグなしでリポジトリごとに個別に行うことができます。
+
+== リポジトリをフォークする
+
+理想的には、suse-edge/リポジトリのブランチに変更を直接プッシュするのではなく、GitHub UI上でリポジトリをフォークし、そこで_作業を行う_のが望ましいです。
+
+[NOTE]
+====
+フォークの名前は、希望であれば別の名前にしても構いません。
+====
+
+== origin/upstreamを適切に設定する
+
+リポジトリをフォークしたら、ワークステーションにクローンし、origin/upstreamリモートを設定します:
+
+* リポジトリをクローンする
+
+[,shell]
+----
+$ git clone git@github.com:e-minguez/suse-edge-charts.git
+----
+
+これにより、「origin」リモートが作成されます:
+
+[,shell]
+----
+$ git remote -v
+origin  git@github.com:e-minguez/suse-edge-charts.git (fetch)
+origin  git@github.com:e-minguez/suse-edge-charts.git (push)
+----
+
+* アップストリームリポジトリを追加する
+
+[,shell]
+----
+$ git remote add upstream git@github.com:suse-edge/charts.git
+----
+
+オプションとして、誤ってプッシュしないようにプッシュURLを無効にすることもできます:
+
+[,shell]
+----
+$ git remote set-url --push upstream ""
+----
+
+このようになります。
+
+[,shell]
+----
+$ git remote -v
+origin  git@github.com:e-minguez/suse-edge-charts.git (fetch)
+origin  git@github.com:e-minguez/suse-edge-charts.git (push)
+upstream        git@github.com:suse-edge/charts.git (fetch)
+upstream         (push)
+----
+
+== コミットに署名する
+
+一部のリポジトリでは、リポジトリ/プロジェクトのルールとライセンスを読み、同意したことを承認するために、コミットへの署名（sign-off）が求められます。
+
+変更をコミットする際は、コミットコマンドに`-s`または`--signoff`フラグを次のように追加してください:
+
+[,shell]
+----
+$ git commit --signoff --message 'This is my commit message'
+----
+
+signed-off-by行が不足しているコミットを作成してしまった場合は、コミットを修正できます:
+
+[,shell]
+----
+git commit --amend --signoff
+----
+
+変更をすでにGitHubにプッシュしている場合は、この後に`git push -f`を使用してブランチを強制プッシュする必要があります。
+
+== コミット署名の検証
+
+コミットに署名することで、自分が行った変更の出所について他の人に信頼を与えることができます。コミットまたはタグに暗号的に検証可能なGPG、SSH、またはS/MIME署名がある場合、GitHubはそのコミットまたはタグを「Verified（検証済み）」または「Partially verified（部分的に検証済み）」とマークします。
+
+このプロセスには、GPGキーの生成、またはSSHキーやX.509キーの使用が含まれます。設定方法の詳細については、 https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification[GitHub]のドキュメントを参照してください。
+
+== メインブランチを同期状態に保ちます
+
+特定のブランチで作業していて、アップストリームリポジトリのメインブランチから最新の更新を取得したい場合：
+
+[,shell]
+----
+$ git switch main
+$ git pull --rebase upstream/main
+----
+
+== 機能/修正/その他の作業を行うためのブランチを作成します
+
+[,shell]
+----
+$ git switch main
+$ git pull --rebase upstream/main
+$ git checkout -b myawesomebranch
+----
+
+これにより、メインブランチの内容を含む新しいブランチがローカルに作成されます。
+
+== ローカルブランチからGitHubへ変更をプッシュします
+
+[,shell]
+----
+$ git add <files>
+$ git commit -av
+# Review the changes, add a meaningful commit message and save it
+$ git push origin/myawesomebranch
+----
+
+== PRを作成します
+
+上記のgit pushメッセージの後に、GitHubのURLが表示されます。そのURLにアクセスしてPRを作成してください。内容、ブランチ、送信元/送信先のリポジトリ、および変更リストを再確認してください。
+
+== ブランチをリベースします
+
+アップストリームリポジトリのメインブランチの内容が変更されることがあります。メインブランチを更新し、作業中のブランチをリベースする必要があります。
+
+[,shell]
+----
+$ git pull --rebase upstream/main
+$ git push --force-with-lease
+----
+
+____
+`--force-with-lease`で問題が発生する可能性があります。
+____
+
+== コミットをチェリーピックします
+
+例えばメインブランチなどにマージされたものを別のブランチ（例えばrelease-3.3）にチェリーピックしたい場合、手順は以下の通りです。
+
+* すべてのブランチを取得します。
+
+----
+$ git fetch --all
+----
+
+* チェリーピックするコミットIDを取得します（メインブランチから）。
+
+----
+$ git log main --oneline
+----
+
+または
+
+----
+$ git log main --graph --oneline --all
+----
+
+* チェリーピック処理の着陸先となるブランチを作成します。
+
+----
+$ git checkout -b cherry-pick-of-fix-293 upstream/release-3.3
+----
+
+* コミットをチェリーピックします。
+
+----
+$ git cherry-pick -x <commit-id(s)>
+----
+
+出力を確認し、競合があるかどうかを確認します。競合がある場合は、頑張って修正してください！ :)
+
+* 念のためgitログを確認します。
+
+----
+$ git log
+----
+
+* 変更をプッシュします。
+
+----
+$ git push origin cherry-pick-of-fix-293
+----
+
+* PRを作成します。
+
+上記のgit pushメッセージの後に、GitHubのURLが表示されます。そのURLにアクセスしてPRを作成してください。内容、ブランチ、送信元/送信先のリポジトリ、および変更リストを再確認してください。
+
+== PRからのフィードバックを反映します。
+
+多くの場合、プルリクエストにはいくつかの変更が必要になります。そのようなフィードバックを反映させるにはいくつかの方法がありますが、一般的にはローカルでコミットを修正し、フィードバックを反映させてプッシュすることが推奨されます。
+
+* PRブランチにいることを確認します。
+
+----
+$ git branch
+$ git status
+----
+
+* 必要なファイルに変更を加え、それらのファイルをステージングに追加します。
+
+----
+$ git add path/to/my/file
+----
+
+メッセージを変更せずに最後のコミットに変更を追加したい場合：
+
+----
+$ git commit --amend --no-edit
+----
+
+次に、ブランチを強制プッシュします（下記を参照）。
+
+フィードバックに対応する複数の小さなコミットを1つのきれいなコミットにまとめたい場合、またはそれらをPR内の以前のコミットと結合したい場合：
+
+* スカッシュ/リワードしたいコミットの数（例：N）を数えます。
+
+----
+$ git log --oneliner
+----
+
+次のように動作します。
+
+----
+$ git rebase -i HEAD~N
+----
+
+これによりエディタが開き、コミットのスカッシュ、フィックスアップ、リワードなどを行うことができます。
+
+* エディタを保存して閉じます。
+
+* ブランチを強制プッシュしてください。リモートブランチがローカルブランチと異なるため、_強制_する必要があります：
+
+----
+$ git push --force-with-lease origin myawesomebranch
+----
+
+[NOTE]
+====
+詳細については、 https://git-scm.com/book/en/v2/Git-Tools-Rewriting-History[Gitの公式ドキュメント]を参照してください。
+
+Githubのイシューを修正しようとしている場合は、コミットメッセージに「Closes #XXX」または「Fixes #XXX」を追加して、PRをイシューにリンクすることを忘れないでください。この機能の詳細については、 https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue#linking-a-pull-request-to-an-issue-using-a-keyword[キーワードを使用してプルリクエストをイシューにリンクする]を参照してください。
+====

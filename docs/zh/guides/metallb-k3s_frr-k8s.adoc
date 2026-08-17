@@ -1,0 +1,142 @@
+[#guides-metallb-k3s-frr-k8s]
+= K3s 上的 MetalLB（使用 FRR-K8s 模式）
+:revdate: 2026-05-04
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+MetalLB 是一种用于裸机 Kubernetes 集群的负载均衡器实现，它使用标准路由协议。
+
+在本指南中，我们将演示如何在第3层 FRR-K8s BGP 模式下部署 MetalLB。
+
+== K3s 上的 MetalLB（使用 FRR-K8s）
+[NOTE]
+====
+FRR-K8s 目前是一项技术预览功能。FRR-K8s 的社区文档位于 https://github.com/metallb/frr-k8s/[此处]。
+====
+
+在本快速入门中，使用了 FRR-K8s 模式。
+
+== 先决条件
+
+* FRR-K8s 的所有先决条件与 <<guides-metallb-k3s-l3>> 相同，除了需要一个空闲的 IP 地址。
++
+[NOTE]
+====
+此处的示例不包含服务设置，因此不需要 IP 地址。
+====
+
+* 一个即将部署 MetalLB 的 K3s 集群。
+* 网络中支持 BGP 协议的路由器。
+
+
+== 接收传入路由的配置
+开箱即用的 MetalLB BGP 会向所有已配置的 BGP 对等体通告服务 IP 地址。这些对等体通常为路由器，会接收到每个服务 IP 地址及其 32 位网络掩码对应的路由。当将 FRR-K8s 与 FRRConfiguration CR 一起使用时，也可以从外部路由器接收路由。这些外部路由将显示在每个节点的路由表中。这样做有多种好处，但主要好处是消除了在外部网络发生变化时手动更新节点上 Linux 路由表的需要，特别是在希望避免通过默认网关发送流量的情况下。
+
+== 部署
+
+我们将使用作为 SUSE Edge 解决方案一部分发布的 MetalLB Helm chart。请注意，FRR-K8s 是 MetalLB 的子 chart，要启用它，请将 `frrk8s.enabled` 设置为 `true`。FRR-K8s 还需要命名空间上的一些提升权限。
+
+[,bash,subs="attributes"]
+----
+kubectl create namespace metallb-system
+kubectl label namespace metallb-system pod-security.kubernetes.io/enforce=privileged
+kubectl label namespace metallb-system pod-security.kubernetes.io/audit=privileged
+kubectl label namespace metallb-system pod-security.kubernetes.io/warn=privileged
+helm install metallb \
+  oci://registry.suse.com/edge/charts/metallb \
+  --namespace metallb-system \
+  --set frrk8s.enabled=true --set frrk8s.external=false
+
+
+while ! kubectl wait --for condition=ready -n metallb-system $(kubectl get\
+ pods -n metallb-system -l app.kubernetes.io/component=controller -o name)\
+ --timeout=10s; do
+ sleep 2
+done
+----
+
+验证您在 `metallb-system` 命名空间中是否有 4 个 pod，并且它们都运行正常：
+
+[,bash,subs="attributes"]
+----
+k get pods -n metallb-system
+NAME                                                      READY   STATUS    RESTARTS     AGE
+metallb-controller-7fbfd8977d-m2q9t                       1/1     Running   0            46s
+metallb-metallb-frr-k8s-9w7wl                             6/6     Running   0            46s
+metallb-metallb-frr-k8s-webhook-server-5d9d67ffd6-8jqnc   1/1     Running   1 (6s ago)   46s
+metallb-speaker-qx8bl                                     1/1     Running   0            46s
+----
+至此，MetalLB 和 FRR-K8s 的安装已完成。
+
+== 配置
+
+. 为 FRR-K8s 创建一个 `FRRConfiguration`：
++
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: frrk8s.metallb.io/v1beta1
+kind: FRRConfiguration
+metadata:
+  name: frrdemo
+  namespace: metallb-system
+spec:
+  bgp:
+    routers:
+    - asn: 64513
+      neighbors:
+        - address: 192.168.20.154
+          asn: 64512
+          port: 179
+          toAdvertise:
+            allowed:
+              mode: all
+          toReceive:
+            allowed:
+              mode: all
+EOF
+----
++
+外部 BGP 路由器具有 ASN 64512，而我们的 `BGPPeer` 将具有 64513。我们还可以看到外部 BGP 路由器的 IP 地址为 192.168.20.154。
+
+. 验证 FRRConfiguration 是否已部署：
++
+[,bash]
+----
+k get FRRConfiguration -A
+NAMESPACE        NAME      AGE
+metallb-system   frrdemo   4s
+----
++
+
+[NOTE]
+====
+上面的 `toReceive` 设置将使您的集群接受所有传入路由。这在生产环境中可能不可取，因为根据您的外部路由器，它可能会导致您的节点路由表被填满。请参阅 https://github.com/metallb/frr-k8s/ 中的文档，以了解如何进一步过滤接收的路由。
+====
+
+对于 FRR-K8s，这些就是所需的全部设置。您的外部 BGP 路由器接收到的任何路由都将与您的集群共享，并且所有节点都将更新其路由表。
+
+可以使用 <<guides-metallb-k3s-l3>> 中描述的内容来测试此设置。为了结合这些设置，需要满足一些要求。
+
+* FRR-K8s 配置是在单独的集群上完成的。这是为了避免集群内部路由所必需的。
+* 需要更改 ASN ID 和路由器 IP 地址以匹配这两种设置。
+
+在部署了这两种设置后，可以观察到以下情况：
+
+* 一旦在 <<guides-metallb-k3s-l3>> 中描述的集群上应用了部署和 Service，该服务的路由将在外部 FRR 路由器上可见。
+* 该路由将被添加到 FRR-K8s 集群上的所有节点。
+
+[NOTE]
+====
+在 FRR 路由的标准配置中，路由会与下一跳共享，并设置为 FRR 路由器的 IP 地址。若要实现不包含 FRR 路由器 IP 地址的下一跳，可以在 FRR 路由器上的 `/etc/frr/frr.conf` 文件中添加一行“neighbor BGPPG next-hop-unchanged”和一行“neighbor BGPPG as-override”。完成此设置后，FRR-K8s 集群上的节点将获得一条通往该服务的直接路由。
+====

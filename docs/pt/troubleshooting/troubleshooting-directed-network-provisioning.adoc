@@ -1,0 +1,132 @@
+[#troubleshooting-directed-network-provisioning]
+== Solução de problemas de provisionamento de rede direcionado
+:revdate: 2025-06-17
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Cenários de provisionamento de rede direcionada envolvem o uso de elementos Metal^3^ e CAPI para provisionar o cluster downstream. Também inclui o EIB para criar uma imagem de sistema operacional. Problemas podem ocorrer quando o host está sendo inicializado pela primeira vez ou durante os processos de inspeção ou provisionamento.
+
+.Problemas comuns
+
+* *Firmware antigo*: Verifique se todos os diferentes firmwares nos hosts físicos que estão sendo usados estão atualizados. Isso inclui o firmware do BMC, pois, às vezes, o Metal^3^ https://book.metal3.io/bmo/supported_hardware#redfish-and-its-variants[requer versões específicas/atualizadas].
+* *Falha no provisionamento com erros de SSL*: Se o servidor web que fornece as imagens usa https, o Metal^3^ precisa ser configurado para injetar e confiar no certificado na imagem IPA. Consulte <<mgmt-cluster-kubernetes-folder,pasta Kubernetes>> sobre como incluir um arquivo `ca-additional.crt` no chart do Metal^3^.
+* *Problemas de certificados ao inicializar os hosts com IPA*: Alguns fornecedores de servidores verificam a conexão SSL ao anexar imagens ISO de mídia virtual ao BMC, o que pode causar um problema porque os certificados gerados para a implantação do Metal3 são autoassinados. Pode acontecer de o host estar sendo inicializado, mas cair em um shell UEFI. Consulte <<disabling-tls-for-virtualmedia-iso-attachment,Desabilitando TLS para anexo de ISO de mídia virtual>> sobre como corrigir isso.
+* *Referência de nome ou rótulo incorreta*: Se o cluster referencia um nó pelo nome ou rótulo incorreto, o cluster é considerado implantado, mas o BMH permanece como “Available”. Verifique novamente as referências nos objetos envolvidos para os BMHs.
+* *Problemas de comunicação com o BMC*: Certifique-se de que os pods do Metal^3^ em execução no cluster de gerenciamento consigam alcançar o BMC dos hosts que estão sendo provisionados (geralmente a rede BMC é muito restrita).
+* *Estado incorreto do host bare metal*: O objeto BMH passa por diferentes estados (inspecionando, preparando, provisionado, etc.) durante seu ciclo de vida https://book.metal3.io/bmo/state_machine[Ciclo de vida da máquina de estados]. Se um estado incorreto for detectado, verifique o campo `status` do objeto BMH, pois ele contém mais informações como `kubectl get bmh <name> -o jsonpath=’{.status}’| jq`.
+* *Host não sendo desprovisionado*: No caso de um host que deveria ser desprovisionado falhar, a remoção pode ser tentada após adicionar a anotação “detached” ao objeto BMH como: `kubectl annotate bmh/<BMH> baremetalhost.metal3.io/detached=””`.
+* *Erros de imagem*: Verifique se a imagem sendo criada com o EIB para o cluster downstream está disponível, possui um checksum adequado e não é muito grande para descompactar ou muito grande para o disco.
+* *Incompatibilidade de tamanho de disco*: Por padrão, o disco não expandirá para preencher todo o disco. Conforme explicado na seção <<growfs-script,Growfs script>>, um script growfs precisa ser incluído na imagem sendo criada com o EIB para os hosts do cluster downstream. 
+* *Processo de limpeza travado*: O processo de limpeza é tentado novamente várias vezes. Se, devido a um problema com o host, a limpeza não for mais possível, desative a limpeza primeiro definindo o campo `automatedCleanMode` como `disabled` no objeto BMH.
++
+[WARNING]
+====
+Não é recomendado remover manualmente o finalizador quando o processo de limpeza estiver demorando mais do que o desejado ou falhando. Fazer isso remove o registro do host do Kubernetes, mas o deixa no Ironic. A ação em execução continua em segundo plano, e uma tentativa de adicionar o host novamente pode falhar devido ao conflito.
+====
+* *Problemas com pods do Metal3/Rancher Turtles/CAPI*: O fluxo de implantação para todos os componentes necessários é:
++
+** O controlador Rancher Turtles implanta o controlador do operador CAPI.
+** O controlador do operador CAPI então implanta os controladores do provedor (CAPI core, CAPM3 e RKE2 controlplane/bootstrap).
+
+Verifique se todos os pods estão sendo executados corretamente e, caso contrário, verifique os logs.
+
+
+.Registros
+* *Logs do ^Metal3^*:Verifique os logs dos diferentes pods.
++
+[,shell]
+----
+kubectl logs -n metal3-system -l app.kubernetes.io/component=baremetal-operator
+kubectl logs -n metal3-system -l app.kubernetes.io/component=ironic
+----
++
+[NOTE]
+====
+O pod metal3-ironic contém pelo menos 4 contêineres diferentes (`ironic-httpd`, ` ironic-log-watch`, `ironic` e `ironic-ipa-downloader` (init)) no mesmo pod. Use a flag `-c` ao usar `kubectl logs` para verificar os logs de cada um dos contêineres.
+====
++
+[NOTE]
+====
+O contêiner `ironic-log-watch` expõe logs de console dos hosts após a inspeção/provisionamento, desde que a conectividade de rede permita o envio desses logs de volta para o cluster de gerenciamento. Isso pode ser útil em casos onde há erros de provisionamento, mas você não tem acesso direto aos logs do console do BMC.
+====
+
+* *Logs do Rancher Turtles*: Verifique os logs dos diferentes pods.
++
+[,shell]
+----
+kubectl logs -n cattle-turtles-system -l control-plane=controller-manager
+kubectl logs -n cattle-turtles-system -l app.kubernetes.io/name=cluster-api-operator
+kubectl logs -n rke2-bootstrap-system -l cluster.x-k8s.io/provider=bootstrap-rke2
+kubectl logs -n rke2-control-plane-system -l cluster.x-k8s.io/provider=control-plane-rke2
+kubectl logs -n cattle-capi-system -l cluster.x-k8s.io/provider=cluster-api
+kubectl logs -n capm3-system -l cluster.x-k8s.io/provider=infrastructure-metal3
+----
+
+* *Logs do BMC*: Geralmente, os BMCs possuem uma interface de usuário onde a maior parte da interação pode ser feita. Geralmente, há uma seção de “logs” que pode ser observada para possíveis problemas (não conseguir acessar a imagem, falhas de hardware, etc.).
+
+* *Logs do console*: Conecte-se ao console do BMC (via interface web do BMC, serial, etc.) e verifique se há erros nos logs que estão sendo gravados.
+
+.Etapas de solução de problemas
+
+. *Verificar o status do `BareMetalHost`*:
+
+* `kubectl get bmh -A` mostra o estado atual. Procure por `provisioning`, `ready`, `error`, `registering`.
+* `kubectl describe bmh -n <namespace> <bmh_name>` fornece eventos e condições detalhados que explicam por que um BMH pode estar travado.
+
+. *Testar conectividade RedFish*:
+
+* Use `curl` do plano de controle do Metal^3^ para testar a conectividade com os BMCs via redfish.
+* Certifique-se de que as credenciais corretas do BMC sejam fornecidas na definição `BareMetalHost-Secret`.
+
+. *Verificar status dos pods turtles/CAPI/metal3*: Certifique-se de que os contêineres no cluster de gerenciamento estejam ativos e em execução: `kubectl get pods -n metal3-system` e `kubectl get pods -n cattle-turtles-system` (veja também `cattle-capi-system`, `capm3-system`, `rke2-bootstrap-system` e `rke2-control-plane-system`).
+
+. *Verificar se o endpoint do ironic está acessível a partir do host que está sendo provisionado*: O host que está sendo provisionado precisa ser capaz de alcançar o endpoint do Ironic para reportar ao Metal^3^. Verifique o IP com `kubectl get svc -n metal3-system metal3-metal3-ironic` e tente alcançá-lo via `curl/nc`.
+
+. *Verificar se a imagem do IPA está acessível a partir do BMC*: O IPA é servido pelo endpoint do Ironic e precisa estar acessível a partir do BMC, pois está sendo usado como um CD virtual.
+
+. *Verificar se a imagem do SO está acessível a partir do host que está sendo provisionado*: A imagem usada para provisionar o host precisa estar acessível a partir do próprio host (ao executar o IPA), pois será baixada temporariamente e gravada no disco.
+
+. *Examinar logs dos componentes do Metal^3^*: Veja acima.
+
+. *Acionar novamente a inspeção do BMH*:  Se uma inspeção falhou ou o hardware de um host disponível mudou, um novo processo de inspeção pode ser acionado anotando o objeto BMH com `inspect.metal3.io: ""`. Consulte o guia https://book.metal3.io/bmo/inspect_annotation[Controle de inspeção do Metal^3^] para obter mais informações.
+
+. *Console IPA bare metal*: Para solucionar problemas do IPA, existem algumas alternativas:
+
+* Habilite o “autologin”. Isso permite que o usuário root seja conectado automaticamente ao se conectar ao console do IPA.
++
+[WARNING]
+====
+Isso é apenas para fins de depuração, pois dá acesso total ao host.
+====
++
+Para habilitar o login automático, o valor `global.ironicKernelParams` do helm Metal3 deve ser parecido com: `console=ttyS0 suse.autologin=ttyS0` (dependendo do console, `ttyS0` pode ser alterado). Em seguida, uma reimplantação do gráfico Metal^3^ deve ser realizada. (Observe que `ttyS0` é um exemplo, isso deve corresponder ao terminal real, por exemplo, pode ser `tty1` em muitos casos em bare metal, isso pode ser verificado observando a saída do console do ramdisk IPA na inicialização, onde `/etc/issue` imprime o nome do console).
++
+Outra maneira de fazer isso é alterando o parâmetro `IRONIC_KERNEL_PARAMS` no configmap `ironic` no namespace `metal3-system`. Isso pode ser mais fácil, pois pode ser feito via edição `kubectl`, mas será sobrescrito ao atualizar o gráfico. Em seguida, o pod Metal^3^ precisa ser reiniciado com `kubectl delete pod -n metal3-system -l app.kubernetes.io/component=ironic`.
+
+* Injete uma chave ssh para o usuário root no IPA.
++ 
+[WARNING]
+====
+Isso é apenas para fins de depuração, pois dá acesso total ao host.
+====
++
+Para injetar a chave ssh para o usuário root, deve ser usado o valor do helm Metal^3^ `debug.ironicRamdiskSshKey`. Em seguida, deve ser realizada a reimplantação do chart Metal^3^.
++
+Outra maneira de fazer isso é alterando o parâmetro `IRONIC_RAMDISK_SSH_KEY` no `ironic configmap` do namespace `metal3-system`. Isso pode ser mais fácil, pois pode ser feito via `kubectl` editar, mas será sobrescrito ao atualizar o chart. Em seguida, o pod Metal^3^ precisa ser reiniciado com `kubectl delete pod -n metal3-system -l app.kubernetes.io/component=ironic`
+
+
+[NOTE]
+====
+Consulte os guias de https://cluster-api.sigs.k8s.io/user/troubleshooting[solução de problemas do CAPI] e https://book.metal3.io/troubleshooting[solução de problemas do Metal^3^].
+====
+

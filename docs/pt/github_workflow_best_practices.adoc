@@ -1,0 +1,255 @@
+= Fluxo de trabalho do GitHub da engenharia do SUSE Edge: Melhores práticas
+:revdate: 2025-07-29
+:revnumber: 3.6
+:page-revdate: {revdate}
+
+Existem várias maneiras de usar fluxos de trabalho do Git e do GitHub, como criar PR/MR, fazer cherry-pick de commits para uma branch específica, etc.
+
+Este documento explica como a equipe de engenharia do SUSE Edge faz isso.
+
+== Configure seu usuário e e-mail
+
+[,shell]
+----
+$ git config --global user.name "FIRST_NAME LAST_NAME"
+$ git config --global user.email "MY_NAME@example.com"
+----
+
+Isso pode ser feito individualmente por repositório sem a flag `--global`.
+
+== Faça um fork do repositório
+
+Idealmente, você não fará push de alterações para as branches dos repositórios suse-edge/, mas sim fará um fork do repositório na interface do GitHub e _faça o que for necessário_ lá.
+
+[NOTE]
+====
+Você não precisa usar o mesmo nome para o seu fork se não quiser.
+====
+
+== Configure o origin/upstream corretamente
+
+Assim que tiver seu repositório bifurcado (forked), é hora de cloná-lo para sua estação de trabalho e configurar os remotos origin/upstream:
+
+* Clone o repositório
+
+[,shell]
+----
+$ git clone git@github.com:e-minguez/suse-edge-charts.git
+----
+
+Isso criará o remoto \"origin\":
+
+[,shell]
+----
+$ git remote -v
+origin  git@github.com:e-minguez/suse-edge-charts.git (fetch)
+origin  git@github.com:e-minguez/suse-edge-charts.git (push)
+----
+
+* Adicione o repositório upstream
+
+[,shell]
+----
+$ git remote add upstream git@github.com:suse-edge/charts.git
+----
+
+Opcionalmente, desative a URL de push para que você não faça push contra ela:
+
+[,shell]
+----
+$ git remote set-url --push upstream ""
+----
+
+Ele deve ter a seguinte aparência:
+
+[,shell]
+----
+$ git remote -v
+origin  git@github.com:e-minguez/suse-edge-charts.git (fetch)
+origin  git@github.com:e-minguez/suse-edge-charts.git (push)
+upstream        git@github.com:suse-edge/charts.git (fetch)
+upstream         (push)
+----
+
+== Assine os commits
+
+Alguns repositórios exigem a assinatura dos commits para confirmar que você leu e concordou com as regras e o licenciamento do repositório/projeto.
+
+Ao fazer o commit das alterações, basta adicionar a flag `-s` ou `--signoff` ao comando de commit como:
+
+[,shell]
+----
+$ git commit --signoff --message 'This is my commit message'
+----
+
+Se você criou um commit que não possui a linha signed-off-by, você pode corrigir seus commits:
+
+[,shell]
+----
+git commit --amend --signoff
+----
+
+Se você já enviou suas alterações para o GitHub, precisará forçar o push da sua branch após isso com `git push -f`.
+
+== Verificação de assinatura de commit
+
+Você pode assinar commits para dar a outras pessoas confiança sobre a origem de uma alteração que você fez. Se um commit ou tag tiver uma assinatura GPG, SSH ou S/MIME que seja criptograficamente verificável, o GitHub marca o commit ou tag como \"Verificado\" ou \"Parcialmente verificado\".
+
+O processo envolve gerar uma chave GPG, usar uma chave SSH ou uma chave X.509. Consulte a documentação do https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification[GitHub] para obter mais informações sobre como configurá-lo.
+
+== Mantenha sua ramificação principal sincronizada
+
+Se você tem trabalhado em um branch específico e gostaria de obter as atualizações mais recentes da ramificação principal do repositório upstream:
+
+[,shell]
+----
+$ git switch main
+$ git pull --rebase upstream/main
+----
+
+== Crie um branch para trabalhar em um recurso/correção/algo
+
+[,shell]
+----
+$ git switch main
+$ git pull --rebase upstream/main
+$ git checkout -b myawesomebranch
+----
+
+Isso criará um novo branch localmente com o conteúdo da ramificação principal.
+
+== Envie as alterações do seu branch local para o GitHub
+
+[,shell]
+----
+$ git add <files>
+$ git commit -av
+# Review the changes, add a meaningful commit message and save it
+$ git push origin/myawesomebranch
+----
+
+== Crie um PR
+
+Após a mensagem de git push acima, uma URL do GitHub será exibida. Siga-a e crie o PR. Verifique novamente o conteúdo, os branches, os repositórios de/para e a lista de alterações.
+
+== Faça rebase do seu branch
+
+Pode acontecer de o conteúdo na ramificação principal do repositório upstream ter mudado. Você precisará atualizar sua ramificação principal e fazer rebase do branch no qual você tem trabalhado.
+
+[,shell]
+----
+$ git pull --rebase upstream/main
+$ git push --force-with-lease
+----
+
+____
+Problemas potenciais com `--force-with-lease` podem ocorrer.
+____
+
+== Cherry pick de commits
+
+Quando as coisas tiverem sido mescladas, por exemplo, na ramificação principal e você quiser fazer cherry-pick delas em outra ramificação (por exemplo, release-3.3), o processo deve ser:
+
+* Obtenha todos os branches:
+
+----
+$ git fetch --all
+----
+
+* Obtenha o(s) id(s) do commit que você deseja fazer cherry-pick (da ramificação principal):
+
+----
+$ git log main --oneline
+----
+
+ou
+
+----
+$ git log main --graph --oneline --all
+----
+
+* Crie um branch onde o processo de cherry-pick será aplicado:
+
+----
+$ git checkout -b cherry-pick-of-fix-293 upstream/release-3.3
+----
+
+* Faça o cherry-pick do(s) commit(s):
+
+----
+$ git cherry-pick -x <commit-id(s)>
+----
+
+Observe a saída e veja se há conflitos. Se houver, boa sorte ao corrigi-los! :)
+
+* Revise o log do git apenas por precaução:
+
+----
+$ git log
+----
+
+* Envie as alterações
+
+----
+$ git push origin cherry-pick-of-fix-293
+----
+
+* Crie o PR
+
+Após a mensagem de git push acima, uma URL do GitHub será exibida. Siga-a e crie o PR. Verifique novamente o conteúdo, os branches, os repositórios de/para e a lista de alterações.
+
+== Incorpore o feedback de um PR
+
+Na maioria das vezes, um pull request exigirá algumas alterações. Para incorporar esse feedback, existem algumas maneiras, mas a recomendação geral é refazer o commit localmente e enviá-lo com o feedback.
+
+* Verifique se você ainda está no branch do PR:
+
+----
+$ git branch
+$ git status
+----
+
+* Adicione as alterações aos arquivos necessários e adicione os arquivos ao stage:
+
+----
+$ git add path/to/my/file
+----
+
+Se você quiser apenas adicionar alterações ao último commit sem alterar a mensagem:
+
+----
+$ git commit --amend --no-edit
+----
+
+Em seguida, force o push do branch (veja abaixo)
+
+Se você quiser combinar vários commits pequenos que abordam o feedback em um commit limpo, ou combiná-los com commits anteriores no seu PR:
+
+* Conte quantos commits você deseja fazer squash/reword (por exemplo, N).
+
+----
+$ git log --oneliner
+----
+
+Then:
+
+----
+$ git rebase -i HEAD~N
+----
+
+Isso abrirá um editor onde você pode fazer squash, fixup, reword, etc., nos commits
+
+* Salve e feche o editor
+
+* Force o push da branch. Isso precisa ser _forçado_ porque a branch remota agora difere da branch local:
+
+----
+$ git push --force-with-lease origin myawesomebranch
+----
+
+[NOTE]
+====
+Consulte https://git-scm.com/book/en/v2/Git-Tools-Rewriting-History[a documentação oficial do Git para mais informações]
+
+Se você estiver tentando corrigir um problema no Github, não se esqueça de vincular o PR a um problema adicionando "Closes #XXX" ou "Fixes #XXX" à mensagem do commit. Consulte https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue#linking-a-pull-request-to-an-issue-using-a-keyword[Como vincular um pull request a um problema usando uma palavra-chave] para mais informações sobre esse recurso.
+====

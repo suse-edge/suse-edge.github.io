@@ -1,0 +1,142 @@
+[#guides-metallb-k3s-frr-k8s]
+= K3s上のMetalLB（FRR-K8sモードを使用）
+:revdate: 2026-05-04
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+MetalLBは、標準的なルーティングプロトコルを使用する、ベアメタルKubernetesクラスター向けのロードバランサー実装です。
+
+このガイドでは、レイヤー3 FRR-K8s BGPモードでMetalLBをデプロイする方法を説明します。
+
+== K3s上のMetalLB（FRR-K8sを使用）
+[NOTE]
+====
+FRR-K8sは現在、テクノロジープレビュー機能です。FRR-K8sのコミュニティドキュメントは https://github.com/metallb/frr-k8s/[こちら]です。
+====
+
+このクイックスタートでは、FRR-K8sモードを使用します。
+
+== 前提条件
+
+* FRR-K8sのすべての前提条件は、空きIPアドレスが必要である点を除き、<<guides-metallb-k3s-l3>>の場合と同じです。
++
+[NOTE]
+====
+ここでの例にはサービスのセットアップが含まれていないため、IPアドレスは不要です。
+====
+
+* MetalLBをデプロイするK3sクラスター。
+* BGPプロトコルをサポートするネットワーク上のルーター。
+
+
+== 着信ルートを受け入れるための構成
+デフォルトの状態で、MetalLB BGPは構成されているすべてのBGPピアに対してサービスIPアドレスをアドバタイズします。通常ルーターであるこれらのピアは、32ビットのネットワークマスクを持つ各サービスIPアドレスのルートを受信します。FRRConfiguration CRでFRR-K8sを使用する場合、外部ルーターからルートを受信することも可能です。これらの外部ルートは、各ノードのルーティングテーブルに表示されます。これには複数の利点がありますが、主な利点は、外部ネットワークが変更されたときにノード上のLinuxルーティングテーブルを手動で更新する必要がなくなることです。特に、デフォルトゲートウェイ経由のトラフィック送信を回避したい場合に有効です。
+
+== 展開
+
+SUSE Edgeソリューションの一部として公開されているMetalLB Helmチャートを使用します。FRR-K8sはMetalLBのサブチャートであることに注意してください。有効にするには、`frrk8s.enabled`を`true`に設定します。FRR-K8sには、ネームスペースに対するいくつかの高い権限も必要です。
+
+[,bash,subs="attributes"]
+----
+kubectl create namespace metallb-system
+kubectl label namespace metallb-system pod-security.kubernetes.io/enforce=privileged
+kubectl label namespace metallb-system pod-security.kubernetes.io/audit=privileged
+kubectl label namespace metallb-system pod-security.kubernetes.io/warn=privileged
+helm install metallb \
+  oci://registry.suse.com/edge/charts/metallb \
+  --namespace metallb-system \
+  --set frrk8s.enabled=true --set frrk8s.external=false
+
+
+while ! kubectl wait --for condition=ready -n metallb-system $(kubectl get\
+ pods -n metallb-system -l app.kubernetes.io/component=controller -o name)\
+ --timeout=10s; do
+ sleep 2
+done
+----
+
+`metallb-system`ネームスペースに4つのポッドがあり、すべて問題なく実行されていることを確認してください。
+
+[,bash,subs="attributes"]
+----
+k get pods -n metallb-system
+NAME                                                      READY   STATUS    RESTARTS     AGE
+metallb-controller-7fbfd8977d-m2q9t                       1/1     Running   0            46s
+metallb-metallb-frr-k8s-9w7wl                             6/6     Running   0            46s
+metallb-metallb-frr-k8s-webhook-server-5d9d67ffd6-8jqnc   1/1     Running   1 (6s ago)   46s
+metallb-speaker-qx8bl                                     1/1     Running   0            46s
+----
+この時点で、MetalLBとFRR-K8sのインストールは完了です。
+
+== 設定
+
+. FRR-K8s用の`FRRConfiguration`を作成します。
++
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: frrk8s.metallb.io/v1beta1
+kind: FRRConfiguration
+metadata:
+  name: frrdemo
+  namespace: metallb-system
+spec:
+  bgp:
+    routers:
+    - asn: 64513
+      neighbors:
+        - address: 192.168.20.154
+          asn: 64512
+          port: 179
+          toAdvertise:
+            allowed:
+              mode: all
+          toReceive:
+            allowed:
+              mode: all
+EOF
+----
++
+外部BGPルーターのASNは64512ですが、私たちの`BGPPeer`は64513になります。外部BGPルーターのIPアドレスが192.168.20.154であることも確認できます。
+
+. FRRConfigurationがデプロイされていることを確認してください。
++
+[,bash]
+----
+k get FRRConfiguration -A
+NAMESPACE        NAME      AGE
+metallb-system   frrdemo   4s
+----
++
+
+[NOTE]
+====
+上記の`toReceive`設定により、クラスターはすべての着信ルートを受け入れるようになります。外部ルーターによってはノードのルーティングテーブルが一杯になる可能性があるため、本番環境では推奨されない場合があります。 https://github.com/metallb/frr-k8s/[受信フィルターの方法]に関するドキュメントを参照してください。
+====
+
+FRR-K8sでは、これらすべての設定が必要です。外部BGPルーターが受信しているすべてのルートがクラスターと共有され、すべてのノードのルーティングテーブルが更新されます。
+
+セットアップは<<guides-metallb-k3s-l3>>に記載されている方法でテストできます。これらのセットアップを組み合わせるには、いくつかの要件があります。
+
+* FRR-K8sの設定は別のクラスターで行われます。これはクラスター内部のルーティングを回避するために必要です。
+* 両方のセットアップを一致させるには、ASN IDとルーターIPアドレスの変更が必要です。
+
+これら両方のセットアップが完了すると、以下が確認できます。
+
+* <<guides-metallb-k3s-l3>>で説明されているクラスターにデプロイメントとサービスを適用すると、サービスへのルートが外部FRRルーターで確認できるようになります。
+* ルートは、FRR-K8sクラスター上のすべてのノードに追加されます。
+
+[NOTE]
+====
+FRRルーティングの標準構成では、ルートはFRRルーターのIPアドレスに設定されたネクストホップと共有されます。FRRルーターのIPアドレスを使用せずにネクストホップを実現するには、FRRルーター上の`/etc/frr/frr.conf`ファイルに「neighbor BGPPG next-hop-unchanged」という行と「neighbor BGPPG as-override」という行を追加します。これを設定すると、FRR-K8sクラスター上のノードはサービスへの直接ルートを取得します。
+====

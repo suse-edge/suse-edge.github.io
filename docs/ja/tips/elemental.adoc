@@ -1,0 +1,171 @@
+[#tips-elemental]
+= Elemental
+:revdate: 2025-01-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+:imagesdir: ../images/
+
+== Common(通常のネットワーキング)
+
+=== Rancherサービスを公開する
+
+RKE2またはK3sを使用する場合、管理クラスターからのサービス（このコンテキストではRancher）はデフォルトでは公開されないため、公開する必要があります。
+RKE2とK3sの両方にTraefik Ingressコントローラーがあります。
+現在のワークフローでは、サービスをアナウンスするためにMetalLB（L2またはBGPアドバタイズメント経由）を使用し、それぞれのIngressコントローラーを使用して`HelmChartConfig`経由でIngressを作成することが推奨されています。新しいIngressオブジェクトを作成すると、既存のセットアップが上書きされるためです。
+
+. Rancher Primeを（Helm経由で）インストールし、必要な値を構成します
++
+[,yaml]
+----
+hostname: rancher-192.168.64.101.sslip.io
+replicas: 1
+bootstrapPassword: Admin
+global.cattle.psp.enabled: "false"
+----
++
+
+TIP: 詳細については、 https://ranchermanager.docs.rancher.com/{rancher-docs-version}/getting-started/installation-and-upgrade/install-upgrade-on-a-kubernetes-cluster[Rancherインストール]ドキュメントに従ってください。
+
+. Rancherを公開するためにLoadBalancerサービスを作成します
++
+[,bash]
+----
+kubectl apply -f - <<EOF
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    ingressClass:
+      isDefaultClass: true
+    ports:
+      web:
+        hostPort: null    # disallow hostPort
+        exposedPort: 80
+      websecure:
+        hostPort: null    # disallow hostPort
+        exposedPort: 443
+    service:
+      enabled: true
+      type: LoadBalancer
+      spec:
+        externalTrafficPolicy: Local
+        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+EOF
+----
++
+
+. Helmの値で以前セットアップしたIPアドレスを使用して、サービス用のIPアドレスプールを作成します。
++
+[,bash]
+----
+kubectl apply -f - <<EOF
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: ingress-ippool
+  namespace: metallb-system
+spec:
+  addresses:
+  - 192.168.64.101/32
+  serviceAllocation:
+    priority: 100
+    serviceSelectors:
+    - matchExpressions:
+      - {key: app.kubernetes.io/name, operator: In, values: [rke2-traefik]}
+EOF
+----
++
+
+. IPアドレスプール用のL2アドバタイズメントを作成します。
++
+[,bash]
+----
+kubectl apply -f - <<EOF
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: ingress-l2-adv
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - ingress-ippool
+EOF
+----
++
+
+. Elementalが正しくインストールされていることを確認します。
+
+.. 管理ノードにElementalオペレーターとElemental UIをインストールします。
+
+.. ダウンストリームノードにElemental設定と登録コードを追加します。これにより、Edge Image Builderがそのマシンにリモート登録オプションを含めるようになります。
+
+TIP: 詳細情報や例については、<<install-elemental>>および<<configure-elemental>>を確認してください。
+
+== ハードウェア固有
+
+=== Trusted Platform Module
+
+https://elemental.docs.rancher.com/tpm/[Trusted Platform Module]（TPM）構成を適切に処理する必要があります。
+そうしないと、以下のようなエラーが発生します。
+
+[,console]
+----
+Nov 25 18:17:06 eled elemental-register[4038]: Error: registering machine: cannot generate authentication token: opening tpm for getting attestation data: TPM device not available
+----
+
+これは、次のいずれかのアプローチで軽減できます。
+
+* 仮想マシンの設定でTPMを有効にする
+
+_MacOSでUTMを使用した例_
+
+image::tpm.png[TPM,scaledwidth=100%]
+
+* `MachineRegistration`リソースでTPMシードに負の値を指定してTPMをエミュレートします
+
+[,yaml]
+----
+apiVersion: elemental.cattle.io/v1beta1
+kind: MachineRegistration
+metadata:
+  name: ...
+  namespace: ...
+spec:
+    ...
+    elemental:
+      ...
+      registration:
+        emulate-tpm: true
+        emulated-tpm-seed: -1
+----
+
+* `MachineRegistration`リソースでTPMを無効にします
+
+[,yaml]
+----
+apiVersion: elemental.cattle.io/v1beta1
+kind: MachineRegistration
+metadata:
+  name: ...
+  namespace: ...
+spec:
+    ...
+    elemental:
+      ...
+      registration:
+        emulate-tpm: false
+----

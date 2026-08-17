@@ -1,0 +1,2553 @@
+[#atip-features]
+= 电信功能配置
+:revdate: 2026-05-27
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+本节记录并解释了通过 SUSE Telco Cloud 部署的集群上电信特定功能的配置。
+
+使用了定向网络配置部署方法，如 <<atip-automated-provisioning,自动配置>> 一节所述。
+
+本节涵盖以下主题：
+
+* <<kernel-image-for-real-time,实时内核镜像>>：实时内核使用的内核镜像。
+* <<kernel-args,低延迟和高性能的内核参数>>：用于运行电信工作负载以实现最高性能和低延迟的内核参数。
+* <<cpu-pinning-host,主机上的 CPU 绑定>>：通过内核参数和 TuneD 控制文件隔离 CPU。
+* <<cpu-pinning-k8s,Kubernetes 上的 CPU 绑定>>：通过 Kubelet 配置在 Kubernetes 上隔离 CPU。
+* <<cni-configuration,CNI 配置>>：Kubernetes 集群使用的 CNI 配置。
+* <<sriov,SR-IOV 配置>>：Kubernetes 工作负载使用的 SR-IOV 配置。
+* <<dpdk,DPDK 配置>>：系统使用的 DPDK 配置。
+* <<acceleration,vRAN 加速>>：将 FEC 算法计算卸载到 vRAN 加速卡。
+* <<huge-pages,大页>>：供 Kubernetes 工作负载使用的大页配置。
+* <<numa-aware-scheduling,NUMA 感知调度配置>>：供 Kubernetes 工作负载使用的 NUMA 感知调度配置。
+* <<metal-lb-configuration,Metal LB 配置>>：供 Kubernetes 工作负载使用的 Metal LB 配置。
+* <<private-registry,私有镜像仓库配置>>：供 Kubernetes 工作负载使用的私有镜像仓库配置。
+* <<ptp-configuration,精确时间协议配置>>：用于运行 PTP 电信控制文件的配置文件。
+* <<sctp,SCTP 配置>>：在 Linux 内核 IP 协议栈中启用 SCTP 层。
+
+
+[#kernel-image-for-real-time]
+== 实时内核镜像
+
+实时内核镜像并不一定比标准内核更好。
+它是一个针对特定用例进行调优的不同内核。实时内核针对更低的延迟进行了调优，但代价是吞吐量降低。不建议将实时内核用于通用目的，但在我们的案例中，这是延迟为关键因素的电信工作负载的推荐内核。
+
+有四大主要功能：
+
+* 确定性执行：
++
+获得更高的可预测性——确保关键业务流程始终能按时完成，并在系统负载较重时依然提供高质量服务。通过为高优先级进程屏蔽关键系统资源，您可以确保时间敏感型应用具有更高的可预测性。
++
+* 低抖动：
++
+建立在高度确定性技术之上的低抖动有助于保持应用与现实世界的同步。这有助于需要持续和重复计算的服务。
++
+* 优先级继承：
++
+优先级继承指的是较低优先级进程在存在一个较高优先级进程时，能够提升为较高优先级的能力，即当较高优先级进程需要较低优先级进程先完成任务后才能继续时，较低优先级进程可以临时获得较高优先级。SUSE Linux Enterprise Real Time 为关键任务进程解决了这些优先级反转问题。
++
+* 线程中断：
++
+在一般操作系统中以中断方式运行的进程是不可抢先的。借助 SUSE Linux Enterprise Real Time，这些中断已被内核线程封装，这些内核线程是可中断的，并允许硬件中断和软件中断被用户定义的更高优先级进程抢先。
++
+在我们的案例中，如果您已安装类似 `SUSE Linux Micro RT` 的实时镜像，则实时内核已安装。您可以从 https://scc.suse.com/[SUSE Customer Center] 下载实时内核镜像。
++
+
+[NOTE]
+====
+有关实时内核的更多信息，请访问 https://www.suse.com/products/realtime/[SUSE Real Time]。
+====
+
+[#kernel-args]
+== 用于低延迟和高性能的内核参数
+
+配置适当的内核参数对于优化性能、实现低延迟以及确保电信工作负载的集群部署成功至关重要。虽然某些参数是专门为使实时内核发挥最佳功能而设计的，但本节适用于 RT 和默认内核配置。此外，某些参数对于定向网络配置 (Directed Network Provisioning) 方法成功部署下游集群节点是强制性的。
+
+* 使用 SUSE 实时内核时，请去除 `kthread_cpus`。此参数控制在哪些 CPU 上创建内核线程。它还控制允许 PID 1 和加载内核模块（kmod 用户空间辅助程序）使用哪些 CPU。此参数无法识别，且不起任何作用。
+
+* 使用 `isolcpus`、`nohz_full`、`rcu_nocbs` 和 `irqaffinity` 隔离 CPU 核心。有关 CPU 绑定技术的完整列表，请参阅 <<cpu-pinning-host,CPU Pinning on Host>> 章节。
+
+* 将 `domain,nohz,managed_irq` 标志添加到 `isolcpus` 内核参数中。在没有任何标志的情况下，`isolcpus` 等同于仅指定 `domain` 标志。这会将指定的 CPU 从调度中隔离出来，包括内核任务。`nohz` 标志会停止指定 CPU 上的调度程序节拍（如果 CPU 上只有一个可运行任务），而 `managed_irq` 标志则避免将受管外部（设备）中断路由到指定的 CPU。请注意，NVMe 设备的 IRQ 线路完全由内核管理，因此它们将被路由到非隔离（常规）核心。例如，本节末尾提供的命令行将导致系统上仅分配四个队列（外加一个管理/控制队列）：
+
++
+[,shell]
+----
+for I in $(grep nvme0 /proc/interrupts | cut -d ':' -f1); do cat /proc/irq/${I}/effective_affinity_list; done | column
+39      0       19      20      39
+----
++
+此行为可防止磁盘 I/O 对运行在隔离核心上的任何时间敏感型应用程序造成干扰，但对于以存储为主的工作负载，可能需要特别关注并进行仔细设计。
+
+* 调整时钟节拍（内核的周期性定时器中断）：
+** `skew_tick=1`：时钟节拍有时会同时发生。`skew_tick=1` 不会让所有 CPU 在同一时刻接收定时器节拍，而是使它们在略有偏差的时间发生。这有助于减少系统抖动，从而实现更一致且更低的中断响应时间（这是延迟敏感型应用程序的基本要求）。
+** `nohz=on`：停止空闲 CPU 上的周期性定时器节拍。
+** `nohz_full=<cpu-cores>`：停止专用于实时应用程序的指定 CPU 上的周期性定时器节拍。
+
+* 通过指定 `mce=off` 来禁用机器检查异常 (MCE) 处理。MCE 是处理器检测到的硬件错误，禁用它们可以避免产生冗余日志。
+
+* 添加 `nowatchdog` 以禁用软锁定监视程序，该监视程序实现为在定时器硬中断上下文中运行的定时器。当它过期（即检测到软锁定）时，它将打印一条警告（在硬中断上下文中），从而影响任何延迟目标。即使它永不过期，它也会进入计时器列表，从而略微增加每次计时器中断的开销。此选项还会禁用 NMI 看门狗，因此 NMI 不会产生干扰。
+
+* `nmi_watchdog=0` 禁用 NMI（不可屏蔽中断）看门狗。使用 `nowatchdog` 时可以省略此项。
+
+* RCU（读取-复制-更新）是一种内核机制，它使多个读取者能够对共享数据进行并发、无锁的访问。RCU 回调是一种在“宽限期”后触发的函数，它确保所有先前的读取者都已完成工作，以便可以安全地回收旧数据。我们对 RCU 进行微调，特别是针对敏感工作负载，将这些回调从专用（固定）CPU 上卸载，防止内核操作干扰关键的、时间敏感的任务。
+** 在 `rcu_nocbs` 中指定固定 CPU，以便 RCU 回调不会在这些 CPU 上运行。这有助于减少实时工作负载的抖动和延迟。
+** `rcu_nocb_poll` 使无回调 CPU 定期“轮询”以查看是否需要处理回调。这可以减少中断开销。
+** `rcupdate.rcu_cpu_stall_suppress=1` 禁止 RCU CPU 停滞警告，在负载繁重的实时系统中，这些警告有时可能是误报。
+** `rcupdate.rcu_expedited=1` 加快 RCU 操作的宽限期，使读取侧临界区响应更迅速。
+** `rcupdate.rcu_normal_after_boot=1` 当与 rcu_expedited 一起使用时，它允许 RCU 在系统引导后恢复为正常（非加速）操作。
+** `rcupdate.rcu_task_stall_timeout=0` 禁用 RCU 任务停滞检测器，防止因长时间运行的 RCU 任务而产生潜在的警告或系统挂起。
+** `rcutree.kthread_prio=99` 将 RCU 回调内核线程的优先级设置为最高（99），确保在需要时它能被调度并及时处理 RCU 回调。
+
+* 添加 `ignition.platform.id=openstack` 以供 Metal3 和 Cluster API 成功配置/取消配置集群。这由 Metal3 Python 代理使用，该代理源自 Openstack Ironic。
+
+* 通过 `net.ifnames=1` 启用 https://documentation.suse.com/smart/network/html/network-interface-predictable-naming/index.html[可预测网络接口命名]。从 SUSE Linux Micro 6.2 开始，此功能默认启用，无需进行显式配置。对于 6.2 之前的版本，必须将其显式设置为内核参数。这与管理集群的 Metal^3^ Helm 图表中的 `predictableNicNames` 配置一致，这是定向网络配置正常运行所必需的。当使用 SR-IOV 时，一致的接口命名也至关重要。
+
+* 去除 `intel_pstate=passive`。此选项配置 `intel_pstate` 以与通用 cpufreq 调控器配合使用，但为了使其生效，它会产生禁用硬件管理的 P-states (`HWP`) 的副作用。为了减少硬件延迟，不建议将此选项用于实时工作负载。
+
+* 将 `intel_idle.max_cstate=0 processor.max_cstate=1` 替换为 `idle=poll`。为了避免 C-State 转换，使用 `idle=poll` 选项来禁用 C-State 转换并使 CPU 保持在最高 C-State。`intel_idle.max_cstate=0` 选项禁用 `intel_idle`，因此使用 `acpi_idle`，然后 `acpi_idle.max_cstate=1` 为 acpi_idle 设置最大 C-state。
+在 {x86-64} 架构上，第一个 ACPI C-State 始终是 `POLL`，但它使用 `poll_idle()` 函数，该函数可能会通过定期读取时钟并在超时后在 `do_idle()` 中重新启动主循环来引入一些微小的延迟（这也涉及清除和设置 `TIF_POLL` 任务标志）。
+相比之下，`idle=poll` 在紧密循环中运行，忙等待任务被重新调度。这最大限度地减少了退出空闲状态的延迟，但代价是使 CPU 在空闲线程中全速运行。
+
+* 在 BIOS 中禁用 C1E。此选项对于在 BIOS 中禁用 C1E 状态非常重要，以避免 CPU 在空闲时进入 C1E 状态。C1E 状态是一种低功耗状态，在 CPU 空闲时可能会引入延迟。
+
+本文档的其余部分涵盖了其他参数，包括大页和 IOMMU。
+
+这提供了一个 32 核 Intel 服务器的内核参数示例，包括上述调整：
+
+[,shell]
+----
+$ cat /proc/cmdline
+BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll
+----
+
+这是另一个 64 核 AMD 服务器的配置示例。在 128 个逻辑处理器 (`0-127`) 中，前 8 个内核 (`0-7`) 被指定用于内务管理，而其余 120 个内核 (`8-127`) 则固定用于应用程序：
+[,shell]
+----
+$ cat /proc/cmdline
+BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=575291cf-74e8-42cf-8f2c-408a20dc00b8 skew_tick=1 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 amd_iommu=on iommu=pt irqaffinity=0-7 isolcpus=domain,nohz,managed_irq,8-127 nohz_full=8-127 rcu_nocbs=8-127 mce=off nohz=on nowatchdog nmi_watchdog=0 nosoftlockup quiet rcu_nocb_poll rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll
+----
+
+[#cpu-pinning-host]
+== 主机上的 CPU 绑定
+
+CPU 绑定（也称为处理器亲和性）是一种将进程或线程绑定到特定 CPU 内核的技术，可防止操作系统的调度程序对其进行移动。通过确保进程始终在同一个内核上运行，它能够受益于对保留在该内核缓存内存中的数据的更快访问。这种做法在高性能计算环境中很常见，因为它能显著提高性能并减少开销。
+
+=== 通过 TuneD 隔离 CPU 内核
+`tuned` 是一款系统调优工具，它通过监控系统状况并使用各种预定义的控制文件来优化性能。其一个关键特性是能够为特定工作负载（如实时应用程序）隔离 CPU 内核。这可以防止操作系统利用这些内核，从而避免潜在的延迟增加。
+
+要启用和配置此功能，首先要为我们想要隔离的 CPU 内核创建一个控制文件。在此示例中，在 64 个内核中，我们分配 60 个内核 (`1-30,33-62`) 给应用程序，其余 4 个内核用于内务管理。请注意，隔离 CPU 的设计在很大程度上取决于实时应用程序。
+
+[,shell]
+----
+$ echo "export tuned_params" >> /etc/grub.d/00_tuned
+
+$ echo "isolated_cores=1-30,33-62" >> /etc/tuned/cpu-partitioning-variables.conf
+
+$ tuned-adm profile cpu-partitioning
+Tuned (re)started, changes applied.
+----
+
+=== 通过内核参数隔离 CPU 内核
+然后，我们需要修改 GRUB 选项以隔离 CPU 内核以及其他用于 CPU 使用的重要参数。
+以下选项对于根据您当前的硬件规格进行自定义非常重要：
+
+[,shell]
+
+|===
+| parameter | value | 描述
+
+| isolcpus
+| domain,nohz,managed_irq,1-30,33-62
+| 隔离 1-30 和 33-62 号内核。`domain` 表示这些 CPU 属于隔离域。`nohz` 在这些隔离的 CPU 空闲时启用无滴答操作，以减少中断。`managed_irq` 将绑定的 CPU 与 IRQ 目标隔离开来。这考虑到了 `irqaffinity=0-7`，它已经将大多数 IRQ 指向了内务管理内核。
+
+| skew_tick
+| 1 
+| 此选项允许内核在隔离的 CPU 之间偏移计时器中断。
+
+| nohz
+| on
+| 启用后，内核的周期性计时器中断（“滴答”）将在任何空闲的 CPU 内核上停止。这主要有利于内务管理内核 (`0,31,32,63`)。这可以节省电力并减少这些通用内核上不必要的唤醒。
+
+| nohz_full
+| 1-30,33-62
+| 对于隔离的内核，即使 CPU 正在运行单个活动任务，这也会停止时钟滴答。这意味着它使 CPU 以完全无滴答模式（或“dyntick”）运行。内核仅在实际需要时才会发送定时器中断。
+
+| rcu_nocbs
+| 1-30,33-62
+| 此选项将 RCU 回调处理从指定的 CPU 内核卸载。
+
+| rcu_nocb_poll
+| 
+| 设置此选项后，无 RCU 回调的 CPU 将定期“轮询”以查看是否需要处理回调，而不是被其他 CPU 显式唤醒。这可以减少中断开销。
+
+| irqaffinity
+| 0,31,32,63
+| 此选项允许内核将中断运行在内务管理核心上。
+
+| 空闲
+| 巡回检测
+| 这最大限度地减少了退出空闲状态的延迟，但代价是使 CPU 在空闲线程中全速运行。
+
+| nmi_watchdog
+| 0
+| 此选项仅禁用 NMI 看门狗。当设置 `nowatchdog` 时，可以省略此项。
+
+| nowatchdog
+|
+| 此选项禁用在定时器硬中断上下文中作为定时器运行的软锁定看门狗。
+|===
+
+以下命令修改 GRUB 配置并应用上述更改，以便在下次启动时生效：
+
+使用上述参数编辑 `/etc/default/grub` 文件，文件内容将如下所示：
+
+[,shell]
+----
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
+----
+
+更新 GRUB 配置：
+[,shell]
+----
+$ transactional-update grub.cfg
+$ reboot
+----
+
+要验证参数在重启后是否已应用，可以使用以下命令检查内核命令行：
+
+[,shell]
+----
+$ cat /proc/cmdline
+----
+
+还有另一个脚本可用于调整 CPU 配置，它基本上执行以下步骤：
+
+* 将 CPU 调控器设置为 `performance`。
+* 取消定时器向隔离 CPU 的迁移。
+* 将 kdaemon 线程迁移至内务管理内核。
+* 将隔离 CPU 的延迟设置为尽可能低的值。
+* 将 vmstat 更新延迟至 300 秒。
+
+该脚本可在 https://raw.githubusercontent.com/suse-edge/telco-cloud-examples/refs/heads/{release-tag-telco-cloud}/telco-examples/downstream-clusters/dhcp-less/eib/custom/files/performance-settings.sh[SUSE Telco Cloud Examples 储存库] 中找到。
+
+[#cpu-pinning-k8s]
+== Kubernetes 上的 CPU 绑定
+
+=== RKE2 Versions < v1.32
+通过编辑 RKE2 配置文件，在您的 RKE2 集群中启用 CPU 绑定。在 `/etc/rancher/rke2/config.yaml` 文件中添加以下 kubelet 参数。确保在 `kubelet-reserved` 和 `system-reserved` 参数中指定内务管理内核：
+
+[,yaml]
+----
+kubelet-arg:
+- "cpu-manager-policy=static"
+- "cpu-manager-policy-options=full-pcpus-only=true"
+- "cpu-manager-reconcile-period=0s"
+- "kubelet-reserved=cpu=0,31,32,63"
+- "system-reserved=cpu=0,31,32,63"
+----
+
+=== RKE2 Versions >= v1.32
+如果您的 RKE2 版本为 v1.32 或更高版本，则无法使用命令行参数来配置 kubelet，这遵循了上游 Kubernetes 的做法。要设置 CPU 绑定，需要创建一个 kubelet 配置文件。请参阅 https://documentation.suse.com/cloudnative/rke2/latest/en/install/configuration.html#_kubelet_configuration[RKE2 文档]。
+
+创建一个新的 kubelet 配置文件（例如 `01-cpu-pinning.conf`）并将其放置在 `/var/lib/rancher/rke2/agent/etc/kubelet.conf.d/` 目录中：
+
+[,yaml]
+----
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cpuManagerPolicy: static
+reservedSystemCPUs: 0,31,32,63
+topologyManagerPolicy: single-numa-node
+----
+
+要使配置更改生效，需要重启相应的 RKE2 服务（server 或 agent）。此操作将短暂中断主机上的 RKE2 服务。根据节点类型，仅运行以下命令之一：
+
+[,shell]
+----
+# If the node is RKE2 agent
+systemctl restart rke2-agent
+# Else if the node is RKE2 server
+systemctl restart rke2-server
+----
+
+=== 部署利用绑定 CPU 的工作负载
+
+根据您在工作负载上定义的请求和限制，有三种方法可以使用 kubelet 中定义的 `Static Policy` 来使用此功能：
+
+1. `BestEffort` QoS 类：如果您未为 `CPU` 定义任何请求或限制，则 Pod 将被调度到系统上第一个可用的 `CPU`。
++
+使用 `BestEffort` QoS 类的一个示例如下：
++
+[,yaml]
+----
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+----
++
+2. `Burstable` QoS 类：如果您定义的 CPU 请求不等于限制，或者没有 CPU 请求。
++
+以下是使用 `Burstable` QoS 类的示例：
++
+[,yaml]
+----
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    resources:
+      limits:
+        memory: "200Mi"
+      requests:
+        memory: "100Mi"
+----
++
+或
++
+[,yaml]
+----
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    resources:
+      limits:
+        memory: "200Mi"
+        cpu: "2"
+      requests:
+        memory: "100Mi"
+        cpu: "1"
+----
++
+3.  `Guaranteed` QoS 类：如果您定义的 CPU 请求等于限制。
++
+使用 `Guaranteed` QoS 类的一个示例如下：
++
+[,yaml]
+----
+spec:
+  containers:
+    - name: nginx
+      image: nginx
+      resources:
+        limits:
+          memory: "200Mi"
+          cpu: "2"
+        requests:
+          memory: "200Mi"
+          cpu: "2"
+----
+
+
+[#cni-configuration]
+== CNI 配置
+
+=== Cilium
+`Cilium` 是 SUSE Telco Cloud 的默认 CNI 插件。
+要在 RKE2 集群上启用 Cilium 作为默认插件，需要在 `/etc/rancher/rke2/config.yaml` 文件中进行以下配置：
+
+[,yaml]
+----
+cni:
+- cilium
+----
+
+这也可以通过命令行参数指定，即将 `--cni=cilium` 添加到 `/etc/systemd/system/rke2-server` 文件的服务器行中。
+
+要将 `SR-IOV` 中描述的 <<option2-sriov-helm>> 网络与 Cilium 一起使用，请部署 `multus` 元插件。确保 `multus` 列在其他 CNI 之前。
+
+[,yaml]
+----
+cni:
+- multus
+- cilium
+----
+
+=== Calico
+`Calico` 是用于 Telco 的 {product} 的另一个 CNI 插件。
+要在 RKE2 集群上启用 Calico 作为默认插件，需要在 `/etc/rancher/rke2/config.yaml` 文件中进行以下配置：
+
+[,yaml]
+----
+cni:
+- calico
+----
+
+这也可以通过命令行参数指定，即将 `--cni=calico` 添加到 `/etc/systemd/system/rke2-server` 文件的服务器行中。
+
+要将 `SR-IOV` 中描述的 <<option2-sriov-helm>> 网络与 Calico 一起使用，请部署 `multus` 元插件。确保 `multus` 列在其他 CNI 之前。
+
+[,yaml]
+----
+cni:
+- multus
+- calico
+----
+
+[NOTE]
+====
+有关 CNI 插件的更多信息，请参阅 https://docs.rke2.io/install/network_options[Network Options]。
+====
+
+=== Bond CNI
+通常情况下，绑定提供了一种将多个网络接口聚合为单个逻辑“绑定”接口的方法。这通常用于通过引入冗余网络路径来提高服务可用性，但也可以用于通过某些绑定模式来增加带宽。
+Bond CNI 插件结合 multus 支持以下 CNI 插件：
+
+* MACVLAN
+* 主机设备
+* SR-IOV
+
+==== 使用 MACVLAN 的 Bond CNI
+要将 Bond CNI 插件与 MACVLAN 配合使用，容器中需要两个空闲接口。以下示例使用“enp8s0”和“enp9s0”。首先为它们创建网络附件定义：
+
+*NetworkAttachmentDefinition enp8s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp8s0-conf
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "macvlan",
+          "capabilities": { "ips": true },
+          "master": "enp8s0",
+          "mode": "bridge",
+          "ipam": {}
+        }, {
+          "capabilities": { "mac": true },
+          "type": "tuning"
+        }
+      ]
+    }'
+----
+
+*NetworkAttachmentDefinition enp9s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp9s0-conf
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "macvlan",
+          "capabilities": { "ips": true },
+          "master": "enp9s0",
+          "mode": "bridge",
+          "ipam": {}
+        }, {
+          "capabilities": { "mac": true },
+          "type": "tuning"
+        }
+      ]
+    }'
+----
+
+此后，为绑定本身添加网络附件定义。
+
+*NetworkAttachmentDefinition bond*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: bond-net1
+spec:
+  config: '{
+  "type": "bond",
+  "cniVersion": "0.3.1",
+  "name": "bond-net1",
+  "mode": "active-backup",
+  "failOverMac": 1,
+  "linksInContainer": true,
+  "miimon": "100",
+  "mtu": 1500,
+  "links": [
+     {"name": "net1"},
+     {"name": "net2"}
+  ],
+  "ipam": {
+    "type": "static",
+    "addresses": [
+      {
+        "address": "192.168.200.100/24",
+        "gateway": "192.168.200.1"
+      }
+    ],
+    "subnet": "192.168.200.0/24",
+    "routes": [{
+      "dst": "0.0.0.0/0"
+    }]
+  }
+}'
+----
+
+此处的 IP 地址分配是静态的，并将绑定地址定义为 /24 网络上的“192.168.200.100”，网关位于该网络第一个可用地址上。在绑定的网络附件中，我们还定义了所需的绑定类型。在本例中，它是主备模式 (active-backup)。
+
+要使用此绑定，Pod 需要了解所有接口。Pod 定义示例如下：
+
+[,shell,subs="attributes"]
+----
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod
+  annotations:
+        k8s.v1.cni.cncf.io/networks: '[
+{"name": "enp8s0-conf",
+"interface": "net1"
+},
+{"name": "enp9s0-conf",
+"interface": "net2"
+},
+{"name": "bond-net1",
+"interface": "bond0"
+}]'
+spec:
+  restartPolicy: Never
+  containers:
+  - name: bond-test
+    image: alpine:latest
+    command:
+      - /bin/sh
+      - "-c"
+      - "sleep 60m"
+    imagePullPolicy: IfNotPresent
+----
+
+请注意注释如何引用所有网络，以及它如何定义接口“enp8s0 -> net1”和“enp9s0->net2”之间的映射。
+
+==== 使用主机设备的 Bond CNI
+要将 Bond CNI 插件与主机设备配合使用，主机上需要两个空闲接口。然后，这些接口会被映射到容器中。以下示例使用“enp8s0”和“enp9s0”。首先为它们创建网络附件定义：
+
+*NetworkAttachmentDefinition enp8s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp8s0-hostdev
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "host-device",
+          "name": "host0",
+          "device": "enp8s0",
+          "ipam": {}
+        }]
+    }'
+----
+
+*NetworkAttachmentDefinition enp9s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp9s0-hostdev
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "host-device",
+          "name": "host0",
+          "device": "enp9s0",
+          "ipam": {}
+        }]
+    }'
+----
+
+此后，为绑定本身添加网络附件定义。这与 MACVLAN 用例类似。
+
+*NetworkAttachmentDefinition bond*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: bond-net1
+spec:
+  config: '{
+  "type": "bond",
+  "cniVersion": "0.3.1",
+  "name": "bond-net1",
+  "mode": "active-backup",
+  "failOverMac": 1,
+  "linksInContainer": true,
+  "miimon": "100",
+  "mtu": 1500,
+  "links": [
+     {"name": "net1"},
+     {"name": "net2"}
+  ],
+  "ipam": {
+    "type": "static",
+    "addresses": [
+      {
+        "address": "192.168.200.100/24",
+        "gateway": "192.168.200.1"
+      }
+    ],
+    "subnet": "192.168.200.0/24",
+    "routes": [{
+      "dst": "0.0.0.0/0"
+    }]
+  }
+}'
+----
+
+此处的 IP 地址分配是静态的，并将绑定的地址定义为 /24 网络上的 '192.168.200.100'，网关位于该网络第一个可用的地址上。在绑定的网络附件中，定义绑定的类型。在本例中，它是主备模式 (active-backup)。
+
+要使用此绑定，Pod 需要了解所有接口。带有主机设备的绑定的 Pod 定义示例如下：
+
+[,shell,subs="attributes"]
+----
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod
+  annotations:
+        k8s.v1.cni.cncf.io/networks: '[
+{"name": "enp8s0-hostdev",
+"interface": "net1"
+},
+{"name": "enp9s0-hostdev",
+"interface": "net2"
+},
+{"name": "bond-net1",
+"interface": "bond0"
+}]'
+spec:
+  restartPolicy: Never
+  containers:
+  - name: bond-test
+    image: alpine:latest
+    command:
+      - /bin/sh
+      - "-c"
+      - "sleep 60m"
+    imagePullPolicy: IfNotPresent
+----
+
+==== 带有 SR-IOV 的 Bond CNI
+使用带有 SR-IOV 的 Bond CNI 非常简单。有关如何设置 SR-IOV 的更多详细信息，请参阅 <<sriov>>。如其中所述，您必须创建 `SriovNetworkNodePolicies` 来定义 `resourceNames`，以及虚拟功能的数量等。`resourceNames` 正被 `SriovNetwork` 使用，后者在 Pod 定义中用作接口。绑定定义与 MACVLAN 和主机设备的情况完全相同。
+
+[NOTE]
+====
+Bond CNI 与 SR-IOV 仅适用于使用内核驱动程序的 SRIOV 虚拟功能 (VF)。用户空间驱动程序 VF（例如 DPDK 工作负载中使用的那些）无法与 Bond CNI 绑定。
+====
+
+[#sriov]
+== SR-IOV
+
+SR-IOV（单根 I/O 虚拟化）允许单个物理设备（例如网络适配器）将其资源分散到多个 `PCIe` 硬件功能中。这使得各种应用程序能够直接访问资源。
+
+我们为您提供了两种在集群中部署 `SR-IOV` 的不同方法：
+
+* <<option1-sriov-deviceplugin>>：此方法同时支持网络设备和 vRAN 加速器。
+* <<option2-sriov-helm>>：这种自动化方法提供了更简单的部署。此方法仅适用于网络设备。
+
+在极少数需要两种解决方案的情况下（即对网络设备使用 Network Operator，对 vRAN 加速器使用 Device Plugin），您必须将它们部署到不同的 Kubernetes 名称空间中。这种分离对于防止两个部署之间的冲突至关重要。
+
+[#option1-sriov-deviceplugin]
+=== 选项 1：SR-IOV 网络设备插件 Daemonset 和 configMap
+
+https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin[SR-IOV 网络设备插件] 可发现并通告 Kubernetes 主机上的网络资源，例如 PCI 物理功能 (PF) 及其虚拟功能 (VF)。
+
+* 为设备插件准备配置映射 (config map)
+
+我们需要创建一个定义 SR-IOV 资源池的配置映射。运行 `lspci` 命令以检索信息：
+
+[,shell]
+----
+$ lspci | grep -i acc
+07:00.0 Processing accelerators: Intel Corporation Device 57c2
+07:00.1 Processing accelerators: Intel Corporation Device 57c3
+07:00.2 Processing accelerators: Intel Corporation Device 57c3
+07:00.3 Processing accelerators: Intel Corporation Device 57c3
+07:00.4 Processing accelerators: Intel Corporation Device 57c3
+07:00.5 Processing accelerators: Intel Corporation Device 57c3
+07:00.6 Processing accelerators: Intel Corporation Device 57c3
+07:00.7 Processing accelerators: Intel Corporation Device 57c3
+07:01.0 Processing accelerators: Intel Corporation Device 57c3
+07:01.1 Processing accelerators: Intel Corporation Device 57c3
+07:01.2 Processing accelerators: Intel Corporation Device 57c3
+07:01.3 Processing accelerators: Intel Corporation Device 57c3
+07:01.4 Processing accelerators: Intel Corporation Device 57c3
+07:01.5 Processing accelerators: Intel Corporation Device 57c3
+07:01.6 Processing accelerators: Intel Corporation Device 57c3
+07:01.7 Processing accelerators: Intel Corporation Device 57c3
+07:02.0 Processing accelerators: Intel Corporation Device 57c3
+0a:00.0 Processing accelerators: Intel Corporation Device 57c2
+
+$ lspci | grep -i net
+19:00.0 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
+19:00.1 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
+19:00.2 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
+19:00.3 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
+51:00.0 Ethernet controller: Intel Corporation Ethernet Controller E810-C for QSFP (rev 02)
+51:00.1 Ethernet controller: Intel Corporation Ethernet Controller E810-C for QSFP (rev 02)
+51:01.0 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:01.1 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:01.2 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:01.3 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:11.0 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:11.1 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:11.2 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:11.3 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+----
+
+SR-IOV 设备插件使用包含 JSON 文件的 configMap 来定义 Kubernetes 应公开哪些硬件资源。此配置基于两个核心概念：`selectors`（用于硬件发现）和 `resources`（用于 Kubernetes 公开）。
+
+`resource` 是 Pod 使用的命名实体（例如 `rancher.io/intel_fec_5g`）。资源可以定义为以下两种类型之一：
+
+* `accelerator`：用于 vRAN 加速卡（如 ACC100/vRAN Boost）。
+* `netdevice`：用于标准网络接口（NIC）。
+
+您可以使用 `selectors` 来定义目标设备，以过滤节点上的硬件：
+
+* `vendors`：`8086` (Intel)
+* `devices`：`57c3` (FEC VF), `1889` (NIC VF)
+* `drivers`：`vfio-pci`
+* `pfNames`：`p2p1`（物理接口名称）
+
+对于网卡，您还可以从物理功能中选择虚拟功能 (VF) 的子集：
+
+* `pfNames`：`["eth1#1,2,3,4,5,6"]` 或 `[eth1#1-6]`
+
+为了允许 Pod 请求这些设备，每个资源都必须有一个名称，该名称由前缀和名称组成：
+
+* `resourceName`：`pci_sriov_net_bh_dpdk`
+* `resourcePrefix`：`rancher.io`
+
+然后，Pod 将请求组合后的资源名称：`rancher.io/pci_sriov_net_bh_dpdk`。
+
+[NOTE]
+====
+本文档未列出所有可能的选择器。不同的资源类型使用不同的选择器集。有关详细信息，请参阅 https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin[SR-IOV 网络设备插件储存库]。
+====
+
+下方的 ConfigMap 是一个创建三个资源的示例：一个用于 vRAN 加速卡 (FEC)，两个用于两个不同的 NIC 端口。
+
+对于 FEC 卡，您必须首先获取设备 ID 和 VFIO 词元。请遵循 <<acceleration>> 章节中的说明以了解先决条件。
+
+[,yaml]
+----
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sriovdp-config
+  namespace: kube-system
+data:
+  config.json: |
+    {
+        "resourceList": [
+            {
+                "resourcePrefix": "rancher.io",
+                "resourceName": "intel_fec_5g",
+                "deviceType": "accelerator",
+                "selectors": {
+                    "vendors": ["8086"],
+                    "devices": ["57c3"]
+                },
+                "additionalInfo": {
+                      "*": {
+                        "VFIO_TOKEN": "00112233-4455-6677-8899-aabbccddeeff"
+                      }
+                  }
+            },
+            {
+                "resourcePrefix": "rancher.io",
+                "resourceName": "intel_sriov_odu",
+                "deviceType": "netdevice",
+                "selectors": {
+                    "vendors": ["8086"],
+                    "devices": ["1889"],
+                    "drivers": ["vfio-pci"],
+                    "pfNames": ["p2p1"]
+                }
+            },
+            {
+                "resourcePrefix": "rancher.io",
+                "resourceName": "intel_sriov_oru",
+                "deviceType": "netdevice",
+                "selectors": {
+                    "vendors": ["8086"],
+                    "devices": ["1889"],
+                    "drivers": ["vfio-pci"],
+                    "pfNames": ["p2p2"]
+                }
+            }
+        ]
+    }
+----
+
+* 准备 `daemonset` 文件以部署设备插件。
+
+该设备插件支持多种架构（`arm`、`amd`、`ppc64le`），因此可以通过为每种架构部署多个 `daemonset`，将同一个文件用于不同的架构。
+
+[,yaml]
+----
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sriov-device-plugin
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-sriov-device-plugin-amd64
+  namespace: kube-system
+  labels:
+    tier: node
+    app: sriovdp
+spec:
+  selector:
+    matchLabels:
+      name: sriov-device-plugin
+  template:
+    metadata:
+      labels:
+        name: sriov-device-plugin
+        tier: node
+        app: sriovdp
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      serviceAccountName: sriov-device-plugin
+      containers:
+      - name: kube-sriovdp
+        image: registry.suse.com/rancher/hardened-sriov-network-device-plugin:v3.9.0-build20250425
+        imagePullPolicy: IfNotPresent
+        args:
+        - --log-dir=sriovdp
+        - --log-level=10
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "40Mi"
+          limits:
+            cpu: 1
+            memory: "200Mi"
+        volumeMounts:
+        - name: devicesock
+          mountPath: /var/lib/kubelet/
+          readOnly: false
+        - name: log
+          mountPath: /var/log
+        - name: config-volume
+          mountPath: /etc/pcidp
+        - name: device-info
+          mountPath: /var/run/k8s.cni.cncf.io/devinfo/dp
+      volumes:
+        - name: devicesock
+          hostPath:
+            path: /var/lib/kubelet/
+        - name: log
+          hostPath:
+            path: /var/log
+        - name: device-info
+          hostPath:
+            path: /var/run/k8s.cni.cncf.io/devinfo/dp
+            type: DirectoryOrCreate
+        - name: config-volume
+          configMap:
+            name: sriovdp-config
+            items:
+            - key: config.json
+              path: config.json
+----
+
+* 应用 configMap 和 `daemonset` 后，设备插件将完成部署，接口将被发现并可供 Pod 使用。
++
+[,shell]
+----
+$ kubectl get pods -n kube-system | grep sriov
+kube-system  kube-sriov-device-plugin-amd64-twjfl  1/1  Running  0  2m
+----
++
+* 验证所有节点，查看接口是否已被发现并可供 Pod 使用：
++
+----
+$ kubectl get nodes -o json | jq '.items[] | {name: .metadata.name, allocatable: .status.allocatable}'
+{
+  "name": "node1.suse.edge.com",
+  "allocatable": {
+      "cpu": "64",
+      "ephemeral-storage": "256196109726",
+      "hugepages-1Gi": "40Gi",
+      "hugepages-2Mi": "0",
+      "rancher.io/intel_fec_5g": "16",
+      "rancher.io/intel_sriov_odu": "4",
+      "rancher.io/intel_sriov_oru": "4",
+      "memory": "221396384Ki",
+      "pods": "110"
+  }
+}
+----
++
+* `FEC` 加速器的 resourceName 为 `rancher.io/intel_fec_5g`，且有 16 个 VF 可供使用。
+* NIC 卡的 resourceName 分别为 `rancher.io/intel_sriov_odu` 和 `rancher.io/intel_sriov_oru`。每个资源提供 4 个 VF。
+
+[IMPORTANT]
+====
+如果 Kubernetes 节点中未检测到可分配资源的接口，则必须解决此问题。一个常见原因是 configMap 规范格式错误，因此最好检查 configMap 及其选择器。
+====
+
+[#option2-sriov-helm]
+=== 选项 2（推荐）：SR-IOV Network Operator 
+
+* 如果尚未安装 Helm，请获取它：
+
+[,shell,subs="attributes"]
+----
+$ curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+----
+
+* 在 `sriov-network-operator` 命名空间中安装 SR-IOV 网络运营商：
+
+[,shell,subs="attributes"]
+----
+helm install sriov-crd oci://registry.suse.com/edge/charts/sriov-crd -n sriov-network-operator
+helm install sriov-network-operator oci://registry.suse.com/edge/charts/sriov-network-operator -n sriov-network-operator
+----
+
+* 检查已部署的 CRD 和 Pod：
+
+[,shell]
+----
+$ kubectl get crd
+$ kubectl -n sriov-network-operator get pods
+----
+
+* 检查 SR-IOV 标签是否已应用于节点。
+
+当所有资源都在运行时，该标签会自动出现在您的节点中：
+
+[,shell]
+----
+$ kubectl get nodes -oyaml | grep feature.node.kubernetes.io/network-sriov.capable
+
+feature.node.kubernetes.io/network-sriov.capable: "true"
+----
+
+* 查看 `daemonset` 以了解新的 `sriov-network-config-daemon` 和 `sriov-rancher-nfd-worker` 是否处于活动和就绪状态：
+
+[,shell]
+----
+$ kubectl get daemonset -n sriov-network-operator
+NAMESPACE             NAME                            DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR                                           AGE
+sriov-network-operator   sriov-network-config-daemon     1         1         1       1            1           feature.node.kubernetes.io/network-sriov.capable=true   45m
+sriov-network-operator   sriov-rancher-nfd-worker        1         1         1       1            1           <none>                                                  45m
+----
+
+几分钟后，节点将被检测到并完全配置 `SR-IOV` 功能。更新有时可能需要长达 10 分钟：
+
+[,shell]
+----
+$ kubectl get sriovnetworknodestates -A
+NAMESPACE             NAME     AGE
+sriov-network-operator   xr11-2   83s
+----
+
+* 检查接口是否已被检测到。
+
+发现的接口应为网络设备的 PCI 地址。使用主机中的 `lspci` 命令检查此信息。
+
+[,shell]
+----
+$ kubectl get sriovnetworknodestates -n sriov-network-operator -oyaml
+apiVersion: v1
+items:
+- apiVersion: sriovnetwork.openshift.io/v1
+  kind: SriovNetworkNodeState
+  metadata:
+    creationTimestamp: "2023-06-07T09:52:37Z"
+    generation: 1
+    name: xr11-2
+    namespace: sriov-network-operator
+    ownerReferences:
+    - apiVersion: sriovnetwork.openshift.io/v1
+      blockOwnerDeletion: true
+      controller: true
+      kind: SriovNetworkNodePolicy
+      name: default
+      uid: 80b72499-e26b-4072-a75c-f9a6218ec357
+    resourceVersion: "356603"
+    uid: e1f1654b-92b3-44d9-9f87-2571792cc1ad
+  spec:
+    dpConfigVersion: "356507"
+  status:
+    interfaces:
+    - deviceID: "1592"
+      driver: ice
+      eSwitchMode: legacy
+      linkType: ETH
+      mac: 40:a6:b7:9b:35:f0
+      mtu: 1500
+      name: p2p1
+      pciAddress: "0000:51:00.0"
+      totalvfs: 128
+      vendor: "8086"
+    - deviceID: "1592"
+      driver: ice
+      eSwitchMode: legacy
+      linkType: ETH
+      mac: 40:a6:b7:9b:35:f1
+      mtu: 1500
+      name: p2p2
+      pciAddress: "0000:51:00.1"
+      totalvfs: 128
+      vendor: "8086"
+    syncStatus: Succeeded
+kind: List
+metadata:
+  resourceVersion: ""
+----
+
+[NOTE]
+====
+如果此处未检测到您的接口，请确保它存在于下一个配置映射中：
+
+[,shell]
+----
+$ kubectl get cm supported-nic-ids -oyaml -n sriov-network-operator
+----
+
+如果未列出您的设备，请通过添加正确的值以进行发现来编辑配置映射。然后重启每个节点上的 `sriov-network-config-daemon` Pod 以使更新生效。
+====
+
+* 创建 `SriovNetworkNodePolicy` 以配置 `VFs`
+
+此策略创建资源 `intelnicsDpdk`，供 Pod 使用。它还将 `vfio-pci` 驱动程序绑定到提供的 PCI 设备，并创建 8 个 MTU 为 1500 的虚拟功能：
+
+[NOTE]
+====
+`resourceName` 字段不得包含任何特殊字符，并且在整个集群中必须是唯一的。
+该示例使用 `deviceType: vfio-pci`，因为 DPDK 与 SR-IOV 结合使用。如果您不使用 DPDK，请配置 `deviceType: netdevice`（默认值）。
+====
+
+[,yaml]
+----
+apiVersion: sriovnetwork.openshift.io/v1
+kind: SriovNetworkNodePolicy
+metadata:
+  name: policy-dpdk
+  namespace: sriov-network-operator
+spec:
+  nodeSelector:
+    feature.node.kubernetes.io/network-sriov.capable: "true"
+  resourceName: intelnicsDpdk
+  deviceType: vfio-pci
+  numVfs: 8
+  mtu: 1500
+  nicSelector:
+    deviceID: "1592"
+    vendor: "8086"
+    rootDevices:
+    - 0000:51:00.0
+----
+
+* 验证所有节点上的配置：
+
+使用预定义的 resourcePrefix `rancher.io`，应发现具有 8 个 VF 的资源 `rancher.io/intelnicsDpdk`。
+
+[,shell]
+----
+$ kubectl get nodes -o jsonpath='{"items": [ { "name": @.metadata.name, "allocatable": @.status.allocatable } ]}' | jq
+{
+  "name": "node1.suse.edge.com",
+  "allocatable": {
+      "cpu": "64",
+      "ephemeral-storage": "256196109726",
+      "hugepages-1Gi": "60Gi",
+      "hugepages-2Mi": "0",
+      "rancher.io/intel_fec_5g": "16",
+      "memory": "200424836Ki",
+      "pods": "110",
+      "rancher.io/intelnicsDpdk": "8"
+  }
+}
+----
+
+* （可选）创建 `sriovnetwork`
+
+此步骤为可选步骤，仅在自定义网络定义时需要。指定 `resourceName` 以绑定到先前创建的节点策略。
+
+如果设置了 `networkNamespace`，则该网络将暴露给该命名空间中的 Pod。否则，该网络将在 Network Operator 的安装命名空间中可用。
+
+[,yaml]
+----
+apiVersion: sriovnetwork.openshift.io/v1
+kind: SriovNetwork
+metadata:
+  name: network-dpdk
+  namespace: sriov-network-operator        # where SRIOV Operator is installed
+spec:
+  ipam: |
+    {
+      "type": "host-local",
+      "subnet": "192.168.0.0/24",
+      "rangeStart": "192.168.0.20",
+      "rangeEnd": "192.168.0.60",
+      "routes": [{
+        "dst": "0.0.0.0/0"
+      }],
+      "gateway": "192.168.0.1"
+    }
+  vlan: 500
+  resourceName: intelnicsDpdk
+  networkNamespace: default         # where workloads are deployed
+----
+
+* 如果更新成功，则会在目标集群中创建 NetworkAttachmentDefinition (NAD)。
+
+[,shell]
+----
+$ kubectl get net-attach-def -A -oyaml
+
+apiVersion: v1
+items:
+- apiVersion: k8s.cni.cncf.io/v1
+  kind: NetworkAttachmentDefinition
+  metadata:
+    annotations:
+      k8s.v1.cni.cncf.io/resourceName: rancher.io/intelnicsDpdk
+    creationTimestamp: "2023-06-08T11:22:27Z"
+    generation: 1
+    name: network-dpdk
+    namespace: default
+    resourceVersion: "13124"
+    uid: df7c89f5-177c-4f30-ae72-7aef3294fb15
+  spec:
+    config: '{ "cniVersion":"0.4.0", "name":"network-dpdk","type":"sriov","vlan":500,"vlanQoS":0,"ipam":{"type":"host-local","subnet":"192.168.0.0/24","rangeStart":"192.168.0.10","rangeEnd":"192.168.0.60","routes":[{"dst":"0.0.0.0/0"}],"gateway":"192.168.0.1"}
+      }'
+kind: List
+metadata:
+  resourceVersion: ""
+----
+
+工作负载 Pod 可以使用 resourceName `rancher.io/intelnicsDpdk` 来使用网络接口的 VF。
+
+
+[#dpdk]
+== DPDK
+
+`DPDK` (Data Plane Development Kit) 是一组用于快速数据包处理的库和驱动程序。它用于加速在各种 CPU 架构上运行的数据包处理工作负载。
+DPDK 包括数据平面库和针对以下内容优化的网络接口卡 (`NIC`) 驱动程序：
+
+1. 队列管理器实现无锁队列。
+2. 缓冲区管理器预分配固定大小的缓冲区。
+3. 内存管理器在内存中分配对象池，并使用环形缓冲区存储空闲对象；确保对象均匀分布在所有 `DRAM` 通道上。
+4. 轮询模式驱动程序 (`PMD`) 旨在无需异步通知即可工作，从而减少开销。
+5. 数据包框架是一组用于辅助开发数据包处理流程的库。
+
+以下步骤将展示如何启用 `DPDK` 以及如何从 `NICs` 创建 `VFs`，以供 `DPDK` 接口使用：
+
+* 安装 `DPDK` 软件包：
+
+[,shell]
+----
+$ transactional-update pkg install dpdk dpdk-tools libdpdk-25
+$ reboot
+----
+
+
+* 内核参数：
+
+要使用 DPDK，请使用一些驱动程序来启用内核中的特定参数：
+
+|===
+| parameter | value | 描述
+
+| IOMMU
+| pt
+| 此选项启用 `vfio` 驱动程序以用于 DPDK 接口。
+
+| intel_iommu or amd_iommu
+| on
+| 此选项启用 `vfio` 以用于 `VFs`。
+|===
+
+要启用这些参数，请将它们添加到 `/etc/default/grub` 文件中：
+
+[,shell]
+----
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
+----
+
+更新 GRUB 配置并重启系统以应用更改：
+
+[,shell]
+----
+$ transactional-update grub.cfg
+$ reboot
+----
+
+* 加载 `vfio-pci` 内核模块并在 NIC 上启用 `SR-IOV`。第一个参数指示 `vfio-pci` 驱动程序支持 SR-IOV，第二个参数可防止 PCI 设备在空闲时进入低功耗状态：
+
+[,shell]
+----
+$ modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
+----
+
+* 从 `NICs` 创建一些虚拟功能（VF） (`VFs`)。
+
+要为 `VFs` 创建（例如，针对两个不同的 `NICs`），需要执行以下命令：
+
+[,shell]
+----
+$ echo 4 > /sys/bus/pci/devices/0000:51:00.0/sriov_numvfs
+$ echo 4 > /sys/bus/pci/devices/0000:51:00.1/sriov_numvfs
+----
+
+* 将新的虚拟功能与 `vfio-pci` 驱动程序绑定：
+
+[,shell]
+----
+$ dpdk-devbind.py -b vfio-pci 0000:51:01.0 0000:51:01.1 0000:51:01.2 0000:51:01.3 \
+                              0000:51:11.0 0000:51:11.1 0000:51:11.2 0000:51:11.3
+----
+
+* 检查配置是否已正确应用：
+
+[,shell]
+----
+$ dpdk-devbind.py -s
+
+Network devices using DPDK-compatible driver
+============================================
+0000:51:01.0 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:01.1 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:01.2 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:01.3 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:01.0 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:11.1 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:21.2 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:31.3 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+
+Network devices using kernel driver
+===================================
+0000:19:00.0 'BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet 1751' if=em1 drv=bnxt_en unused=igb_uio,vfio-pci *Active*
+0000:19:00.1 'BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet 1751' if=em2 drv=bnxt_en unused=igb_uio,vfio-pci
+0000:19:00.2 'BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet 1751' if=em3 drv=bnxt_en unused=igb_uio,vfio-pci
+0000:19:00.3 'BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet 1751' if=em4 drv=bnxt_en unused=igb_uio,vfio-pci
+0000:51:00.0 'Ethernet Controller E810-C for QSFP 1592' if=eth13 drv=ice unused=igb_uio,vfio-pci
+0000:51:00.1 'Ethernet Controller E810-C for QSFP 1592' if=rename8 drv=ice unused=igb_uio,vfio-pci
+----
+
+
+[#acceleration]
+== vRAN 加速 (`Intel ACC100/VRB1/VRB2`)
+
+随着通信服务提供商从 4G 网络转向 5G 网络，许多提供商正在采用虚拟化无线接入网 (vRAN) 架构，以实现更高的信道容量，并更轻松地部署基于边缘的服务和应用程序。vRAN 解决方案非常适合提供低延迟服务，并能够根据实时流量和网络需求灵活地增加或减少容量。
+
+最耗费计算资源的 4G 和 5G 工作负载之一是 RAN 第 1 层 (`L1`) `FEC`，它解决了不可靠或嘈杂通信信道上的数据传输错误。`FEC` 技术可检测并纠正 4G 或 5G 数据中有限数量的错误，从而无需重传。由于 `FEC` 加速事务不包含小区状态信息，因此可以轻松实现虚拟化，从而实现资源池化优势并简化小区迁移。
+
+从历史上看，英特尔提供了 ACC100 vRAN 加速卡来快速执行第 1 层 FEC 算法，从而为主 CPU 释放主机处理能力。此后，英特尔将此技术直接集成到了较新的 CPU 中（从 Sapphire Rapids 开始），并命名为 `Intel vRAN Boost` (VRB)。Intel vRAN Boost 作为 CPU 本身的卸载加速器，无需单独的硬件卡。本节详细介绍了 SUSE Telco Cloud 的配置，以便工作负载利用 ACC100 或 Intel vRAN Boost。
+
+
+=== 内核参数
+
+要启用 `vRAN` 加速，我们需要启用以下内核参数（如果尚未存在）：
+
+|===
+| parameter | value | 描述
+
+| IOMMU
+| pt
+| 此选项启用 DPDK 接口的 vfio 使用。
+
+| intel_iommu or amd_iommu
+| on
+| 此选项启用虚拟功能的 vfio 使用。
+|===
+
+修改 GRUB 文件 `/etc/default/grub` 以将它们添加到内核命令行：
+
+[,shell]
+----
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
+----
+
+更新 GRUB 配置并重启系统以应用更改：
+
+[,shell]
+----
+$ transactional-update grub.cfg
+$ reboot
+----
+
+要验证参数在重启后是否已应用，请检查命令行：
+
+[,shell]
+----
+$ cat /proc/cmdline
+----
+
+=== 在 FEC 加速器上配置 SR-IOV
+
+* 加载 `vfio-pci` 内核模块以启用 vRAN 加速。第一个参数指示支持 SR-IOV 的 `vfio-pci` 模块，第二个参数可防止 PCI 设备在空闲时进入低功耗状态。
+
+[,shell]
+----
+$ modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
+----
+
+* 检索 FEC 加速器的 PCI 设备地址：
+
+[,shell]
+----
+$ lspci -DPPnn | grep -i acc
+0000:07:00.0 Processing accelerators [1200]: Intel Corporation Device [8086:57c2]
+0000:0a:00.0 Processing accelerators [1200]: Intel Corporation Device [8086:57c2]
+
+----
+
+* 将物理接口 (`PF`) 与 `vfio-pci` 驱动程序绑定：
+
+[,shell]
+----
+$ dpdk-devbind.py -b vfio-pci 0000:07:00.0
+----
+
+* 从物理接口 (`PF`) 创建虚拟功能 (`VFs`)。
+
+检查加速器卡的 `VF` 最大容量。接下来，配置该卡以暴露所需数量的虚拟功能，且不超过最大数量。在此示例中，我们将该卡配置为其 16 个虚拟功能的全部容量：
+
+[,shell]
+----
+$ cat /sys/bus/pci/devices/0000:07:00.0/sriov_totalvfs
+64
+$ echo 16 > /sys/bus/pci/devices/0000:07:00.0/sriov_numvfs
+----
+
+* 使用 4G 或 5G 配置文件配置加速器卡及其虚拟功能，并根据具体的英特尔处理器代次选择正确的 `vRAN Boost` 设备类型：如果为 Sapphire Rapids Edge Enhanced (SPR-EE)，则选择 `VRB1`（前称为 ACC200）；如果为 Granite Rapids-D (GNR-D)，则选择 `VRB2`。必须提供唯一的虚拟功能词元 (UUID)（工作负载将使用此虚拟功能词元来利用该卡的 FEC 加速功能）。
+
+[WARNING]
+====
+自 `pf-bb-config` 起弃用：支持 VRB2 设备类型的新 rpm 版本现在将配置文件安装在 `/usr/share/pf-bb-config/examples` 路径；旧的 `/opt/pf-bb-config/` 路径仍受支持，但将在未来版本中移除。请更新您的脚本和文档以反映新路径（如下例所示）。
+====
+
+[,shell]
+----
+$ pf_bb_config VRB2 -c /usr/share/pf-bb-config/examples/vrb2/vrb2_config_vf_5g.cfg -f /usr/share/pf-bb-config/examples/vrb2/srs_fft_windows_coefficient.bin -v 00112233-4455-6677-8899-aabbccddeeff -p 0000:07:00.0
+== pf_bb_config Version 25.11 ==
+VRB2 PF [0000:07:00.0] configuration complete!
+Log file = /var/log/pf_bb_cfg_0000:07:00.0.log
+----
+
+* 验证从 FEC PF 创建的新虚拟功能。请注意，虚拟功能已获得 `0d5d` 设备 ID。下一步需要此信息以将这些虚拟功能公开为 Kubernetes 资源：
+
+[,shell]
+----
+$ # dpdk-devbind.py -s | grep -A18 Baseband 
+Baseband devices using DPDK-compatible driver
+=============================================
+0000:07:00.0 'Device 57c2' numa_node=0 drv=vfio-pci unused=
+0000:07:00.1 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.2 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.3 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.4 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.5 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.6 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.7 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.0 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.1 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.2 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.3 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.4 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.5 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.6 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.7 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:02.0 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+--
+Other Baseband devices
+======================
+0000:0a:00.0 'Device 57c2' numa_node=0 unused=vfio-pci
+
+Other Crypto devices
+====================
+0000:01:00.0 '420xx Series QAT 4946' numa_node=0 unused=vfio-pci
+0000:03:00.0 'Device 2714' numa_node=0 unused=vfio-pci
+
+DMA devices using kernel driver
+===============================
+0000:00:01.0 'Device 11fb' numa_node=0 drv=idxd unused=vfio-pci 
+
+Other Eventdev devices
+======================
+0000:03:00.0 'Device 2714' numa_node=0 unused=vfio-pci
+
+No 'Mempool' devices detected
+=============================
+----
+
+=== 配置 Kubernetes 以实现 FEC 加速
+最后一步是在 SR-IOV 设备插件的帮助下将虚拟功能公开给 Kubernetes。使用从上一步收集的虚拟功能的 deviceID 创建 ConfigMap，并安装 SR-IOV 设备插件。一旦 Kubernetes 节点将 FEC 虚拟功能显示为 `Allocatable` 资源，集群即准备好让工作负载享受 FEC 加速。
+
+按照 <<sriov>> 章节中选项 1 的步骤操作。SRIOV Network Operator 不适用于 FEC 加速器，因此选项 2 不适用。
+
+
+[#huge-pages]
+== 大页
+
+当进程使用 `RAM` 时，`CPU` 会将其标记为该进程正在使用。为了提高效率，`CPU` 以块为单位分配 `RAM`，`4K` 字节是许多平台上的默认值。这些块被称为页。页可以交换到磁盘等。
+
+由于进程地址空间是虚拟的，`CPU` 和操作系统需要记住哪些页属于哪个进程，以及每个页存储在哪里。页数越多，内存映射的搜索时间就越长。当进程使用 `1 GB` 内存时，需要查找 262144 个条目（`1 GB` / `4 K`）。如果页表条目占用 8 字节，则需要查找 `2 MB` (262144 * 8)。
+
+大多数当前的 `CPU` 架构都支持大于默认值的页，这使得 `CPU/OS` 需要查找的条目更少。
+
+* 内核参数
+
+要启用大页，我们应该添加以下内核参数。在此示例中，我们配置了 40 个 1G 大页，但大页大小和确切数量应根据您的应用程序内存需求进行调整：
+
+|===
+| parameter | value | 描述
+
+| hugepagesz
+| 1G
+| 此选项允许将大页的大小设置为 1 G
+
+| hugepages
+| 40
+| 这是之前定义的大页数量
+
+| default_hugepagesz
+| 1G
+| 这是获取大页的默认值
+|===
+
+修改 GRUB 文件 `/etc/default/grub`，在 `GRUB_CMDLINE_LINUX` 中添加这些参数：
+
+[,shell]
+----
+default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0
+----
+
+更新 GRUB 配置并重启系统以应用更改：
+
+[,shell]
+----
+$ transactional-update grub.cfg
+$ reboot
+----
+
+要验证重启后参数是否已应用，您可以检查命令行：
+
+[,shell]
+----
+$ cat /proc/cmdline
+----
+
+* 使用大页
+
+要使用大页，我们需要挂载它们：
+
+[,shell]
+----
+$ mkdir -p /hugepages
+$ mount -t hugetlbfs nodev /hugepages
+----
+
+部署 Kubernetes 工作负载，创建资源和卷：
+
+[,yaml]
+----
+...
+ resources:
+   requests:
+     memory: "24Gi"
+     hugepages-1Gi: 16Gi
+     intel.com/intel_sriov_oru: '4'
+   limits:
+     memory: "24Gi"
+     hugepages-1Gi: 16Gi
+     intel.com/intel_sriov_oru: '4'
+...
+----
+
+[,yaml]
+----
+...
+volumeMounts:
+  - name: hugepage
+    mountPath: /hugepages
+...
+volumes:
+  - name: hugepage
+    emptyDir:
+      medium: HugePages
+...
+----
+
+
+[#numa-aware-scheduling]
+== NUMA 感知调度
+
+非一致性内存访问或非一致性内存架构 (`NUMA`) 是一种用于 `SMP`（多处理器）架构的物理内存设计，其中内存访问时间取决于内存相对于处理器的位置。在 `NUMA` 下，处理器访问其本地内存的速度比访问非本地内存（即另一个处理器的本地内存或处理器间共享的内存）要快。
+
+=== 识别 NUMA 节点
+
+要识别 `NUMA` 节点，请在您的系统上使用以下命令：
+
+[,shell]
+----
+$ lscpu | grep NUMA
+NUMA node(s):                       1
+NUMA node0 CPU(s):                  0-63
+----
+
+[NOTE]
+====
+在此示例中，我们只有一个显示 64 个 `CPUs` 的 `NUMA` 节点。
+
+需要在 `BIOS` 中启用 `NUMA`。如果 `dmesg` 没有启动期间 NUMA 初始化的记录，那么内核环形缓冲区中与 `NUMA` 相关的消息可能已被覆盖。
+====
+
+
+
+[#metal-lb-configuration]
+== Metal LB
+
+`MetalLB` 是一种用于裸机 Kubernetes 集群的负载均衡器实现，使用 `L2` 和 `BGP` 等标准路由协议作为通告协议。它是一种网络负载均衡器，由于在裸机上需要使用 Kubernetes 服务类型 `LoadBalancer`，因此可用于将 Kubernetes 集群中的服务暴露给外部世界。
+
+要在 `MetalLB` 集群中启用 `RKE2`，需要执行以下步骤：
+
+* 使用以下命令安装 `MetalLB`：
+
+[,shell,subs="attributes,specialchars"]
+----
+$ kubectl apply <<EOF -f
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: metallb
+  namespace: kube-system
+spec:
+  chart: oci://registry.suse.com/edge/charts/metallb
+  targetNamespace: metallb-system
+  version: {version-metallb-chart}
+  createNamespace: true
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: endpoint-copier-operator
+  namespace: kube-system
+spec:
+  chart: oci://registry.suse.com/edge/charts/endpoint-copier-operator
+  targetNamespace: endpoint-copier-operator
+  version: {version-endpoint-copier-operator-chart}
+  createNamespace: true
+EOF
+----
+
+* 创建 `IpAddressPool` 和 `L2advertisement` 配置：
+
+[,yaml]
+----
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: kubernetes-vip-ip-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    - 10.168.200.98/32
+  serviceAllocation:
+    priority: 100
+    namespaces:
+      - default
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: ip-pool-l2-adv
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - kubernetes-vip-ip-pool
+----
+
+* 创建端点服务以暴露 `VIP`：
+
+[,yaml]
+----
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubernetes-vip
+  namespace: default
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: rke2-api
+    port: 9345
+    protocol: TCP
+    targetPort: 9345
+  - name: k8s-api
+    port: 6443
+    protocol: TCP
+    targetPort: 6443
+  sessionAffinity: None
+  type: LoadBalancer
+----
+
+* 检查 `VIP` 是否已创建，以及 `MetalLB` pod 是否正在运行：
+
+[,shell]
+----
+$ kubectl get svc -n default
+$ kubectl get pods -n default
+----
+
+[#private-registry]
+== 私有镜像仓库配置
+
+可以配置 `Containerd` 以连接到私有镜像仓库，并使用它们在每个节点上拉取私有镜像。
+
+启动时，`RKE2` 会检查 `/etc/rancher/rke2/` 处是否存在 `registries.yaml` 文件，并指示 `containerd` 使用文件中定义的任何镜像仓库。如果您希望使用私有镜像仓库，请以 root 用户身份在每个将使用该镜像仓库的节点上创建此文件。
+
+要添加私有镜像仓库，请创建文件 `/etc/rancher/rke2/registries.yaml` 并填入以下内容：
+
+[,yaml]
+----
+mirrors:
+  docker.io:
+    endpoint:
+      - "https://registry.example.com:5000"
+configs:
+  "registry.example.com:5000":
+    auth:
+      username: xxxxxx # this is the registry username
+      password: xxxxxx # this is the registry password
+    tls:
+      cert_file:            # path to the cert file used to authenticate to the registry
+      key_file:             # path to the key file for the certificate used to authenticate to the registry
+      ca_file:              # path to the ca file used to verify the registry's certificate
+      insecure_skip_verify: # may be set to true to skip verifying the registry's certificate
+----
+
+或无需身份验证：
+
+[,yaml]
+----
+mirrors:
+  docker.io:
+    endpoint:
+      - "https://registry.example.com:5000"
+configs:
+  "registry.example.com:5000":
+    tls:
+      cert_file:            # path to the cert file used to authenticate to the registry
+      key_file:             # path to the key file for the certificate used to authenticate to the registry
+      ca_file:              # path to the ca file used to verify the registry's certificate
+      insecure_skip_verify: # may be set to true to skip verifying the registry's certificate
+----
+
+为了使镜像仓库的更改生效，您需要在节点上启动 RKE2 之前配置此文件，或者在每个已配置的节点上重启 RKE2。
+
+[NOTE]
+====
+有关此内容的更多信息，请查看 https://documentation.suse.com/cloudnative/rke2/latest/en/install/containerd_registry_configuration.html#_registries_configuration_file[containerd 镜像仓库配置 rke2]。
+====
+
+[#ptp-configuration]
+== 精确时间协议
+
+精确时间协议 (PTP) 是由电气电子工程师学会 (IEEE) 开发的一种网络协议，旨在实现计算机网络中的亚微秒级时间同步。自诞生以来的二十多年里，PTP 已在许多行业中得到应用。最近，它在电信网络中得到了越来越多的采用，成为 5G 网络的重要组成部分。虽然它是一个相对简单的协议，但其配置可能会根据应用程序发生显著变化。因此，人们定义并标准化了多种控制文件。
+
+在本节中，仅涵盖电信特定的控制文件。因此，将假定网卡 (NIC) 具备时间戳功能和 PTP 硬件时钟 (PHC)。如今，所有电信级网络适配器都在硬件中提供了 PTP 支持，但您可以使用以下命令验证这些功能：
+
+[,console]
+----
+# ethtool -T p1p1
+Time stamping parameters for p1p1:
+Capabilities:
+        hardware-transmit
+        software-transmit
+        hardware-receive
+        software-receive
+        software-system-clock
+        hardware-raw-clock
+PTP Hardware Clock: 0
+Hardware Transmit Timestamp Modes:
+        off
+        on
+Hardware Receive Filter Modes:
+        none
+        all
+----
+
+将 `p1p1` 替换为用于 PTP 的接口名称。
+
+以下章节将提供关于如何在 SUSE Telco Cloud 上安装和配置 PTP 的具体指导，但前提是您需要熟悉 PTP 的基本概念。有关 PTP 及其在 SUSE Telco Cloud 中实现的简要概述，请参阅 https://documentation.suse.com/sles/15-SP7/html/SLES-all/cha-tuning-ptp.html[SLES 精确时间协议文档]。
+
+=== 安装 PTP 软件组件
+
+在 SUSE Telco Cloud 中，PTP 实现由 `linuxptp` 软件包提供，其中包括两个组件：
+
+- `ptp4l`：一个控制网卡（NIC）上 PHC 并运行 PTP 协议的守护程序
+- `phc2sys`：一个使系统时钟与网卡（NIC）上经 PTP 同步的 PHC 保持一致的守护程序
+
+系统同步要完全正常工作，这两个守护程序都是必需的，并且必须根据您的设置进行正确配置。这在 <<ptp-telco-config>> 中有介绍。
+
+在下游集群中集成 PTP 最简单且最好的方法是在 Edge Image Builder (EIB) 定义文件的 `packageList` 下添加 `linuxptp` 软件包。这样，PTP 控制平面软件将在集群置备期间自动安装。有关安装软件包的更多信息，请参阅 xref:../quickstart/eib.adoc#eib-configuring-rpm-packages[EIB 文档]。
+
+请查阅下方所示的包含 `linuxptp` 的 EIB 清单示例：
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: RAW
+  arch: x86_64
+  baseImage: {micro-base-rt-image-raw}
+  outputImageName: eibimage-slmicrort-telco.raw
+operatingSystem:
+  time:
+    timezone: America/New_York
+  kernelArgs:
+    - ignition.platform.id=openstack
+  systemd:
+    disable:
+      - rebootmgr
+      - transactional-update.timer
+      - transactional-update-cleanup.timer
+      - fstrim
+      - time-sync.target
+    enable:
+      - ptp4l
+      - phc2sys
+  users:
+    - username: root
+      encryptedPassword: $ROOT_PASSWORD
+  packages:
+    packageList:
+      - jq            # Non Telco specific - category: testing/utils
+      - dpdk          # TelCo Core-Network UserPlane (5G UPF) and RAN UserPlane (gNB: DU and CU-UP) - category: runtime
+      - dpdk-tools    # TelCo Core-Network UserPlane (5G UPF) and RAN UserPlane (gNB: DU and CU-UP) - category: testing/utils
+      - libdpdk-25    # TelCo Core-Network UserPlane (5G UPF) and RAN UserPlane (gNB: DU and CU-UP) - category: runtime
+      - pf-bb-config  # TelCo RAN (gNB: DU) - category: config.
+      - open-iscsi    # Non Telco specific (required by SUSE Storage/Longhorn) - category: runtime
+      - tuned         # Non Telco specific (linux tuning) - category: config.
+      - cpupower      # Non Telco specific (linux tuning - CPU power related settings) - category: config.
+      - rt-tests      # Non Telco specific (RT scheduler-latency testing) - category: testing/utils
+      - linuxptp      # TelCo RAN; time sync (gNB: DU) - category: runtime
+      - synce4l       # TelCo RAN; time sync (gNN: DU) - category: runtime
+      - pciutils      # Non Telco specific (provides "lspci" command) - category: testing/utils
+      - numactl       # Non Telco specific (provides "numatcl" command) - category: testing/utils
+    sccRegistrationCode: $SCC_REGISTRATION_CODE
+----
+
+[NOTE]
+====
+SUSE Telco Cloud 中包含的 `linuxptp` 软件包默认不会启用 `ptp4l` 和 `phc2sys`。如果它们的系统特定配置文件在置备时已部署（参见 <<ptp-capi>>），则应启用它们。通过将它们添加到清单的 `systemd` 部分来执行此操作，如上例所示。
+====
+
+按照 xref:../quickstart/eib.adoc#eib-how-to-build-image[EIB 文档] 中所述的常规处理流程构建镜像，并使用它来部署您的集群。如果您是 EIB 的新手，请从 xref:../components/edge-image-builder.adoc#components-eib[] 开始。
+
+[#ptp-telco-config]
+=== 为电信部署配置 PTP
+
+许多电信应用需要严格的相位和时间同步，且偏差极小，这导致了两种面向电信的控制文件的定义：ITU-T G.8275.1 和 ITU-T G.8275.2。它们都具有高频率的同步消息和其他显著特征，例如使用替代的最佳主时钟算法（BMCA）。这种行为要求 `ptp4l` 所使用的配置文件中包含特定设置，以下章节提供了这些设置作为参考。
+
+[NOTE]
+====
+* 这两个部分仅涵盖时间接收器配置中普通时钟的情况。
+* 任何此类控制文件都必须在规划良好的 PTP 基础设施中使用。
+* 您的特定 PTP 网络可能需要额外的配置调整，请确保根据需要查看并调整所提供的示例。
+====
+
+==== PTP 控制文件 ITU-T G.8275.1
+
+G.8275.1 控制文件具有以下特性：
+
+* 直接在以太网上运行，需要完整的网络支持（相邻节点/交换机必须支持 PTP）。
+* 默认域设置为 24。
+* 数据集比较基于 G.8275.x 算法及其在 `priority2` 之后的 `localPriority` 值。
+
+将以下内容复制到名为 `/etc/ptp4l-G.8275.1.conf` 的文件中：
+
+[source,]
+----
+# Telecom G.8275.1 example configuration
+[global]
+domainNumber                    24
+priority2            255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout        3
+serverOnly                      0
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+----
+
+文件创建完成后，必须在 `/etc/sysconfig/ptp4l` 中引用它，守护进程才能正确启动。可以通过将 `OPTIONS=` 行更改为以下内容来实现：
+
+[source,]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf -i $IFNAME --message_tag ptp-8275.1"
+----
+
+更准确地说：
+
+- `-f` 需要使用配置文件的文件名；在本例中为 `/etc/ptp4l-G.8275.1.conf`
+- `-i` 需要使用接口名称，请将 `$IFNAME` 替换为实际的接口名称。
+- `--message_tag` 有助于在系统日志中更好地识别 ptp4l 输出，此项为可选。
+
+完成上述步骤后，必须重新启动 `ptp4l` 守护程序：
+
+[,console]
+----
+# systemctl restart ptp4l
+----
+
+通过以下命令观察日志以检查同步状态：
+
+[,console]
+----
+# journalctl -e -u ptp4l
+----
+
+==== PTP 控制文件 ITU-T G.8275.2
+
+G.8275.2 控制文件具有以下特性：
+
+* 在 IP 上运行，不需要完整的网络支持（相邻节点/交换机可能不支持 PTP）。
+* 默认域设置为 44。
+* 数据集比较基于 G.8275.x 算法及其在 `priority2` 之后的 `localPriority` 值。
+
+将以下内容复制到名为 `/etc/ptp4l-G.8275.2.conf` 的文件中：
+
+[source,]
+----
+# Telecom G.8275.2 example configuration
+[global]
+domainNumber                    44
+priority2            255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             0
+serverOnly                      0
+hybrid_e2e                      1
+inhibit_multicast_service       1
+unicast_listen                  1
+unicast_req_duration            60
+logSyncInterval                 -5
+logMinDelayReqInterval          -4
+announceReceiptTimeout        2
+#
+# Customize the following for slave operation:
+#
+[unicast_master_table]
+table_id                        1
+logQueryInterval                2
+UDPv4                           $PEER_IP_ADDRESS
+[$IFNAME]
+unicast_master_table            1
+----
+
+请务必替换以下占位符：
+
+- `$PEER_IP_ADDRESS` - 要与之通信的下一个 PTP 节点的 IP 地址，例如将提供同步的主时钟或边界时钟。
+- `$IFNAME` - 告知 `ptp4l` 使用哪个接口进行 PTP。
+
+文件创建后，必须在 `/etc/sysconfig/ptp4l` 中引用该文件以及用于 PTP 的接口名称，守护进程才能正确启动。可以通过将 `OPTIONS=` 行更改为以下内容来实现：
+
+[,shell]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.2.conf --message_tag ptp-8275.2"
+----
+
+更准确地说：
+
+- `-f` 需要使用配置文件的文件名。在本例中为 `/etc/ptp4l-G.8275.2.conf`。
+- `--message_tag` 有助于在系统日志中更好地识别 ptp4l 输出，此项为可选。
+
+完成上述步骤后，必须重新启动 `ptp4l` 守护程序：
+
+[,console]
+----
+# systemctl restart ptp4l
+----
+
+通过以下命令观察日志以检查同步状态：
+
+[,console]
+----
+# journalctl -e -u ptp4l
+----
+
+[#ptp-bc-setup]
+==== 边界时钟的 PTP 配置
+
+前面的章节介绍了普通时钟的配置，但电信部署可能需要节点充当边界时钟。在这种情况下，参考时间必须从主时钟（Grand Master）传播到一个或多个下游时间接收器（Time Receiver），这需要一个具有两个或多个端口的 NIC。在这种情况下，一个端口将承担时间接收器角色，即驱动 NIC 上 PTP 硬件时钟（PHC）的更新，而其余端口将作为时间发送器（Time Transmitter）工作。对于单个多端口 NIC，单个 `ptp4l` 实例就足够了，但必须提供参与时间分配的每个内核接口作为其配置的一部分。例如，更新 `/etc/sysconfig/ptp4l` 文件以包含四个端口，只需将变量替换为实际的接口名称或根据需要进行调整：
+
+[,shell]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf --message_tag ptp-8275.1 -i $IFNAME1 -i $IFNAME2 -i $IFNAME3 -i $IFNAME4"
+----
+[NOTE]
+====
+无需将 `clock_type` 设置为 `BC`，因为如果提供了多个端口，则会自动推断此设置。
+====
+
+完成后，可以使用以下命令（重）启动 `ptp4l` 守护程序：
+
+[,console]
+----
+# systemctl restart ptp4l
+----
+
+如果没有特定的端口配置，`ptp4l` 将运行 BMCA 以确定可以通过哪个端口连接到 GM。如果首选静态配置，请在配置文件中为每个端口附加一个具有指定角色的部分。例如：
+
+[source,]
+----
+# Telecom G.8275.1 example configuration
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+
+[$IFNAME1]
+# Time Receiver by default
+
+[$IFNAME2]
+serverOnly                      1
+
+[$IFNAME3]
+serverOnly                      1
+
+[$IFNAME4]
+serverOnly                      1
+----
+
+但是，请务必在启动守护进程之前确定与 GM 的正确连接。
+
+[#ptp-phc2sys-setup]
+==== 从 PTP 同步系统时钟
+
+请务必记住，PTP 的工作原理是同步 NIC 本地硬件时钟。这不会自动使系统时钟与 GM 对齐，因为系统时钟源自不同的硬件时钟。
+为了使系统时钟与 PTP 保持同步，必须运行 `phc2sys`。建议您在进行 `phc2sys` 之前完全完成 `ptp4l` 的配置。默认情况下，`phc2sys` 不需要配置文件，其执行参数可以完全通过 `/etc/sysconfig/ptp4l` 中存在的 `OPTIONS=` 变量进行控制，方式与 `ptp4l` 类似：
+
+[source,]
+----
+OPTIONS="-s $IFNAME -w"
+----
+
+其中 `$IFNAME` 是已在 ptp4l 中设置并用作系统时钟源的接口名称。这用于标识源 PHC。
+
+但是，如果使用了特定的 PTP 控制文件或域编号，则可能需要为 `phc2sys` 提供一个与提供给 `ptp4l` 的配置文件一致的配置文件。在大多数情况下，也可以直接将其用于 phc2sys：
+
+[source,]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf -s $IFNAME -w"
+----
+
+[#ptp-capi]
+=== Cluster API 集成
+
+每当通过管理集群和定向网络配置部署集群时，配置文件和 `/etc/sysconfig` 中的两个配置变量都可以在配置时部署在主机上。以下是集群定义的摘录，重点介绍了在所有主机上部署相同 G.8275.1 配置文件的修改后的 `RKE2ControlPlane` 对象：
+
+[,yaml]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  replicas: 1
+  version: ${RKE2_VERSION}
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  registrationMethod: "control-plane-endpoint"
+  serverConfig:
+    cni: canal
+  agentConfig:
+    format: ignition
+    cisProfile: cis
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+            - name: rke2-preinstall.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=rke2-preinstall
+                Wants=network-online.target
+                Before=rke2-install.service
+                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStartPost=/bin/sh -c "umount /mnt"
+                [Install]
+                WantedBy=multi-user.target
+        storage:
+          files:
+            - path: /etc/ptp4l-G.8275.1.conf
+              overwrite: true
+              contents:
+                inline: |
+                  # Telecom G.8275.1 example configuration
+                  [global]
+                  domainNumber                    24
+                  priority2                       255
+                  dataset_comparison              G.8275.x
+                  G.8275.portDS.localPriority     128
+                  G.8275.defaultDS.localPriority  128
+                  maxStepsRemoved                 255
+                  logAnnounceInterval             -3
+                  logSyncInterval                 -4
+                  logMinDelayReqInterval          -4
+                  announceReceiptTimeout          3
+                  serverOnly                      0
+                  ptp_dst_mac                     01:80:C2:00:00:0E
+                  network_transport               L2
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /etc/sysconfig/ptp4l
+              overwrite: true
+              contents:
+                inline: |
+                  ## Path:           Network/LinuxPTP
+                  ## Description:    Precision Time Protocol (PTP): ptp4l settings
+                  ## Type:           string
+                  ## Default:        "-i eth0 -f /etc/ptp4l.conf"
+                  ## ServiceRestart: ptp4l
+                  #
+                  # Arguments when starting ptp4l(8).
+                  #
+                  OPTIONS="-f /etc/ptp4l-G.8275.1.conf -i $IFNAME --message_tag ptp-8275.1"
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /etc/sysconfig/phc2sys
+              overwrite: true
+              contents:
+                inline: |
+                  ## Path:           Network/LinuxPTP
+                  ## Description:    Precision Time Protocol (PTP): phc2sys settings
+                  ## Type:           string
+                  ## Default:        "-s eth0 -w"
+                  ## ServiceRestart: phc2sys
+                  #
+                  # Arguments when starting phc2sys(8).
+                  #
+                  OPTIONS="-s $IFNAME -w"
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+    kubelet:
+      extraArgs:
+        - provider-id=metal3://BAREMETALHOST_UUID
+    nodeName: "localhost.localdomain"
+----
+
+除了其他变量外，上述定义必须补充接口名称以及 <<atip-automated-provisioning>> 中描述的其他 Cluster API 对象。
+
+[NOTE]
+====
+* 只有在集群中的硬件统一且所有主机（包括接口名称）都需要相同的配置时，这种方法才方便。
+* 其他方法也是可行的，并将在未来的版本中介绍。
+====
+
+此时，您的主机应该已经拥有一个正常工作的 PTP 堆栈，并将开始协商其 PTP 角色。
+
+=== Intel Granite Rapids-D 平台上的 PTP
+
+{product} 支持多种不同平台上的精确计时，包括最新的基于 Intel Granite Rapids-D 的设计 (GNR-D)。这些新服务器通常包含一个嵌入式高速以太网控制器，以及一个或多个带有以太网控制器的附加卡，以提供额外的端口。与前几代平台不同，它们还配备了专用的 DPLL，允许在系统和不同的 NIC 之间路由计时信号，不再需要外部布线。
+因此，整体部署得到了简化，但需要特定的步骤和软件组件，例如引导时的 DPLL 和内部信号配置。
+
+在执行设置步骤之前，请从 https://www.intel.com/content/www/us/en/download/19630/intel-network-adapter-driver-for-800-series-devices-under-linux.html[Intel 网站] 下载并安装适用于 _Intel 800 系列网络设备_ 的最新内核驱动程序。选择包含“ice_RPM_Files”的 zip 文件并解压归档文件，然后安装其中包含的 `ice-kmp-default-*sles16sp0.x86_64.rpm` RPM，例如文件 `ice-kmp-default-2.4.5_k6.12.0_160000.5-1.sles16sp0.x86_64.rpm`：
+
+[,console]
+----
+# transactional-update pkg install ice-kmp-default-2.4.5_k6.12.0_160000.5-1.sles16sp0.x86_64.rpm
+----
+
+重启服务器以使更改持久生效。
+
+[NOTE]
+====
+* 在示例中，Dell PowerEdge XR8720t 系统将用作参考系统，内核接口和端口配置在不同的 GNR-D 服务器上可能会有所不同。
+* 假设采用电信部署，并在以下各节中针对 PTP 使用电信控制文件 G.8275.1。
+====
+
+==== PTP 边界时钟
+
+本节介绍了在 GNR-D 系统上设置边界时钟 (BC) 的过程，其中集成 NIC 上的一个端口从 GM 接收 PTP 时间戳，系统中的所有其余端口充当指向其他网络节点的时钟发送器。
+[NOTE]
+====
+此处描述的设置是完全静态的。如果 GM 变得不可用，下游同步将完全依赖于主机的同步能力；不会执行到不同时间参考源的自动切换。
+====
+
+要启用 BC 行为，请在每次系统启动时按相同顺序执行以下步骤：
+
+. 验证控制 PHC 的预期 PTP 设备是否存在：
++
+[,console]
+----
+# ls -l /sys/class/ptp/
+total 0
+lrwxrwxrwx. 1 root root 0 Apr 27 20:21 ptp1 -> ../../devices/pci0000:12/0000:12:04.0/0000:13:00.0/ptp/ptp1
+lrwxrwxrwx. 1 root root 0 Apr 27 20:21 ptp2 -> ../../devices/pci0000:6b/0000:6b:02.0/0000:6c:00.0/ptp/ptp2
+lrwxrwxrwx. 1 root root 0 Apr 27 20:21 ptp3 -> ../../devices/pci0000:6b/0000:6b:06.0/0000:6e:00.0/ptp/ptp3
+----
++
+[NOTE]
+====
+根据正在配置的系统上找到的实际名称调整后续命令。
+====
+
+. 识别嵌入式控制器，因为它需要特定的配置：
++
+之前的输出应通过 PCI 地址指示它们所绑定的设备，您可以使用 `lspci` 来查找设备类型：
++
+[,console]
+----
+# lspci -s 0000:13:00.0
+13:00.0 Ethernet controller: Intel Corporation Ethernet Connection E825-C for SFP (rev 04)
+# lspci -s 0000:6c:00.0
+6c:00.0 Ethernet controller: Intel Corporation Ethernet Controller E830-CC for SFP
+# lspci -s 0000:6e:00.0
+6e:00.0 Ethernet controller: Intel Corporation Ethernet Controller E830-CC for SFP
+----
++
+此特定服务器配备了一个 _Intel E825-C_ 嵌入式控制器和两张 _E830-CC_ 附加卡。
++
+或者，您可以通过查找公开该 PHC 的控制器的第一个网络端口来查找有关该控制器的更多信息：
++
+[,console]
+----
+# ls -l /sys/class/ptp/ptp0/device/net/
+total 0
+drwxr-xr-x. 5 root root 0 Apr 30 15:16 em5
+# ethtool -i em5
+driver: ice
+version: 2.4.5
+firmware-version: 4.03 0x80007f91 1.3881.0
+expansion-rom-version:
+bus-info: 0000:13:00.0
+[...]
+----
++
+请注意，`em5` 是此系统上集成以太网控制器的第一个端口。
+
+. 配置集成以太网控制器上的 PHC 与系统定时 DPLL 之间的信号：
+
+.. 让 DPLL 驱动集成控制器上的以太网时钟：
++
+[,console]
+----
+# echo 4 1 > /sys/class/net/em5/device/tspll_cfg
+----
+
+.. 通过 SDP2 引脚（1kHz 信号）启用从 PHC 到 DPLL 的每秒脉冲（每秒脉冲，PPS）：
++
+[,console]
+----
+# echo 2 1 > /sys/class/ptp/ptp1/pins/SDP2
+# echo 1 0 0 0 1000000 > /sys/class/ptp/ptp1/period
+----
+
+.. （可选）也可以启用引脚 SPD0（1Hz 信号）：
++
+[,console]
+----
+# echo 2 2 > /sys/class/ptp/ptp1/pins/SDP0
+# echo 2 0 0 1 0 > /sys/class/ptp/ptp1/period
+----
+
+.. 启用从定时系统 DPLL 到附加卡的 1 PPS 信号传播：
++
+[,console]
+----
+# echo 1 1 > /sys/class/ptp/ptp2/pins/SDP1
+# echo 1 1 > /sys/class/ptp/ptp3/pins/SDP1
+----
+
+. 运行 `ts2phc` 以使附加卡的 PHC 与 PHC `/dev/ptp1` 的时间戳保持同步：
++
+[,console]
+----
+# ts2phc -f ts2phc-aic-all.cfg -s /dev/ptp1
+----
++
+有关 <<gnrd-ts2phc-config-aics>> 的内容，请参阅 `ts2phc-aic-all.cfg`。
+
+. 为集成控制器 (`/dev/ptp1`) 运行一个 `ptp4l` 实例：
++
+[,console]
+----
+# ptp4l -f ptp4l-G.8275.1-nac.conf
+----
++
+有关 <<gnrd-ptp4l-config-nac>> 的内容，请参阅 `ptp4l-G.8275.1-nac.conf`。
+
+. 为每个附加卡 (`/dev/ptp3` 和/或 `/dev/ptp2`) 运行一个 `ptp4l` 实例：
++
+[,console]
+----
+# ptp4l -f ptp4l-G.8275.1-aic1.conf
+# ptp4l -f ptp4l-G.8275.1-aic2.conf
+----
++
+有关配置文件内容，请参阅 <<gnrd-ptp4l-config-aics>>。
++
+[NOTE]
+====
+为防止冲突并启用下一步，这些实例中的每一个都必须使用不同的控制套接字和只读套接字。
+====
+
+. 将 AIC `ptp4l` 实例的 PTP 运行时参数和值与 `pmc` 同步：
++
+BC 不仅需要转发其所连接的 GM 的时间，还需要转发辅助参数，例如其时钟等级和精度级别。这在由同一个 `ptp4l` 实例管理的接口组内会自动发生，但在处理不同 PHC 和端口的不同 `ptp4l` 实例之间则不会。
++
+系统与 GM 同步后，查询集成控制器上的 `ptp4l` 实例，并通过 `pmc` 命令设置其余 `ptp4l` 实例上的值。例如：
++
+[,console]
+----
+# pmc -f /etc/ptp4l-G.8275.1-nac-bmca.conf -u -b 0 'GET PARENT_DATA_SET' | grep gm
+                gm.ClockClass                         8
+                gm.ClockAccuracy                      0xfe
+                gm.OffsetScaledLogVariance            0xffff
+# pmc -f /etc/ptp4l-G.8275.1-nac-bmca.conf -u -b 0 'GET TIME_PROPERTIES_DATA_SET' | grep -v PROPERTIES
+                currentUtcOffset      37
+                leap61                0
+                leap59                0
+                currentUtcOffsetValid 0
+                ptpTimescale          1
+                timeTraceable         0
+                frequencyTraceable    0
+                timeSource            0xa0
+pmc -f /etc/ptp4l-G.8275.1-aic1-static.conf -u -b 0 'SET GRANDMASTER_SETTINGS_NP
+                clockClass              8
+                clockAccuracy           0xfe
+                offsetScaledLogVariance 0xffff
+                currentUtcOffset        37
+                leap61                  0
+                leap59                  0
+                currentUtcOffsetValid   0
+                ptpTimescale            1
+                timeTraceable           0
+                frequencyTraceable      0
+                timeSource              0xa0
+----
++
+请参阅 <<gnrd-pmc-forward>> 以自动化此过程并避免手动步骤。
+
+. 可选地运行 `phc2sys` 以从 PTP 同步中获取系统时间：
++
+[,console]
+----
+# phc2sys -f /etc/ptp4l-G.8275.1-nac.conf -s /dev/ptp1 -c CLOCK_REALTIME -w
+----
++
+输入文件是用于 `ptp4l` 和集成控制器的同一个配置文件。请参阅 <<ptp-phc2sys-setup>> 以让 systemd 处理其执行。
+
+==== 配置文件
+
+本节提供了示例配置文件和脚本，可结合上述步骤使用，以在 GNR-D 上快速设置可用的 BC。`ptp4l` 配置文件包含所有必需的设置，无需额外的外部执行标志，并且全部基于电信控制文件 G.8275.1。每个文件的更多详细信息在其各自的章节中提供。
+
+[#gnrd-ptp4l-config-nac]
+===== 集成控制器 (`ptp4l`) 的 `/dev/ptp1` 配置文件
+
+[source,]
+----
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:1b:19:00:00:00
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l-nac"
+uds_address                     /var/run/ptp4l-nac
+uds_ro_address                  /var/run/ptp4lro-nac
+
+[em1]
+
+[em2]
+
+[em3]
+
+[em4]
+----
+
+上述配置利用 BMCA 来确定端口的角色，前提是可以通过其中一个端口访问 GM。如果需要更严格的控制，请在每个接口定义下添加 `serverOnly` 标志。有关更多详细信息，请参阅 <<ptp-bc-setup>> 或下方的附加卡配置示例。
+为简洁起见，仅列出了四个接口，您需要根据自己的要求进行调整。
+
+[#gnrd-ptp4l-config-aics]
+===== `ptp4l` 扩展卡配置文件（`/dev/ptp2` 或 `/dev/ptp3`）
+
+[source,]
+----
+# Telecom G.8275.1 example configuration
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     250
+G.8275.defaultDS.localPriority  250
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:1b:19:00:00:00
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l-iac1"
+uds_address                     /var/run/ptp4l-aic1
+uds_ro_address                  /var/run/ptp4lro-aic1
+
+[p1p1]
+serverOnly                      1
+
+[p1p2]
+serverOnly                      1
+
+[p1p3]
+serverOnly                      1
+
+[p1p4]
+serverOnly                      1
+----
+
+为简洁起见，仅列出四个接口。您需要根据自己的要求进行调整。所有接口均已静态设置为 TimeTransmitter 角色。
+
+[#gnrd-ts2phc-config-aics]
+===== `ts2phc` 扩展卡配置文件
+
+[source,]
+----
+[global]
+use_syslog              0
+verbose                 1
+logging_level           7
+ts2phc.pulsewidth       100000000
+
+[p1p1]
+ts2phc.channel          1
+ts2phc.extts_polarity   rising
+ts2phc.pin_index        1
+
+[p2p1]
+ts2phc.channel          1
+ts2phc.extts_polarity   rising
+ts2phc.pin_index        1
+----
+
+此配置涵盖了两个扩展卡（由其第一个端口 `p1p1` 和 `p2p1` 引用）通过每个控制器上的 SDP1 进行的同步。
+
+[#gnrd-pmc-forward]
+===== GM 参数转发脚本
+
+以下脚本可用于将 GM 值和参数转发给由 `ptp4l` 实例处理的端口上的时间接收器，而非 GM 所在的实例。请勿忘记编辑 `Input variables` 部分以调整文件名，并在系统同步至 GM 后运行它。
+
+[bash,]
+----
+#!/bin/bash
+
+set -euo pipefail
+
+################## 输入变量 ##################
+VERBOSE=1
+
+CONFIG_FILE_NAC=/etc/ptp4l-G.8275.1-nac-bmca.conf
+CONFIG_FILES_AICS=(/etc/ptp4l-G.8275.1-aic1-static.conf /etc/ptp4l-G.8275.1-aic2-static.conf)
+
+#####################################################
+
+
+# 检查系统是否已同步至 GM
+GM_PRESENT=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET TIME_STATUS_NP' | awk '/gmPresent/ {print $2}')
+
+if [ \"${GM_PRESENT}\" != \"true\" ]; then
+    echo \"无 GM，正在退出...\"
+    exit 1
+fi
+
+# 获取“上游”主时钟 (Grand Master) 值
+
+PDS_GM_VALUES=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET PARENT_DATA_SET' | awk 'BEGIN {ORS=" "} /gm./ {print $2}')
+TPDS_GM_VALUES=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET TIME_PROPERTIES_DATA_SET' | awk 'BEGIN {ORS=" "} NR>2 {print $2}')
+
+if [ -z \"$PDS_GM_VALUES\" ]; then
+    echo \"未检索到 PARENT_DATA_SET 值\"
+    exit 2
+elif [ -z \"$TPDS_GM_VALUES\" ]; then
+    echo \"未检索到 TIME_PROPERTIES_DATA_SET 值\"
+    exit 2
+fi
+
+# 从 PARENT_DATA_SET 解包
+read CLOCK_CLASS CLOCK_ACCURACY VARIANCE <<< $PDS_GM_VALUES
+
+# 从 TIME_PROPERTIES_DATA_SET 解包
+read UTC_OFFSET LEAP_61 LEAP_59 UTC_OFFSET_VALID PTP_TIMESCALE T_TRACEABLE F_TRACEABLE T_SOURCE <<< $TPDS_GM_VALUES
+
+if [ \"$VERBOSE\" -eq 1 ]; then +
+    echo \"从 PARENT_DATA_SET 读取：clockClass=${CLOCK_CLASS} clockAccuracy=${CLOCK_ACCURACY} offsetScaledLogVariance=${VARIANCE}\" +
+    echo \"从 TIME_PROPERTIES_DATA_SET 读取：currentUtcOffset=${UTC_OFFSET} leap61=${LEAP_61} leap59=${LEAP_59}\" \\ +
+         \"currentUtcOffsetValid=${UTC_OFFSET_VALID} ptpTimescale=${PTP_TIMESCALE} timeTraceable=${T_TRACEABLE}\" \\ +
+         \"frequencyTraceable=${F_TRACEABLE} timeSource=${T_SOURCE}\" +
+fi
+
+
+# 将这些值转发给“下游”时间接收器，以更新 ptp4l 实例
+
+for FILE in \"${CONFIG_FILES_AICS[@]}\"; do +
+    if [ \"$VERBOSE\" -eq 1 ]; then +
+        echo \"正在更新 GRANDMASTER_SETTINGS_NP (${FILE})\" +
+    fi
+
+    pmc -f ${FILE} -u -b 0 'SET GRANDMASTER_SETTINGS_NP
+       clockClass              '${CLOCK_CLASS}'
+       clockAccuracy           '${CLOCK_ACCURACY}'
+       offsetScaledLogVariance '${VARIANCE}'
+       currentUtcOffset        '${UTC_OFFSET}'
+       leap61                  '${LEAP_61}'
+       leap59                  '${LEAP_59}'
+       currentUtcOffsetValid   '${UTC_OFFSET_VALID}'
+       ptpTimescale            '${PTP_TIMESCALE}'
+       timeTraceable           '${T_TRACEABLE}'
+       frequencyTraceable      '${F_TRACEABLE}'
+       timeSource              '${T_SOURCE}'' &> /dev/null
+
+    if [ $? -ne 0 ]; then +
+        echo \"更新 ${FILE} 失败\" +
+    fi +
+done
+----
+
+[NOTE]
+====
+该脚本必须在 GM 每次更改时运行。
+====
+
+[#sctp]
+== SCTP - 流控制传输协议
+来自 https://en.wikipedia.org/wiki/Stream_Control_Transmission_Protocol[流控制传输协议 - 维基百科]
+
+[quote]
+____
+流控制传输协议 (SCTP) 是一种计算机网络通信协议，位于互联网协议套件的传输层。
+该协议最初旨在用于电信领域的信令系统 7 (SS7) 消息传输，它提供了用户数据报协议 (UDP) 的面向消息功能，同时确保了像传输控制协议 (TCP) 那样具有拥塞控制的可靠、按序的消息传输。
+与 UDP 和 TCP 不同，该协议支持多宿主和冗余路径，以提高弹性和可靠性。
+
+SCTP 由互联网工程任务组 (IETF) 在 RFC 9260 中标准化。SCTP 参考实现作为 FreeBSD 7 版本的一部分发布，此后已被广泛移植到其他平台。
+____
+
+在 3GPP 4G (LTE) 规范中，SCTP（流控制传输协议）充当演进分组核心网 (EPC) 中控制面信令消息的基础第 4 层传输，包括与无线接入网 (RAN) 域的信令连接。3GPP 5G 规范通过引入服务化架构 (SBA) 取消了核心网内部对 SCTP 的需求，该架构用 HTTP/2 取代了所有基于 Diameter-over-SCTP 的信令接口。然而，在 5G RAN 域内仍然需要它：
+
+* 在构成“解耦”gNodeB 实例的网络单元之间的信令接口中（DU 和 CU-CP 之间的 F1-C 接口，以及 CU-CP 和 CU-UP 之间的 E1 接口）。
+
+* 在用于信令目的的连接 gNodeB 实例的 Xn-C 接口中。
+
+* 在用于将 gNodeB 实例（RAN 域）与 AMF 实例（核心网）连接以进行信令传输的 N2（又称 NG-C）参考点中。
+
+然后，您必须在托管利用它的支持 SCTP 的电信工作负载的下游集群节点上启用 `sctp` Linux 内核模块 (`lksctp`)：
+
+* 若要手动在 Linux 节点上加载 `sctp` 内核模块：
+
+[,shell]
+----
+$ sudo modprobe sctp
+----
+
+* 若要自动在每次节点启动时加载 `sctp` 内核模块，请在 `/etc/modules-load.d/` 目录中创建一个名为 `sctp.conf` 的文件，其中仅包含字符串 `sctp`（即 https://www.freedesktop.org/software/systemd/man/latest/modules-load.d.html[systemd-modules-load.service] 单元应在启动时加载的内核模块名称）。
+
+[,shell]
+----
+$ echo "sctp" > /etc/modules-load.d/sctp.conf
+$ reboot
+----
+
+确保 `sctp` 内核模块在每次节点启动时加载的最简单且最佳的方法是将该 `/etc/modules-load.d/sctp.conf` 文件添加到用于预配下游节点的 Edge Image Builder (EIB) 构建的原始映像中；有关如何执行此操作的更多信息，请参阅 xref:../quickstart/eib.adoc#adding-operating-system-files[EIB 文档]。

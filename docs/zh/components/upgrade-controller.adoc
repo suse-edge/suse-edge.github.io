@@ -1,0 +1,550 @@
+[#components-upgrade-controller]
+= 升级控制器
+:revdate: 2025-05-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+一种能够对以下 {product} 平台组件执行升级的 Kubernetes 控制器：
+
+* 操作系统 (SUSE Linux Micro)
+* Kubernetes (K3s & RKE2)
+* 其他组件（Rancher、Elemental、SUSE Security 等）
+
+link:https://github.com/suse-edge/upgrade-controller[升级控制器]通过将上述组件的复杂性封装在单个`user-facing`资源中，简化了它们的升级过程，该资源可作为升级的*触发器*。用户只需配置此资源，其余工作均由`Upgrade Controller`处理。
+
+[NOTE]
+====
+`Upgrade Controller`目前仅支持{product}针对*非隔离的管理*集群的平台升级。有关详细信息，请参见<<components-upgrade-controller-known-issues>>部分。
+====
+
+== {product}如何使用升级控制器？
+
+*升级控制器*对于自动化（以前需要手动执行的）将管理集群从一个{product}发布版本升级到下一个版本所需的“第 2 天”操作至关重要。
+
+为了实现这种自动化，升级控制器利用了诸如<<components-system-upgrade-controller,系统升级控制器>>和link:https://github.com/k3s-io/helm-controller/[Helm 控制器]等工具。
+
+有关升级控制器工作原理的更多详细信息，请参见<<components-upgrade-controller-how>>。
+
+有关升级控制器的已知限制，请参见<<components-upgrade-controller-known-issues>>。
+
+有关升级控制器与系统升级控制器之间区别的信息，请参见<<components-upgrade-controller-uc-vs-suc>>。
+
+[#components-upgrade-controller-uc-vs-suc]
+== 升级控制器与系统升级控制器
+
+<<components-system-upgrade-controller,系统升级控制器 (SUC)>> 是一种通用工具，用于将升级指令传播到特定的 Kubernetes 节点。
+
+虽然它支持 {product} 平台的某些“第 2 天”操作，但它 *并不* 涵盖所有操作。此外，即使对于受支持的操作，用户也必须手动配置、维护和部署多个 `SUC Plans` —— 这是一个容易出错的过程，可能会导致意外问题。
+
+这导致需要一种工具来 **自动化** 并 **抽象** 管理 {product} 平台各种“第 2 天”操作的复杂性。因此，开发了 `Upgrade Controller`。它通过引入一个驱动升级的单一 `user-facing resource` 来简化升级过程。用户只需管理此资源，其余工作由 `Upgrade Controller` 处理。
+
+[#components-upgrade-controller-installation]
+== 安装升级控制器
+
+=== 先决条件
+
+* link:https://helm.sh/docs/intro/install/[Helm]
+
+* link:{link-cert-manager-installation}[cert-manager]
+
+* <<components-system-upgrade-controller-install,系统升级控制器>>
+
+* 一个 Kubernetes 集群；K3s 或 RKE2 均可
+
+=== 步骤
+
+. 在您的管理集群上安装 Upgrade Controller Helm chart：
++
+[,bash,subs="attributes"]
+----
+helm install upgrade-controller oci://registry.suse.com/edge/charts/upgrade-controller --version {version-upgrade-controller-chart} --create-namespace --namespace upgrade-controller-system
+----
+
+. 验证 Upgrade Controller 部署：
++
+[,bash]
+----
+kubectl get deployment -n upgrade-controller-system
+----
+
+. 验证 Upgrade Controller Pod：
++
+[,bash]
+----
+kubectl get pods -n upgrade-controller-system
+----
+
+. 验证 Upgrade Controller Pod 日志：
++
+[,bash]
+----
+kubectl logs <pod_name> -n upgrade-controller-system
+----
+
+[#components-upgrade-controller-installation-eib]
+== 通过 Edge Image Builder 安装 Upgrade Controller
+
+作为上述手动安装的替代方案，可以在<<components-eib,Edge Image Builder>>编排的初始部署中安装 Upgrade Controller。
+
+在这种情况下，需要将以下 Helm chart 配置添加到 EIB 配置文件中：
+
+[,yaml]
+----
+kubernetes:
+  helm:
+    charts:
+      - name: cert-manager
+        repositoryName: jetstack
+        version: {version-cert-manager}
+        targetNamespace: cert-manager
+        valuesFile: certmanager-values.yaml
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: upgrade-controller
+        version: {version-upgrade-controller-chart}
+        repositoryName: suse-edge-charts
+        targetNamespace: upgrade-controller-system
+        createNamespace: true
+        installationNamespace: kube-system
+----
+
+[#components-upgrade-controller-how]
+== 升级控制器如何工作？
+
+为了执行 Edge 版本升级，Upgrade Controller 引入了两个新的 Kubernetes link:https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/[自定义资源]：
+
+* <<components-upgrade-controller-extensions-upgrade-plan,UpgradePlan>> - 由用户创建；包含有关 Edge 版本升级的配置。
+
+* <<components-upgrade-controller-extensions-release-manifest,ReleaseManifest>> - 由 Upgrade Controller 创建；包含特定于某个 Edge 发布版本的组件版本。*此文件不得由用户编辑。*
+
+Upgrade Controller 随后会创建一个 `ReleaseManifest` 资源，其中包含用户在 `UpgradePlan` 资源的 `releaseVersion` 属性下指定的 Edge 发布版本的组件数据。
+
+使用来自 `ReleaseManifest` 的组件数据，Upgrade Controller 按以下顺序升级 Edge 发布组件：
+
+. <<components-upgrade-controller-how-os,操作系统 (OS)>>。
+
+. <<components-upgrade-controller-how-k8s,Kubernetes>>。
+
+. <<components-upgrade-controller-how-additional,附加组件>>。
+
+[NOTE]
+====
+在升级过程中，Upgrade Controller 会持续将升级信息输出到所创建的 `UpgradePlan` 中。有关如何跟踪升级过程的更多信息，请参阅<<components-upgrade-controller-how-track,跟踪升级过程>>。
+====
+
+[#components-upgrade-controller-how-os]
+=== 操作系统升级
+
+为了升级操作系统，Upgrade Controller 会创建具有以下命名模板的<<components-system-upgrade-controller,SUC>>计划：
+
+* 对于与控制平面节点操作系统升级相关的 SUC 计划 - `control-plane-<os-name>-<os-version>-<suffix>`。
+
+* 对于与工作节点操作系统升级相关的 SUC 计划 - `workers-<os-name>-<os-version>-<suffix>`。
+
+基于这些计划，SUC 会在集群的每个节点上创建执行实际操作系统升级的工作负载。
+
+根据 `ReleaseManifest`，操作系统升级可能包括：
+
+* 仅软件包更新 - 用于 Edge 版本之间操作系统版本不发生变化的使用场景。
+
+* 完整操作系统迁移 - 用于 Edge 版本之间操作系统版本发生变化的使用场景。
+
+升级按*one*节点的顺序执行，首先从控制平面节点开始。只有在控制平面节点升级完成后，工作节点才会开始升级。
+
+[NOTE]
+====
+Upgrade Controller 会配置 OS SUC 计划，如果集群中指定类型的节点超过*one*，则对集群节点执行link:https://kubernetes.io/docs/reference/kubectl/generated/kubectl_drain/[排空]操作。
+
+对于控制平面节点*greater than* one且只有*only one*工作节点的集群，仅会对控制平面节点执行排空操作，反之亦然。
+
+有关如何完全禁用节点排空的信息，请参阅<<components-upgrade-controller-extensions-upgrade-plan,UpgradePlan>>部分。
+====
+
+[#components-upgrade-controller-how-k8s]
+=== Kubernetes 升级
+
+要升级集群的 Kubernetes 发行版，升级控制器会创建具有以下命名模板的<<components-system-upgrade-controller,SUC>>计划：
+
+* 对于与控制平面节点 Kubernetes 升级相关的 SUC 计划 - `control-plane-<k8s-version>-<suffix>`。
+
+* 对于与工作节点 Kubernetes 升级相关的 SUC 计划 - `workers-<k8s-version>-<suffix>`。
+
+基于这些计划，SUC 将继续在集群的每个节点上创建执行实际 Kubernetes 升级的工作负载。
+
+Kubernetes 升级将按*one*节点的顺序执行，首先从控制平面节点开始。只有在控制平面节点升级完成后，工作节点才会开始升级。
+
+[NOTE]
+====
+升级控制器会配置 Kubernetes SUC 计划，如果集群中指定类型的节点超过*one*，则对集群节点执行link:https://kubernetes.io/docs/reference/kubectl/generated/kubectl_drain/[排空]操作。
+
+对于控制平面节点*greater than* one且只有*only one*工作节点的集群，仅会对控制平面节点执行排空操作，反之亦然。
+
+有关如何完全禁用节点排空的信息，请参阅 <<components-upgrade-controller-extensions-upgrade-plan>>。
+====
+
+[#components-upgrade-controller-how-additional]
+=== 附加组件升级
+
+目前，所有附加组件均通过 Helm 图表安装。有关特定版本组件的完整列表，请参阅<<release-notes,Release Notes>>。
+
+对于通过<<components-eib,EIB>>部署的 Helm 图表，升级控制器会更新每个组件现有的link:https://docs.rke2.io/helm#using-the-helm-crd[HelmChart CR]。
+
+对于在 EIB 之外部署的 Helm 图表，升级控制器会为每个组件创建一个 `HelmChart` 资源。
+
+在创建/更新 `HelmChart` 资源后，升级控制器会依赖 link:https://github.com/k3s-io/helm-controller/[helm-controller] 来获取此更改并继续进行实际的组件升级。
+
+图表将根据其在 `ReleaseManifest` 中的顺序依次升级。还可以通过 `UpgradePlan` 传递其他值。如果图表的版本在新的 {product} 发行版中保持不变，则不会对其进行升级。有关更多信息，请参见<<components-upgrade-controller-extensions-upgrade-plan>>。
+
+[#components-upgrade-controller-extensions]
+== Kubernetes API 扩展
+
+由升级控制器引入的 Kubernetes API 扩展。
+
+[#components-upgrade-controller-extensions-upgrade-plan]
+=== UpgradePlan
+
+升级控制器引入了一种新的 Kubernetes link:https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/[自定义资源]，称为 `UpgradePlan`。
+
+`UpgradePlan` 用作升级控制器的指令机制，它支持以下配置：
+
+* `releaseVersion` - 集群应升级到的 Edge 发行版本。发行版本必须遵循link:https://semver.org[semantic]版本控制，并应从<<release-notes,Release Notes>>中获取。
+
+* `disableDrain` - *可选*；指示升级控制器是否禁用节点 link:https://kubernetes.io/docs/reference/kubectl/generated/kubectl_drain/[驱逐]。适用于您拥有带有 link:https://kubernetes.io/docs/tasks/run-application/configure-pdb/[中断预算] 的工作负载的情况。
+
+** 禁用控制平面节点驱逐的示例：
++
+[,yaml]
+----
+spec:
+  disableDrain:
+    controlPlane: true
+----
+
+** 禁用控制平面和工作节点驱逐的示例：
++
+[,yaml]
+----
+spec:
+  disableDrain:
+    controlPlane: true
+    worker: true
+----
+
+* `helm` - *可选*；指定通过 Helm 安装的组件的其他值。
++
+[WARNING]
+====
+仅建议将此字段用于对升级至关重要的值。标准的 Chart 值更新应在相应的 Chart 升级到下一个版本后执行。
+====
+
+** 示例：
++
+[,yaml]
+----
+spec:
+  helm:
+  - chart: foo
+    values:
+      bar: baz
+----
+
+[#components-upgrade-controller-extensions-release-manifest]
+=== ReleaseManifest
+
+升级控制器引入了一种新的 Kubernetes link:https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/[自定义资源]，称为 `ReleaseManifest`。
+
+`ReleaseManifest` 资源由升级控制器创建，并保存 *一个* 特定 Edge 发行版本的数据。这意味着每个 Edge 发行版本的升级都将由不同的 `ReleaseManifest` 资源表示。
+
+[WARNING]
+====
+发布清单应始终由升级控制器创建。
+
+不建议手动创建或编辑 `ReleaseManifest` 资源。决定这样做的用户应 *自行承担风险*。
+====
+
+发布清单附带的组件数据包括但不限于：
+
+* 操作系统数据 - 版本、支持的架构、附加升级数据等。
+
+* Kubernetes 发行版数据 - link:https://docs.rke2.io[RKE2]/link:https://k3s.io[K3s] 支持的版本
+
+* 附加组件数据 - SUSE Helm chart 数据（位置、版本、名称等）
+
+有关发布清单外观的示例，请参阅 {link-lifecycle-example}[上游] 文档。_请注意，这仅是一个示例，并非旨在创建为有效的 `ReleaseManifest` 资源。_
+
+[#components-upgrade-controller-how-track]
+== 跟踪升级过程
+
+本节旨在跟踪和调试用户创建 `UpgradePlan` 资源后由升级控制器启动的升级过程。
+
+[#components-upgrade-controller-how-track-general]
+=== 通用
+
+有关升级过程状态的一般信息可以在升级计划的状态条件中查看。
+
+可以通过以下方式查看升级计划资源的状态：
+[,bash]
+----
+kubectl get upgradeplan <upgradeplan_name> -n upgrade-controller-system -o yaml
+----
+
+[#ex-running-upgrade-plan]
+.正在运行的升级计划示例：
+====
+[,yaml,subs="attributes"]
+----
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
+metadata:
+  name: upgrade-plan-mgmt
+  namespace: upgrade-controller-system
+spec:
+  releaseVersion: {version-edge}
+status:
+  conditions:
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: Control plane nodes are being upgraded
+    reason: InProgress
+    status: "False"
+    type: OSUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: Kubernetes upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: KubernetesUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: Rancher upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: RancherUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: Longhorn upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: LonghornUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: MetalLB upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: MetalLBUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: CDI upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: CDIUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: KubeVirt upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: KubeVirtUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: NeuVector upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: NeuVectorUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: EndpointCopierOperator upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: EndpointCopierOperatorUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: Elemental upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: ElementalUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: SRIOV upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: SRIOVUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: Metal3 upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: Metal3Upgraded
+  - lastTransitionTime: "2024-10-01T06:26:27Z"
+    message: RancherTurtles upgrade is not yet started
+    reason: Pending
+    status: Unknown
+    type: RancherTurtlesUpgraded
+  observedGeneration: 1
+  sucNameSuffix: 90315a2b6d
+----
+====
+
+在这里，您可以查看升级控制器将尝试为其安排升级的每个组件。每个条件都遵循以下模板：
+
+* `lastTransitionTime` - 此组件条件上一次从一种状态转换为另一种状态的时间。
+
+* `message` - 指示特定组件条件的当前升级状态的消息。
+
+* `reason` - 特定组件条件的当前升级状态。可能的 `reasons` 包括：
+
+** `Succeeded` - 特定组件升级成功。
+
+** `Failed` - 特定组件升级失败。
+
+** `InProgress` - 特定组件升级正在进行中。
+
+** `Pending` - 特定组件升级尚未安排。
+
+** `Skipped` - 在集群上未找到特定组件，因此将跳过其升级。
+
+** `Error` - 特定组件遇到瞬态错误。
+ 
+* `status` - 当前条件 `type` 的状态，属于 `True`、`False`、`Unknown` 之一。
+
+* `type` - 当前升级组件的指示器。
+
+升级控制器为类型为 `OSUpgraded` 和 `KubernetesUpgraded` 的组件条件创建 SUC 计划。要进一步跟踪为这些组件创建的 SUC 计划，请参阅 <<components-system-upgrade-controller-monitor-plans>>。
+
+所有其他组件条件类型可以通过查看由 link:https://github.com/k3s-io/helm-controller/[helm-controller] 为其创建的资源来进一步跟踪。有关详细信息，请参见 <<components-upgrade-controller-how-track-helm>>。
+
+由升级控制器调度的升级计划可以在满足以下条件时标记为 `successful`：
+
+. 不存在 `Pending` 或 `InProgress` 组件条件。
+
+. `lastSuccessfulReleaseVersion` 属性指向升级计划配置中指定的 `releaseVersion`。_一旦升级过程成功，此属性将由升级控制器添加到升级计划的状态中。_
+
+[#ex-succesful-upgrade-plan]
+.成功的 `UpgradePlan` 示例：
+====
+[,yaml,subs="attributes"]
+----
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
+metadata:
+  name: upgrade-plan-mgmt
+  namespace: upgrade-controller-system
+spec:
+  releaseVersion: {version-edge}
+status:
+  conditions:
+  - lastTransitionTime: "2024-10-01T06:26:48Z"
+    message: All cluster nodes are upgraded
+    reason: Succeeded
+    status: "True"
+    type: OSUpgraded
+  - lastTransitionTime: "2024-10-01T06:26:59Z"
+    message: All cluster nodes are upgraded
+    reason: Succeeded
+    status: "True"
+    type: KubernetesUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:13Z"
+    message: Chart rancher upgrade succeeded
+    reason: Succeeded
+    status: "True"
+    type: RancherUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:13Z"
+    message: Chart longhorn is not installed
+    reason: Skipped
+    status: "False"
+    type: LonghornUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:13Z"
+    message: Specified version of chart metallb is already installed
+    reason: Skipped
+    status: "False"
+    type: MetalLBUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:13Z"
+    message: Chart cdi is not installed
+    reason: Skipped
+    status: "False"
+    type: CDIUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:13Z"
+    message: Chart kubevirt is not installed
+    reason: Skipped
+    status: "False"
+    type: KubeVirtUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:13Z"
+    message: Chart neuvector-crd is not installed
+    reason: Skipped
+    status: "False"
+    type: NeuVectorUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:14Z"
+    message: Specified version of chart endpoint-copier-operator is already installed
+    reason: Skipped
+    status: "False"
+    type: EndpointCopierOperatorUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:14Z"
+    message: Chart elemental-operator upgrade succeeded
+    reason: Succeeded
+    status: "True"
+    type: ElementalUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:15Z"
+    message: Chart sriov-crd is not installed
+    reason: Skipped
+    status: "False"
+    type: SRIOVUpgraded
+  - lastTransitionTime: "2024-10-01T06:27:19Z"
+    message: Chart metal3 is not installed
+    reason: Skipped
+    status: "False"
+    type: Metal3Upgraded
+  - lastTransitionTime: "2024-10-01T06:27:27Z"
+    message: Chart rancher-turtles is not installed
+    reason: Skipped
+    status: "False"
+    type: RancherTurtlesUpgraded
+  lastSuccessfulReleaseVersion: {version-edge}
+  observedGeneration: 1
+  sucNameSuffix: 90315a2b6d
+----
+====
+
+[#components-upgrade-controller-how-track-helm]
+=== Helm Controller
+
+本节介绍如何跟踪由 link:https://github.com/k3s-io/helm-controller/[helm-controller] 创建的资源。
+
+[NOTE]
+====
+以下步骤假设 `kubectl` 已配置为连接到部署了升级控制器的集群。
+====
+
+. 找到特定组件的 `HelmChart` 资源：
++
+[,bash]
+----
+kubectl get helmcharts -n kube-system
+----
+
+. 使用 `HelmChart` 资源的名称，找到由 `helm-controller` 创建的升级 Pod：
++
+[,bash]
+----
+kubectl get pods -l helmcharts.helm.cattle.io/chart=<helmchart_name> -n kube-system
+
+# Example for Rancher
+kubectl get pods -l helmcharts.helm.cattle.io/chart=rancher -n kube-system
+NAME                         READY   STATUS      RESTARTS   AGE
+helm-install-rancher-tv9wn   0/1     Completed   0          16m
+----
+
+. 查看组件特定 Pod 的日志：
++
+[,bash]
+----
+kubectl logs <pod_name> -n kube-system
+----
+
+[#components-upgrade-controller-known-issues]
+== 已知限制
+
+ifeval::["{flavor}" == "edge"]
+* 下游集群升级尚不由升级控制器管理。有关如何升级下游集群的信息，请参阅 <<day2-downstream-clusters>>。
+endif::[]
+
+* 升级控制器要求通过 <<components-eib,EIB>> 部署的任何额外 {product} Helm chart 必须将其 link:https://docs.rke2.io/helm#using-the-helm-crd[HelmChart CR] 部署在 `kube-system` 名称空间中.为此，请在您的 EIB 定义文件中配置 `installationNamespace` 属性。有关详细信息，请参见 link:https://github.com/suse-edge/edge-image-builder/blob/main/docs/building-images.md#kubernetes[上游] 文档。
+
+* 目前，升级控制器无法确定管理集群上当前运行的 Edge 发行版本。请确保提供的 Edge 发行版本高于集群上当前运行的 Edge 发行版本.
+
+* 目前，升级控制器仅支持 *非隔离的* 环境升级。*隔离的* 升级尚不可行。

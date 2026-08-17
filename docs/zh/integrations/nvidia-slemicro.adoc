@@ -1,0 +1,561 @@
+= SUSE Linux Micro 上的 NVIDIA GPU
+:revdate: 2025-04-25
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+== 简介
+
+本指南演示了如何通过 SUSE Linux Micro {version-operatingsystem} 上的预构建 https://github.com/NVIDIA/open-gpu-kernel-modules[开源驱动程序]来实现主机级 NVIDIA GPU 支持。这些驱动程序是内置于操作系统中的，而不是由 NVIDIA 的 https://github.com/NVIDIA/gpu-operator[GPU Operator] 动态加载的。对于希望将部署所需的所有工件预先构建到映像中，且不需要通过 Kubernetes 动态选择驱动程序版本的客户而言，此配置非常理想。本指南首先介绍了如何将其他组件部署到已预先部署的系统上，随后介绍如何通过 Edge Image Builder 将此配置嵌入到初始部署中。如果您不想了解基础知识并手动进行设置，请直接跳至该部分。
+
+需要指出的是，SUSE 和 NVIDIA 在这些驱动程序的支持方面进行了紧密合作，驱动程序由 SUSE 构建并作为软件包储存库的一部分提供。但是，如果您对所使用的驱动程序组合有任何疑虑或问题，请咨询您的 SUSE 或 NVIDIA 客户经理以获取进一步帮助。如果您计划使用 https://www.nvidia.com/en-gb/data-center/products/ai-enterprise/[NVIDIA AI Enterprise] (NVAIE)，请确保您使用的是 https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/platform-support.html#supported-nvidia-gpus-and-systems[NVAIE 认证的 GPU]，这_可能_需要使用 NVIDIA 专有驱动程序。如果您不确定，请咨询您的 NVIDIA 代表。
+
+本指南_不_涵盖有关 NVIDIA GPU Operator 集成的更多信息。虽然此处未涵盖如何集成用于 Kubernetes 的 NVIDIA GPU Operator，但您仍然可以按照本指南中的大多数步骤来设置底层操作系统，并只需在 NVIDIA GPU Operator Helm chart 中启用 `driver.enabled=false` 标志，即可让 GPU Operator 使用 _预安装的_ 驱动程序，它将直接使用主机上已安装的驱动程序。有关 NVIDIA 的更全面的说明，请参阅 https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/install-gpu-operator.html#chart-customization-options[此处]。
+//This doc seems to have vanished from d.s.c.
+//SUSE recently also made a https://documentation.suse.com/trd/kubernetes/single-html/gs_rke2-slebci_nvidia-gpu-operator/[Technical Reference Document] (TRD) available that discusses how to use the GPU operator and the NVIDIA proprietary drivers, should this be a requirement for your use case.
+
+== 先决条件
+
+如果您正在阅读本指南，则假定您已具备以下条件：
+
+* 至少安装有一台运行 SUSE Linux Micro {version-operatingsystem} 的主机；可以是物理机或虚拟机。
+* 您的主机已关联订阅，因为这是访问软件包所必需的 — 您可以 https://www.suse.com/download/sle-micro/[在此] 获取评估版。
+* 安装有 https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus[兼容的 NVIDIA GPU]（或 _完全_ 直通给运行 SUSE Linux Micro 的虚拟机）。
+* 拥有 root 用户访问权限 — 这些说明假设您是 root 用户，并且 _没有_ 通过 `sudo` 提升您的权限。
+
+== 手动安装
+
+在本节中，您将直接在 SUSE Linux Micro 操作系统上安装 NVIDIA 驱动程序，因为 NVIDIA 开源驱动程序现在已包含在核心 SUSE Linux Micro 软件包储存库中，这使得安装过程就像安装所需的 RPM 软件包一样简单。无需编译或下载可执行软件包。下面我们将介绍如何部署“G06”代系的驱动程序，它支持最新的 GPU（有关更多信息，请参阅 https://en.opensuse.org/SDB:NVIDIA_drivers#Install[此处]），因此请为您的系统所配备的 NVIDIA GPU 选择合适的驱动程序代系。对于现代 GPU，“G06”驱动程序是最常见的选择。
+
+在开始之前，必须认识到，除了 SUSE 作为 SUSE Linux Micro 一部分提供的 NVIDIA 开源驱动程序外，您的设置可能还需要额外的 NVIDIA 组件。这些组件可能包括 OpenGL 库、CUDA 工具包、命令行实用程序（例如 `nvidia-smi`）以及容器集成组件（例如 `nvidia-container-toolkit`）。其中许多组件并非由 SUSE 提供，因为它们属于 NVIDIA 专有软件，或者由我们而非 NVIDIA 提供这些组件并不合理。因此，作为说明的一部分，我们将配置额外的储存库以获取这些组件，并演示如何使用这些工具的某些示例，从而构建一个功能完备的系统。区分 SUSE 储存库和 NVIDIA 储存库非常重要，因为 NVIDIA 提供的软件包版本与 SUSE 构建的版本之间有时可能会不匹配。这种情况通常发生在 SUSE 发布新版本的开源驱动程序时，而 NVIDIA 储存库中对应的软件包需要几天时间才能同步更新。
+
+我们建议您通过检查以下内容，确保所选的驱动程序版本与您的 GPU 兼容，并满足您可能有的任何 CUDA 要求：
+
+* https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/[CUDA 发行说明]
+* 您计划部署的驱动程序版本在 {link-nvidia-driver}[NVIDIA 储存库] 中有匹配的版本，并确保您拥有支持组件的等效软件包版本
+
+[TIP] 
+====
+要查找 NVIDIA 开源驱动程序版本，请在目标机器上运行 `zypper se -s nvidia-open-driver`，_或者_ 在 SUSE 客户中心搜索 {link-nvidia-open-driver}[SUSE Linux Micro {version-operatingsystem} for {x86-64}] 中的“nvidia-open-driver”。
+
+image::scc-packages-nvidia.png[SUSE 客户中心,scaledwidth=100%]
+====
+
+当您确认 NVIDIA 储存库中有等效版本可用时，即可准备在主机操作系统上安装这些软件包。为此，我们需要打开一个 `transactional-update` 会话，它会为底层操作系统创建一个新的读/写快照，以便我们能够对不可变平台进行更改（有关 `transactional-update` 的进一步说明，请参阅 {link-micro-transactional-updates}此处）：
+
+[,shell]
+----
+transactional-update shell
+----
+
+当您处于 `transactional-update` shell 中时，请从 NVIDIA 添加一个额外的软件包储存库。这允许我们引入额外的实用程序，例如 `nvidia-smi`：
+
+[,shell,subs="attributes"]
+----
+zypper ar {link-nvidia-package-repo} nvidia-suse-main
+zypper --gpg-auto-import-keys refresh
+----
+
+然后，您可以安装驱动程序和 `nvidia-compute-utils` 以获取额外的实用程序。如果您不需要这些实用程序，可以省略它，但出于测试目的，在此阶段安装它是值得的：
+[,shell]
+----
+zypper install -y --auto-agree-with-licenses nvidia-open-driver-G06-signed-kmp nvidia-compute-utils-G06
+----
+
+NOTE: 如果安装失败，这可能表明所选驱动程序版本与 NVIDIA 在其储存库中提供的版本之间存在依赖关系不匹配。请参阅上一节以验证您的版本是否匹配。尝试安装不同的驱动程序版本。例如，如果 NVIDIA 储存库中有较早的版本，您可以尝试在安装命令中指定 `nvidia-open-driver-G06-signed-kmp=550.54.14` 以指定一个相匹配的版本。
+
+接下来，如果您 _不_ 使用受支持的 GPU（请记住可以在 https://github.com/NVIDIA/open-gpu-kernel-modules#compatible-gpus[此处] 找到该列表），您可以尝试通过在模块级别启用支持来查看驱动程序是否有效，但结果可能会有所不同——如果您使用的是 _受支持_ 的 GPU，请跳过此步骤：
+
+[,shell]
+----
+sed -i '/NVreg_OpenRmEnableUnsupportedGpus/s/^#//g' /etc/modprobe.d/50-nvidia-default.conf
+----
+
+现在您已经安装了这些软件包，是时候退出 `transactional-update` 会话了：
+
+[,shell]
+----
+exit
+----
+
+NOTE: 在继续之前，请确保您已退出 `transactional-update` 会话。
+
+现在您已经安装了驱动程序，是时候重新启动了。由于 SUSE Linux Micro 是一个不可变操作系统，它需要重新启动进入您在之前步骤中创建的新快照。驱动程序仅安装到此新快照中，因此如果不重新启动进入此新快照（会自动发生），则无法加载驱动程序。准备好后，请发出重启命令：
+
+[,shell]
+----
+reboot
+----
+
+系统成功重启后，重新登录并使用 `nvidia-smi` 工具来验证驱动程序是否已成功加载，以及它是否能够访问并枚举您的 GPU：
+
+[,shell]
+----
+nvidia-smi
+----
+
+此命令的输出应显示类似于以下输出的内容，请注意在下面的示例中，我们有两个 GPU：
+
+[,shell]
+----
++---------------------------------------------------------------------------------------+
+| NVIDIA-SMI 545.29.06              Driver Version: 545.29.06    CUDA Version: 12.3     |
+|-----------------------------------------+----------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |         Memory-Usage | GPU-Util  Compute M. |
+|                                         |                      |               MIG M. |
+|=========================================+======================+======================|
+|   0  NVIDIA A100-PCIE-40GB          Off | 00000000:17:00.0 Off |                    0 |
+| N/A   29C    P0              35W / 250W |      4MiB / 40960MiB |      0%      Default |
+|                                         |                      |             Disabled |
++-----------------------------------------+----------------------+----------------------+
+|   1  NVIDIA A100-PCIE-40GB          Off | 00000000:CA:00.0 Off |                    0 |
+| N/A   30C    P0              33W / 250W |      4MiB / 40960MiB |      0%      Default |
+|                                         |                      |             Disabled |
++-----------------------------------------+----------------------+----------------------+
+
++---------------------------------------------------------------------------------------+
+| Processes:                                                                            |
+|  GPU   GI   CI        PID   Type   Process name                            GPU Memory |
+|        ID   ID                                                             Usage      |
+|=======================================================================================|
+|  No running processes found                                                           |
++---------------------------------------------------------------------------------------+
+----
+
+至此，SUSE Linux Micro 系统上 NVIDIA 驱动程序的安装和验证过程结束。
+
+== 手动安装的进一步验证
+
+在此阶段，我们仅能验证在主机层面可以访问 NVIDIA 设备，且驱动程序已成功加载。然而，如果我们想确定它是否正常工作，一个简单的测试是验证 GPU 是否可以接收来自用户空间应用程序的指令，理想情况下是通过容器并经由 CUDA 库，因为这通常是实际工作负载所使用的。为此，我们可以通过安装 `nvidia-container-toolkit` (https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html#installing-with-zypper[NVIDIA Container Toolkit]) 对主机操作系统进行进一步修改。首先，打开另一个 `transactional-update` 外壳，请注意我们本可以在上一步中通过单个事务完成此操作，稍后章节将介绍如何完全自动化执行此操作：
+
+[,shell]
+----
+transactional-update shell
+----
+
+接下来，从 NVIDIA Container Toolkit 储存库安装 `nvidia-container-toolkit` 软件包：
+
+* 下方的 `nvidia-container-toolkit.repo` 包含一个稳定版 (`nvidia-container-toolkit`) 和一个实验版 (`nvidia-container-toolkit-experimental`) 储存库。建议在生产环境中使用稳定版储存库。实验版储存库默认处于禁用状态。
+
+[,shell]
+----
+zypper ar https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo
+zypper --gpg-auto-import-keys install -y nvidia-container-toolkit
+----
+
+准备就绪后，您可以退出 `transactional-update` 外壳：
+
+[,shell]
+----
+exit
+----
+
+...并重启机器进入新的快照：
+[,shell]
+----
+reboot
+----
+
+NOTE: 与之前一样，您需要确保已退出 `transactional-shell` 外壳并重启机器，以便使更改生效。
+
+机器重启后，您可以验证系统是否能够使用 NVIDIA Container Toolkit 成功枚举设备。输出应包含详细信息，其中有 INFO 和 WARN 消息，但不应有 ERROR 消息：
+
+[,shell]
+----
+nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+----
+
+这可确保在机器上启动的任何容器都能使用已发现的 NVIDIA GPU 设备。准备就绪后，您即可运行基于 podman 的容器。通过 `podman` 执行此操作为我们提供了一种验证从容器内访问 NVIDIA 设备的有效方法，这应能为后续在 Kubernetes 中执行相同操作提供信心。根据 {link-bci}[SLE BCI]，授予 `podman` 对之前命令所处理的已标记 NVIDIA 设备的访问权限，并直接运行 Bash 命令：
+
+[,shell]
+----
+podman run --rm --device nvidia.com/gpu=all --security-opt=label=disable -it registry.suse.com/bci/bci-base:latest bash
+----
+
+您现在将在临时 podman 容器内执行命令。它无法访问您的底层系统且是临时的，因此我们在此处执行的任何操作都不会持久保存，并且您不应能够破坏底层主机上的任何内容。由于我们现在处于容器中，我们可以安装所需的 CUDA 库，并再次检查驱动程序 https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/[此处] 对应的正确 CUDA 版本，尽管 `nvidia-smi` 的先前输出应已显示所需的 CUDA 版本。在下面的示例中，我们正在安装 _CUDA 12.3_ 并拉取许多示例、演示和开发套件，以便您可以全面验证 GPU：
+
+[,shell,subs="attributes"]
+----
+zypper ar {link-nvidia-cuda-package-repo} cuda-suse
+zypper in -y cuda-libraries-devel-12-3 cuda-minimal-build-12-3 cuda-demo-suite-12-3
+----
+
+安装成功后，请勿退出容器。我们将运行 `deviceQuery` CUDA 示例，它将全面验证通过 CUDA 进行的 GPU 访问，并从容器内部运行：
+
+[,shell]
+----
+/usr/local/cuda-12/extras/demo_suite/deviceQuery
+----
+
+如果成功，您应该会看到类似于以下内容的输出，注意命令末尾的 `Result = PASS` 消息，并注意在下面的输出中，系统正确识别了两个 GPU，而您的环境可能只有一个：
+
+[,shell]
+----
+/usr/local/cuda-12/extras/demo_suite/deviceQuery Starting...
+
+ CUDA Device Query (Runtime API) version (CUDART static linking)
+
+Detected 2 CUDA Capable device(s)
+
+Device 0: "NVIDIA A100-PCIE-40GB"
+  CUDA Driver Version / Runtime Version          12.2 / 12.1
+  CUDA Capability Major/Minor version number:    8.0
+  Total amount of global memory:                 40339 MBytes (42298834944 bytes)
+  (108) Multiprocessors, ( 64) CUDA Cores/MP:     6912 CUDA Cores
+  GPU Max Clock rate:                            1410 MHz (1.41 GHz)
+  Memory Clock rate:                             1215 Mhz
+  Memory Bus Width:                              5120-bit
+  L2 Cache Size:                                 41943040 bytes
+  Maximum Texture Dimension Size (x,y,z)         1D=(131072), 2D=(131072, 65536), 3D=(16384, 16384, 16384)
+  Maximum Layered 1D Texture Size, (num) layers  1D=(32768), 2048 layers
+  Maximum Layered 2D Texture Size, (num) layers  2D=(32768, 32768), 2048 layers
+  Total amount of constant memory:               65536 bytes
+  Total amount of shared memory per block:       49152 bytes
+  Total number of registers available per block: 65536
+  Warp size:                                     32
+  Maximum number of threads per multiprocessor:  2048
+  Maximum number of threads per block:           1024
+  Max dimension size of a thread block (x,y,z): (1024, 1024, 64)
+  Max dimension size of a grid size    (x,y,z): (2147483647, 65535, 65535)
+  Maximum memory pitch:                          2147483647 bytes
+  Texture alignment:                             512 bytes
+  Concurrent copy and kernel execution:          Yes with 3 copy engine(s)
+  Run time limit on kernels:                     No
+  Integrated GPU sharing Host Memory:            No
+  Support host page-locked memory mapping:       Yes
+  Alignment requirement for Surfaces:            Yes
+  Device has ECC support:                        Enabled
+  Device supports Unified Addressing (UVA):      Yes
+  Device supports Compute Preemption:            Yes
+  Supports Cooperative Kernel Launch:            Yes
+  Supports MultiDevice Co-op Kernel Launch:      Yes
+  Device PCI Domain ID / Bus ID / location ID:   0 / 23 / 0
+  Compute Mode:
+     < Default (multiple host threads can use ::cudaSetDevice() with device simultaneously) >
+
+Device 1: <snip to reduce output for multiple devices>
+     < Default (multiple host threads can use ::cudaSetDevice() with device simultaneously) >
+> Peer access from NVIDIA A100-PCIE-40GB (GPU0) -> NVIDIA A100-PCIE-40GB (GPU1) : Yes
+> Peer access from NVIDIA A100-PCIE-40GB (GPU1) -> NVIDIA A100-PCIE-40GB (GPU0) : Yes
+
+deviceQuery, CUDA Driver = CUDART, CUDA Driver Version = 12.3, CUDA Runtime Version = 12.3, NumDevs = 2, Device0 = NVIDIA A100-PCIE-40GB, Device1 = NVIDIA A100-PCIE-40GB
+Result = PASS
+----
+
+从这里，您可以继续运行任何其他 CUDA 工作负载——使用编译器和 CUDA 生态系统的任何其他方面来运行进一步的测试。完成后，您可以退出容器，请注意您在其中安装的任何内容都是临时的（因此会丢失！），并且不会影响底层操作系统：
+
+[,shell]
+----
+exit
+----
+
+== 使用 Kubernetes 实现
+
+既然我们已经证明了在 SUSE Linux Micro 上安装和使用 NVIDIA 开源驱动程序，让我们探索在同一台机器上配置 Kubernetes。本指南不会引导您部署 Kubernetes，但它假设您已经安装了 https://k3s.io/[K3s] 或 https://docs.rke2.io/install/quickstart[RKE2]，并且您的 kubeconfig 已相应配置，以便可以以超级用户身份执行标准 `kubectl` 命令。我们假设您的节点构成一个单节点集群，尽管核心步骤对于多节点集群应该是相似的。首先，确保您的 `kubectl` 访问正常工作：
+
+[,shell]
+----
+kubectl get nodes
+----
+
+这应该显示类似于以下内容：
+
+[,shell,subs="attributes"]
+----
+NAME       STATUS   ROLES                       AGE   VERSION
+node0001   Ready    control-plane,etcd,master   13d   {version-kubernetes-rke2}
+----
+
+您应该会发现您的 k3s/rke2 安装已检测到主机上的 NVIDIA Container Toolkit，并自动将 NVIDIA 运行时集成配置到 `containerd`（k3s/rke2 使用的容器运行时接口）中。通过检查 containerd `config.toml` 文件来确认这一点：
+
+[,shell]
+----
+tail -n8 /var/lib/rancher/rke2/agent/etc/containerd/config.toml
+----
+
+这必须显示类似于以下内容。等效的 K3s 位置是 `/var/lib/rancher/k3s/agent/etc/containerd/config.toml`：
+
+[,shell]
+----
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes."nvidia"]
+  runtime_type = "io.containerd.runc.v2"
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes."nvidia".options]
+  BinaryName = "/usr/bin/nvidia-container-runtime"
+----
+
+NOTE: 如果这些条目不存在，则检测可能已失败。这可能是由于机器或 Kubernetes 服务未重启所致。如果需要，请按上述方法手动添加这些内容。
+
+接下来，我们需要将 NVIDIA `RuntimeClass` 配置为除默认运行时之外的额外 Kubernetes 运行时，确保任何需要访问 GPU 的 Pod 用户请求都可以通过 `nvidia-container-runtime` 使用 NVIDIA Container Toolkit 来实现，正如在 `containerd` 配置中所配置的那样：
+
+[,shell]
+----
+kubectl apply -f - <<EOF
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: nvidia
+handler: nvidia
+EOF
+----
+
+下一步是配置 https://github.com/NVIDIA/k8s-device-plugin[NVIDIA Device Plugin]，它将 Kubernetes 配置为利用集群内的 NVIDIA GPU 作为可使用的资源，并与 NVIDIA Container Toolkit 配合工作。该工具首先检测底层主机上的所有功能，包括 GPU、驱动程序和其他功能（如 GL），然后允许您请求 GPU 资源并将其作为应用程序的一部分进行使用。
+
+首先，您需要添加并更新 NVIDIA Device Plugin 的 Helm 存储库：
+
+[,shell]
+----
+helm repo add nvdp https://nvidia.github.io/k8s-device-plugin
+helm repo update
+----
+
+现在您可以安装 NVIDIA Device Plugin：
+
+[,shell,subs="attributes"]
+----
+helm upgrade -i nvdp nvdp/nvidia-device-plugin --namespace nvidia-device-plugin --create-namespace --version {version-nvidia-device-plugin} --set runtimeClassName=nvidia
+----
+
+几分钟后，您会看到一个新的 pod 正在运行，它将完成对可用节点的检测，并用已检测到的 GPU 数量对其进行标记。
+
+[,shell]
+----
+kubectl get pods -n nvidia-device-plugin
+NAME                              READY   STATUS    RESTARTS      AGE
+nvdp-nvidia-device-plugin-jp697   1/1     Running   2 (12h ago)   6d3h
+
+kubectl get node node0001 -o json | jq .status.capacity
+{
+  "cpu": "128",
+  "ephemeral-storage": "466889732Ki",
+  "hugepages-1Gi": "0",
+  "hugepages-2Mi": "0",
+  "memory": "32545636Ki",
+  "nvidia.com/gpu": "1",                      <----
+  "pods": "110"
+}
+----
+
+现在您已准备好创建一个尝试使用此 GPU 的 NVIDIA pod。让我们尝试使用 CUDA Benchmark 容器：
+
+[,shell]
+----
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nbody-gpu-benchmark
+  namespace: default
+spec:
+  restartPolicy: OnFailure
+  runtimeClassName: nvidia
+  containers:
+  - name: cuda-container
+    image: nvcr.io/nvidia/k8s/cuda-sample:nbody
+    args: ["nbody", "-gpu", "-benchmark"]
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+    env:
+    - name: NVIDIA_VISIBLE_DEVICES
+      value: all
+    - name: NVIDIA_DRIVER_CAPABILITIES
+      value: all
+EOF
+----
+
+如果一切顺利，您可以查看日志并查看基准测试信息：
+
+[,shell]
+----
+kubectl logs nbody-gpu-benchmark
+Run "nbody -benchmark [-numbodies=<numBodies>]" to measure performance.
+    -fullscreen       (run n-body simulation in fullscreen mode)
+    -fp64             (use double precision floating point values for simulation)
+    -hostmem          (stores simulation data in host memory)
+    -benchmark        (run benchmark to measure performance)
+    -numbodies=<N>    (number of bodies (>= 1) to run in simulation)
+    -device=<d>       (where d=0,1,2.... for the CUDA device to use)
+    -numdevices=<i>   (where i=(number of CUDA devices > 0) to use for simulation)
+    -compare          (compares simulation results running once on the default GPU and once on the CPU)
+    -cpu              (run n-body simulation on the CPU)
+    -tipsy=<file.bin> (load a tipsy model file for simulation)
+
+NOTE: The CUDA Samples are not meant for performance measurements. Results may vary when GPU Boost is enabled.
+
+> Windowed mode
+> Simulation data stored in video memory
+> Single precision floating point simulation
+> 1 Devices used for simulation
+GPU Device 0: "Turing" with compute capability 7.5
+
+> Compute 7.5 CUDA device: [Tesla T4]
+40960 bodies, total time for 10 iterations: 101.677 ms
+= 165.005 billion interactions per second
+= 3300.103 single-precision GFLOP/s at 20 flops per interaction
+----
+
+最后，如果您的应用程序需要 OpenGL，您可以在主机级别安装所需的 NVIDIA OpenGL 库，NVIDIA Device Plugin 和 NVIDIA Container Toolkit 可以使它们对容器可用。按如下所示安装该软件包：
+
+[,shell]
+----
+transactional-update pkg install nvidia-gl-G06
+----
+
+NOTE: 您需要重启以使该软件包对您的应用程序可用。NVIDIA Device Plugin 应通过 NVIDIA Container Toolkit 自动重新检测此项。
+
+== 通过 Edge Image Builder 将其整合在一起
+
+好了，您已经演示了您的应用程序和 GPU 在 SUSE Linux Micro 上的全部功能，现在您希望使用 <<components-eib>> 通过可部署/可使用的 ISO 或 RAW 磁盘映像将所有内容整合在一起。本指南不解释如何使用 Edge Image Builder，但它提供了构建此类镜像所需的配置。您可以在下方找到镜像定义的示例，以及必要的 Kubernetes 配置文件，以确保所有必需的组件能够开箱即用。以下是下方所示示例的 Edge Image Builder 目录结构：
+
+[,shell,subs="attributes"]
+----
+.
+├── base-images
+│   └── {micro-base-image-iso}
+├── eib-config-iso.yaml
+├── kubernetes
+│   ├── config
+│   │   └── server.yaml
+│   ├── helm
+│   │   └── values
+│   │       └── nvidia-device-plugin.yaml
+│   └── manifests
+│       └── nvidia-runtime-class.yaml
+└── rpms
+    └── gpg-keys
+        └── nvidia-container-toolkit.key
+----
+
+让我们探索这些文件。首先，这是一个运行 K3s 的单节点集群的示例镜像定义，并部署了实用程序和 OpenGL 软件包 (`eib-config-iso.yaml`)：
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  arch: x86_64
+  imageType: iso
+  baseImage: {micro-base-image-iso}
+  outputImageName: deployimage.iso
+operatingSystem:
+  time:
+    timezone: Europe/London
+    ntp:
+      pools:
+        - 2.suse.pool.ntp.org
+  isoConfiguration:
+    installDevice: /dev/sda
+  users:
+    - username: root
+      encryptedPassword: $6$XcQN1xkuQKjWEtQG$WbhV80rbveDLJDz1c93K5Ga9JDjt3mF.ZUnhYtsS7uE52FR8mmT8Cnii/JPeFk9jzQO6eapESYZesZHO9EslD1
+  packages:
+    packageList:
+      - nvidia-open-driver-G06-signed-kmp-default
+      - nvidia-compute-utils-G06
+      - nvidia-gl-G06
+      - nvidia-container-toolkit
+    additionalRepos:
+      - url: https://download.nvidia.com/suse/sle15sp6/
+      - url: https://nvidia.github.io/libnvidia-container/stable/rpm/x86_64
+    sccRegistrationCode: [snip]
+kubernetes:
+  version: {version-kubernetes-k3s}
+  helm:
+    charts:
+      - name: nvidia-device-plugin
+        version: {version-nvidia-device-plugin-chart}
+        installationNamespace: kube-system
+        targetNamespace: nvidia-device-plugin
+        createNamespace: true
+        valuesFile: nvidia-device-plugin.yaml
+        repositoryName: nvidia
+    repositories:
+      - name: nvidia
+        url: https://nvidia.github.io/k8s-device-plugin
+----
+
+NOTE: 这仅是一个镜像示例。您可能需要对其进行定制，以符合您的要求和预期。此外，如果使用 SUSE Linux Micro，您需要提供自己的 `sccRegistrationCode` 来解析软件包依赖关系并拉取 NVIDIA 驱动程序。
+
+除此之外，我们需要添加额外的组件，以便它们在启动时由 Kubernetes 加载。EIB 目录首先需要一个 `kubernetes` 目录，其中包含用于配置、Helm chart 值以及所需的任何其他清单的子目录：
+
+[,shell]
+----
+mkdir -p kubernetes/config kubernetes/helm/values kubernetes/manifests
+----
+
+现在，让我们通过选择 CNI（如果未选择，则默认为 Cilium）并启用 SELinux 来设置（可选的）Kubernetes 配置：
+
+[,shell]
+----
+cat << EOF > kubernetes/config/server.yaml
+cni: cilium
+ingress-controller: traefik
+selinux: true
+EOF
+----
+
+现在，确保在 Kubernetes 集群上创建了 NVIDIA RuntimeClass：
+
+[,shell]
+----
+cat << EOF > kubernetes/manifests/nvidia-runtime-class.yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: nvidia
+handler: nvidia
+EOF
+----
+
+我们使用内置的 Helm Controller 通过 Kubernetes 本身部署 NVIDIA Device Plugin。
+让我们在 chart 的 values 文件中提供运行时类：
+
+[,shell]
+----
+cat << EOF > kubernetes/helm/values/nvidia-device-plugin.yaml
+runtimeClassName: nvidia
+EOF
+----
+
+在继续之前，我们需要获取 NVIDIA Container Toolkit RPM 公钥：
+
+[,shell]
+----
+mkdir -p rpms/gpg-keys
+curl -o rpms/gpg-keys/nvidia-container-toolkit.key https://nvidia.github.io/libnvidia-container/gpgkey
+----
+
+所有必需的工件，包括 Kubernetes 二进制文件、容器镜像、Helm chart（以及任何引用的镜像），都将自动隔离，这意味着部署时的系统默认情况下不需要互联网连接。现在，您只需要从 https://www.suse.com/download/sle-micro/[SUSE 下载页面] 获取 SUSE Linux Micro .iso 映像（并将其放置在 `base-images` 目录中），然后就可以调用 Edge Image Builder 工具为您生成 .iso 映像。为了完成此示例，以下是用于构建镜像的命令：
+
+[,shell,subs="attributes"]
+----
+podman run --rm --privileged -it -v /path/to/eib-files/:/eib \
+registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+build --definition-file eib-config-iso.yaml
+----
+
+有关更多说明，请参阅 Edge Image Builder 的 {link-eib-building-images}[文档]。
+
+== 解决问题
+
+=== nvidia-smi 找不到 GPU
+
+使用 `dmesg` 检查内核消息。如果这表明它无法分配 `NvKMSKapDevice`，请应用不受支持的 GPU 变通方法：
+
+[,shell]
+----
+sed -i '/NVreg_OpenRmEnableUnsupportedGpus/s/^#//g' /etc/modprobe.d/50-nvidia-default.conf
+----
+
+____
+_注意_:如果您在上述步骤中更改了内核模块配置，则需要重新加载内核模块或重新启动，以使其生效。
+____

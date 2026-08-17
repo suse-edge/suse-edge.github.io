@@ -1,0 +1,907 @@
+[#quickstart-metal3]
+= Implantações automatizadas de BMC com Metal^3^
+:revdate: 2025-12-15
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Metal^3^ é um https://metal3.io/[projeto da CNCF] que fornece recursos de gerenciamento de infraestrutura bare-metal para Kubernetes.
+
+O Metal^3^ fornece recursos nativos do Kubernetes para gerenciar o ciclo de vida de servidores bare-metal que suportam gerenciamento via protocolos fora de banda, como https://www.dmtf.org/standards/redfish[Redfish].
+
+Ele também possui suporte maduro para https://cluster-api.sigs.k8s.io/[Cluster API (CAPI)], que permite o gerenciamento de recursos de infraestrutura em vários provedores de infraestrutura por meio de APIs neutras de fornecedores amplamente adotadas.
+
+== Por que usar este método
+
+Este método é útil para cenários em que o hardware de destino suporta gerenciamento fora de banda e deseja-se um fluxo de gerenciamento de infraestrutura totalmente automatizado.
+
+Um cluster de gerenciamento é configurado para fornecer APIs declarativas que permitem o gerenciamento de inventário e estado de servidores bare-metal de clusters downstream, incluindo inspeção, limpeza e provisionamento/desprovisionamento automatizados.
+
+== Arquitetura de alto nível
+
+image::quickstart-metal3-architecture.png[scaledwidth=100%]
+
+== Pré-requisitos
+
+Existem algumas restrições específicas relacionadas ao hardware e à rede do servidor do cluster downstream:
+
+* Cluster de gerenciamento
+ ** Deve ter conectividade de rede com a API de gerenciamento/BMC do servidor de destino
+ ** Deve ter conectividade de rede com a rede do plano de controle do servidor de destino
+ ** Para clusters de gerenciamento com vários nós, é necessário um endereço IP reservado adicional
+* Hosts a serem controlados
+ ** Deve oferecer suporte a gerenciamento fora de banda via interfaces Redfish, iDRAC ou iLO
+ ** Deve oferecer suporte a implantação via mídia virtual (PXE não é suportado atualmente)
+ ** Deve ter conectividade de rede com o cluster de gerenciamento para acesso às APIs de provisionamento do Metal^3^
+
+Algumas ferramentas são necessárias; elas podem ser instaladas no cluster de gerenciamento ou em um host que possa acessá-lo.
+
+* https://kubernetes.io/docs/reference/kubectl/kubectl/[Kubectl], https://helm.sh[Helm] e https://cluster-api.sigs.k8s.io/user/quick-start.html#install-clusterctl[Clusterctl]
+* Um tempo de execução do contêiner, como https://podman.io[Podman] ou https://rancherdesktop.io[Rancher Desktop]
+
+* Uma imagem raw do SUSE Linux Micro {version-operatingsystem} criada usando o <<guides-kiwi-builder-images, Kiwi Builder>>
+
+== Implantação
+
+=== Configurar Cluster de gerenciamento
+
+As etapas básicas para instalar um cluster de gerenciamento e usar o Metal^3^ são:
+
+. Instalar um cluster de gerenciamento RKE2
+. Instalar o Rancher
+. Instalar um provedor de armazenamento (opcional)
+. Instalar as dependências do Metal^3^
+. Instalar dependências do provedor CAPI
+. Criar uma imagem do SO SLEMicro para hosts de cluster downstream
+. Registrar CRs BareMetalHost para definir o inventário bare metal
+. Criar um cluster downstream definindo recursos CAPI
+
+Este guia pressupõe que um cluster RKE2 e o Rancher (incluindo o cert-manager) existentes já foram instalados, por exemplo, usando o <<components-eib, Edge Image Builder>>.
+
+TIP: As etapas aqui também podem ser totalmente automatizadas conforme descrito na <<atip-management-cluster, Documentação do Cluster de gerenciamento>>.
+
+=== Instalando dependências do Metal^3^
+
+Se não estiver instalado como parte da instalação do Rancher, o cert-manager deve estar instalado e em execução.
+
+Um IP adicional é necessário, o qual é gerenciado pelo https://metallb.universe.tf/[MetalLB] para fornecer um endpoint consistente para os serviços de gerenciamento do Metal^3^.
+Este IP deve fazer parte da sub-rede do plano de controle e estar reservado para configuração estática (não fazer parte de nenhum pool DHCP).
+
+TIP: Se o cluster de gerenciamento for um nó único, o requisito de um IP flutuante adicional gerenciado via MetalLB pode ser evitado, veja <<Single-node configuration>>
+
+. Primeiro, instalamos o MetalLB:
++
+[,bash,subs="attributes"]
+----
+helm install \
+  metallb oci://registry.suse.com/edge/charts/metallb \
+  --namespace metallb-system \
+  --create-namespace
+----
++
+. Em seguida, definimos um `IPAddressPool` e `L2Advertisement` usando o IP reservado, definido como `STATIC_IRONIC_IP` abaixo:
++
+[,bash]
+----
+export STATIC_IRONIC_IP=<STATIC_IRONIC_IP>
+
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: ironic-ip-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - ${STATIC_IRONIC_IP}/32
+  serviceAllocation:
+    priority: 100
+    serviceSelectors:
+    - matchExpressions:
+      - {key: app.kubernetes.io/name, operator: In, values: [metal3-ironic]}
+EOF
+----
++
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: ironic-ip-pool-l2-adv
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - ironic-ip-pool
+EOF
+----
++
+. Agora o Metal^3^ pode ser instalado:
++
+[,bash,subs="attributes"]
+----
+helm install \
+  metal3 oci://registry.suse.com/edge/charts/metal3 \
+  --namespace metal3-system \
+  --create-namespace \
+  --set global.ironicIP="$STATIC_IRONIC_IP"
+----
++
+. Pode levar cerca de dois minutos para o contêiner init ser executado nesta implantação, portanto, certifique-se de que todos os pods estejam em execução antes de prosseguir:
++
+[,shell]
+----
+kubectl get pods -n metal3-system
+NAME                                                    READY   STATUS    RESTARTS   AGE
+baremetal-operator-controller-manager-85756794b-fz98d   2/2     Running   0          15m
+metal3-metal3-ironic-677bc5c8cc-55shd                   4/4     Running   0          15m
+metal3-metal3-mariadb-7c7d6fdbd8-64c7l                  1/1     Running   0          15m
+----
+
+WARNING: Não prossiga para as etapas a seguir até que todos os pods no namespace `metal3-system` estejam em execução.
+
+=== Instalando dependências do provedor de API de cluster
+
+As dependências do provedor de API de cluster são gerenciadas por meio do gráfico Helm Rancher Turtles Providers:
+
+[,bash,subs="attributes,specialchars"]
+----
+helm install \
+  rancher-turtles oci://registry.suse.com/edge/charts/rancher-turtles-providers \
+  --namespace cattle-turtles-system \
+  --create-namespace
+----
+
+Após algum tempo, os pods do controlador devem estar em execução nos namespaces `cattle-capi-system`, `capm3-system`, `rke2-bootstrap-system` e `rke2-control-plane-system`.
+
+=== Preparar imagem do cluster downstream
+
+<<guides-kiwi-builder-images,Kiwi>> e <<components-eib, Edge Image Builder>> são usados para preparar uma imagem base SLEMicro modificada que é provisionada nos hosts do cluster downstream.
+
+Neste guia, abordamos a configuração mínima necessária para implantar o cluster downstream.
+
+==== Configuração de imagens
+
+NOTE: Siga <<guides-kiwi-builder-images>> primeiro para criar uma imagem nova como a primeira etapa necessária para criar clusters.
+
+Ao executar o Edge Image Builder, um diretório é montado a partir do host, portanto, é necessário criar uma estrutura de diretórios para armazenar os arquivos de configuração usados para definir a imagem de destino.
+
+* `downstream-cluster-config.yaml` é o arquivo de definição de imagem, consulte <<quickstart-eib>> para obter mais detalhes.
+* Copie a imagem base criada pelo Kiwi Builder para o diretório `base-images`.
+* A pasta `network` é opcional, consulte <<metal3-add-network-eib>> para obter mais detalhes.
+* O diretório custom/scripts contém scripts a serem executados na primeira inicialização; atualmente, um script `01-fix-growfs.sh` é necessário para redimensionar a partição raiz do SO na implantação
+
+[,console,subs="attributes"]
+----
+├── downstream-cluster-config.yaml
+├── base-images/
+│   └ {micro-base-image-raw}
+├── network/
+|   └ configure-network.sh
+└── custom/
+    └ scripts/
+        └ 01-fix-growfs.sh
+----
+
+===== Arquivo de definição de imagem do cluster downstream
+
+O arquivo `downstream-cluster-config.yaml` é o arquivo de configuração principal para a imagem do cluster downstream. A seguir, um exemplo mínimo para implantação via Metal^3^:
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: raw
+  arch: x86_64
+  baseImage: {micro-base-image-raw}
+  outputImageName: SLE-Micro-eib-output.raw
+operatingSystem:
+  time:
+    timezone: Europe/London
+    ntp:
+      forceWait: true
+      pools:
+        - 2.suse.pool.ntp.org
+      servers:
+        - 10.0.0.1
+        - 10.0.0.2
+  kernelArgs:
+    - ignition.platform.id=openstack
+  systemd:
+    disable:
+      - rebootmgr
+      - transactional-update.timer
+      - transactional-update-cleanup.timer
+  users:
+    - username: root
+      encryptedPassword: $ROOT_PASSWORD
+      sshKeys:
+      - $USERKEY1
+      createHomeDir: true
+  packages:
+    packageList:
+      - jq
+    sccRegistrationCode: $SCC_REGISTRATION_CODE
+----
+
+Onde `$SCC_REGISTRATION_CODE` é o código de registro copiado do https://scc.suse.com/[SUSE Customer Center], e a lista de pacotes contém `jq`, que é necessária.
+
+`$ROOT_PASSWORD` é a senha criptografada para o usuário root, o que pode ser útil para testes/depuração. Ele pode ser gerado com o comando `openssl passwd -6 PASSWORD`.
+
+Para os ambientes de produção, recomenda-se usar as chaves SSH que podem ser adicionadas ao bloco de usuários, substituindo `$USERKEY1` pelas chaves SSH reais.
+
+[NOTE]
+====
+Observe que `ignition.platform.id=openstack` é obrigatório - sem este argumento, a configuração do SUSE Linux Micro via ignition falhará no fluxo automatizado Metal^3^.
+
+A seção `time` é opcional, mas é altamente recomendável que seja configurada para evitar possíveis problemas com certificados e discrepância de relógio. Os valores fornecidos neste exemplo são apenas para fins ilustrativos. Por favor, ajuste-os para atender aos seus requisitos específicos.
+====
+
+[#growfs-script]
+===== Script Growfs
+
+Atualmente, um script personalizado (`custom/scripts/01-fix-growfs.sh`) é necessário para expandir o sistema de arquivos para corresponder ao tamanho do disco na primeira inicialização após o provisionamento. O script `01-fix-growfs.sh` contém as seguintes informações:
+
+[,shell]
+----
+#!/bin/bash
+growfs() {
+  mnt="$1"
+  dev="$(findmnt --fstab --target ${mnt} --evaluate --real --output SOURCE --noheadings)"
+  # /dev/sda3 -> /dev/sda, /dev/nvme0n1p3 -> /dev/nvme0n1
+  parent_dev="/dev/$(lsblk --nodeps -rno PKNAME "${dev}")"
+  # Last number in the device name: /dev/nvme0n1p42 -> 42
+  partnum="$(echo "${dev}" | sed 's/^.*[^0-9]\([0-9]\+\)$/\1/')"
+  ret=0
+  growpart "$parent_dev" "$partnum" || ret=$?
+  [ $ret -eq 0 ] || [ $ret -eq 1 ] || exit 1
+  /usr/lib/systemd/systemd-growfs "$mnt"
+}
+growfs /
+----
+
+[NOTE]
+====
+Adicione seus próprios scripts personalizados para serem executados durante o processo de provisionamento usando a mesma abordagem.
+Para obter mais informações, consulte <<quickstart-eib>>. 
+
+====
+
+==== Criação de imagem
+
+Uma vez que a estrutura de diretórios esteja preparada seguindo as seções anteriores, execute o seguinte comando para criar a imagem:
+
+[,shell,subs="attributes"]
+----
+podman run --rm --privileged -it -v $PWD:/eib \
+ registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+ build --definition-file downstream-cluster-config.yaml
+----
+
+Isso cria o arquivo de imagem de saída chamado `SLE-Micro-eib-output.raw`, com base na definição descrita acima.
+
+A imagem de saída deve então ser disponibilizada via servidor web, seja o contêiner media-server habilitado via o <<metal3-media-server,Metal^3^ chart>> ou algum outro servidor acessível localmente.  Nos exemplos abaixo, nos referimos a este servidor como `imagecache.local:8080`
+
+[NOTE]
+====
+Ao implantar imagens EIB em clusters downstream, também é necessário incluir a soma sha256 da imagem no objeto `Metal3MachineTemplate`.
+Ele pode ser gerado como:
+
+[,shell,subs="attributes"]
+----
+sha256sum &lt;image_file&gt; &gt; &lt;image_file&gt;.sha256
+# On this example:
+sha256sum SLE-Micro-eib-output.raw &gt; SLE-Micro-eib-output.raw.sha256
+----
+====
+
+=== Adicionando inventário BareMetalHost
+
+O registro de servidores bare-metal para implantação automatizada requer a criação de dois recursos: um Secret armazenando credenciais de acesso BMC e um recurso Metal^3^ BareMetalHost definindo a conexão BMC e outros detalhes:
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: controlplane-0-credentials
+type: Opaque
+data:
+  username: YWRtaW4=
+  password: cGFzc3dvcmQ=
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: controlplane-0
+  labels:
+    cluster-role: control-plane
+spec:
+  architecture: x86_64
+  online: true
+  bootMACAddress: "00:f3:65:8a:a3:b0"
+  bmc:
+    address: redfish-virtualmedia://192.168.125.1:8000/redfish/v1/Systems/68bd0fb6-d124-4d17-a904-cdf33efe83ab
+    disableCertificateVerification: true
+    credentialsName: controlplane-0-credentials
+----
+
+Observe o seguinte:
+
+* O nome de usuário/senha do Secret deve estar codificado em base64. Observe que isso não deve incluir nenhuma quebra de linha ao final (por exemplo, use `echo -n`, não apenas `echo`!)
+* O rótulo `cluster-role` pode ser definido agora ou posteriormente na criação do cluster. No exemplo abaixo, esperamos `control-plane` ou `worker`
+* `bootMACAddress` deve ser um MAC válido que corresponda à NIC do plano de controle do host
+* O endereço `bmc` é a conexão com a API de gerenciamento do BMC; os seguintes são suportados:
+ ** `redfish-virtualmedia://<IP ADDRESS>/redfish/v1/Systems/<SYSTEM ID>`: Mídia virtual Redfish, por exemplo, SuperMicro
+ ** `idrac-virtualmedia://<IP ADDRESS>/redfish/v1/Systems/System.Embedded.1`: Dell iDRAC
+* Consulte a https://github.com/metal3-io/baremetal-operator/blob/main/docs/api.md[documentação da API upstream] para obter mais detalhes sobre a API BareMetalHost
+
+
+==== Configurando IPs estáticos
+
+O exemplo de BareMetalHost acima pressupõe que o DHCP forneça a configuração de rede do plano de controle, mas para cenários onde a configuração manual é necessária, como IPs estáticos, é possível fornecer configuração adicional, conforme descrito abaixo.
+
+[#metal3-add-network-eib]
+===== Script adicional para configuração de rede estática
+
+Ao criar a imagem base com o Edge Image Builder, na pasta `network`, crie o seguinte arquivo `configure-network.sh`.
+
+Isso consome dados da unidade de configuração na primeira inicialização e configura a rede do host usando a ferramenta https://github.com/suse-edge/nm-configurator[NM Configurator].
+
+[,shell]
+----
+#!/bin/bash
+
+set -eux
+
+# Attempt to statically configure a NIC in the case where we find a network_data.json
+# In a configuration drive
+
+CONFIG_DRIVE=$(blkid --label config-2 || true)
+if [ -z "${CONFIG_DRIVE}" ]; then
+  echo "No config-2 device found, skipping network configuration"
+  exit 0
+fi
+
+mount -o ro $CONFIG_DRIVE /mnt
+
+META_DATA_FILE="/mnt/openstack/latest/meta_data.json"
+if [ ! -f "${META_DATA_FILE}" ]; then
+  umount /mnt
+  echo "No meta_data.json found, skipping hostname configuration"
+  exit 0
+fi
+
+DESIRED_HOSTNAME=$(cat /mnt/openstack/latest/meta_data.json | tr ',{}' '\n' | grep '"metal3-name"' | sed 's/.*\"metal3-name\": \"\(.*\)\"/\1/')
+echo "${DESIRED_HOSTNAME}" > /etc/hostname
+
+NETWORK_DATA_FILE="/mnt/openstack/latest/network_data.json"
+
+if [ ! -f "${NETWORK_DATA_FILE}" ]; then
+  umount /mnt
+  echo "No network_data.json found, skipping network configuration"
+  exit 0
+fi
+
+mkdir -p /tmp/nmc/{desired,generated}
+cp ${NETWORK_DATA_FILE} /tmp/nmc/desired/_all.yaml
+umount /mnt
+
+./nmc generate --config-dir /tmp/nmc/desired --output-dir /tmp/nmc/generated
+./nmc apply --config-dir /tmp/nmc/generated
+----
+
+===== Segredo adicional com configuração de rede do host
+
+Um segredo adicional contendo dados no formato https://nmstate.io/[nmstate] suportado pelo <<components-nmc,NM Configurator>> pode ser definido para cada host.
+
+O segredo é então referenciado no recurso `BareMetalHost` por meio do campo de especificação `preprovisioningNetworkDataName`.
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: controlplane-0-networkdata
+type: Opaque
+stringData:
+  networkData: |
+    interfaces:
+    - name: enp1s0
+      type: ethernet
+      state: up
+      mac-address: "00:f3:65:8a:a3:b0"
+      ipv4:
+        address:
+        - ip:  192.168.125.200
+          prefix-length: 24
+        enabled: true
+        dhcp: false
+    dns-resolver:
+      config:
+        server:
+        - 192.168.125.1
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-address: 192.168.125.1
+        next-hop-interface: enp1s0
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: controlplane-0
+  labels:
+    cluster-role: control-plane
+spec:
+  preprovisioningNetworkDataName: controlplane-0-networkdata
+# Remaining content as in previous example
+----
+
+NOTE: Em algumas circunstâncias, o endereço MAC pode ser omitido. Veja <<networking-unified>> para mais detalhes.
+
+==== Preparação do BareMetalHost
+
+Após criar o recurso BareMetalHost e os segredos associados conforme descrito acima, um fluxo de trabalho de preparação do host é acionado:
+
+* Uma imagem de ramdisk é inicializada por anexo de virtualmedia ao BMC do host de destino
+* O ramdisk inspeciona os detalhes do hardware e prepara o host para o provisionamento (por exemplo, limpando discos de dados anteriores)
+* Ao concluir este processo, os detalhes do hardware no campo BareMetalHost `status.hardware` são atualizados e podem ser verificados
+
+Este processo pode levar vários minutos, mas quando concluído, você deverá ver o estado do BareMetalHost tornar-se `available`:
+
+[,bash]
+----
+% kubectl get baremetalhost
+NAME             STATE       CONSUMER   ONLINE   ERROR   AGE
+controlplane-0   available              true             9m44s
+worker-0         available              true             9m44s
+----
+
+=== Criando clusters downstream
+
+Agora criamos recursos do Cluster API que definem o cluster downstream, e recursos Machine que farão com que os recursos BareMetalHost sejam provisionados, e então inicializados para formar um cluster RKE2.
+
+=== Implantação do plano de controle
+
+Para implantar o plano de controle, definimos um manifesto yaml semelhante ao abaixo, que contém os seguintes recursos:
+
+* O recurso Cluster define o nome do cluster, redes e o tipo de provedor de plano de controle/infraestrutura (neste caso, RKE2/Metal3)
+* O Metal3Cluster define o endpoint do plano de controle (IP do host para nó único, endpoint do LoadBalancer para multi-nó; este exemplo assume nó único)
+* O RKE2ControlPlane define a versão do RKE2 e qualquer configuração adicional necessária durante a inicialização do cluster
+* O Metal3MachineTemplate define a imagem do SO a ser aplicada aos recursos BareMetalHost, e o hostSelector define quais BareMetalHosts consumir
+* O Metal3DataTemplate define metadados adicionais a serem passados para o BareMetalHost (observe que o networkData atualmente não é suportado na solução Edge)
+
+NOTE: Para simplificar, este exemplo assume um plano de controle de nó único onde o BareMetalHost está configurado com um IP de `192.168.125.200`. Para exemplos mais avançados de multi-nó, consulte <<atip-automated-provisioning>>.
+
+[,yaml,subs="attributes"]
+----
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  name: sample-cluster
+  namespace: default
+  labels:
+    cluster-api.cattle.io/rancher-auto-import: "true"
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks:
+        - 192.168.0.0/18
+    services:
+      cidrBlocks:
+        - 10.96.0.0/12
+  controlPlaneRef:
+    apiGroup: controlplane.cluster.x-k8s.io
+    kind: RKE2ControlPlane
+    name: sample-cluster
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3Cluster
+    name: sample-cluster
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3Cluster
+metadata:
+  name: sample-cluster
+  namespace: default
+spec:
+  controlPlaneEndpoint:
+    host: 192.168.125.200
+    port: 6443
+  noCloudProvider: true
+---
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: RKE2ControlPlane
+metadata:
+  name: sample-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3MachineTemplate
+    name: sample-cluster-controlplane
+  replicas: 1
+  version: {version-kubernetes-rke2}
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  agentConfig:
+    format: ignition
+    kubelet:
+      extraArgs:
+      - provider-id=metal3://BAREMETALHOST_UUID
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+          - name: rke2-preinstall.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-preinstall
+              Wants=network-online.target
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+              ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStartPost=/bin/sh -c "umount /mnt"
+              [Install]
+              WantedBy=multi-user.target
+          # rke2-traefik-deployment.service unit to be removed once "traefik" being the default ingress controller (starting with RKE2 v1.36)
+          - name: rke2-traefik-deployment.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-traefik-deployment
+              Wants=rke2-preinstall.service
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo \"ingress-controller: traefik\" >> /etc/rancher/rke2/config.yaml"
+              [Install]
+              WantedBy=multi-user.target
+        storage:
+          directories:
+          - path: /var/lib/rancher/rke2/server/manifests
+            overwrite: true
+          files:
+          - path: /var/lib/rancher/rke2/server/manifests/rke2-traefik-config.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChartConfig
+                metadata:
+                  name: rke2-traefik
+                  namespace: kube-system
+                spec:
+                  valuesContent: |-
+                    ingressClass:
+                      isDefaultClass: true
+                    ports:
+                      web:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 80
+                      websecure:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 443
+                    service:
+                      enabled: true
+                      type: LoadBalancer
+                      spec:
+                        externalTrafficPolicy: Local
+                        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: sample-cluster-controlplane
+  namespace: default
+spec:
+  template:
+    spec:
+      dataTemplate:
+        name: sample-cluster-controlplane-template
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+      image:
+        checksum: http://imagecache.local:8080/SLE-Micro-eib-output.raw.sha256
+        checksumType: sha256
+        format: raw
+        url: http://imagecache.local:8080/SLE-Micro-eib-output.raw
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3DataTemplate
+metadata:
+  name: sample-cluster-controlplane-template
+  namespace: default
+spec:
+  clusterName: sample-cluster
+  metaData:
+    objectNames:
+    - key: name
+      object: machine
+    - key: local-hostname
+      object: machine
+    - key: local_hostname
+      object: machine
+----
+
+NOTE: Adicionar o rótulo `cluster-api.cattle.io/rancher-auto-import: "true"` aos objetos `cluster.x-k8s.io` importará o cluster para o Rancher (criando um objeto `clusters.management.cattle.io` correspondente).
+Consulte a https://documentation.suse.com/cloudnative/cluster-api/latest/en/tutorials/first-cluster.html#_mark_namespace_for_auto_import[documentação do Cluster API] para obter mais informações.
+
+
+Uma vez adaptado ao seu ambiente, você pode aplicar o exemplo via `kubectl` e então monitorar o status do cluster via `clusterctl`.
+
+[,bash]
+----
+% kubectl apply -f rke2-control-plane.yaml
+
+# Wait for the cluster to be provisioned
+% clusterctl describe cluster sample-cluster
+NAME                                                    READY  SEVERITY  REASON  SINCE  MESSAGE
+Cluster/sample-cluster                                  True                     22m
+├─ClusterInfrastructure - Metal3Cluster/sample-cluster  True                     27m
+├─ControlPlane - RKE2ControlPlane/sample-cluster        True                     22m
+│ └─Machine/sample-cluster-chflc                        True                     23m
+----
+
+=== Implantação de Worker/Compute
+
+Semelhante à implantação do plano de controle, definimos um manifesto YAML que contém os seguintes recursos:
+
+* MachineDeployment define o número de réplicas (hosts) e o provedor de bootstrap/infraestrutura (neste caso, RKE2/Metal3)
+* RKE2ConfigTemplate descreve a versão do RKE2 e a configuração de primeira inicialização para o bootstrapping do host do agente
+* Metal3MachineTemplate define a imagem do SO a ser aplicada aos recursos BareMetalHost, e o seletor de host define quais BareMetalHosts consumir
+* Metal3DataTemplate define metadados adicionais a serem passados para o BareMetalHost (observe que `networkData` não é suportado atualmente)
+
+[,yaml,subs="attributes"]
+----
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: MachineDeployment
+metadata:
+  labels:
+    cluster.x-k8s.io/cluster-name: sample-cluster
+  name: sample-cluster
+  namespace: default
+spec:
+  clusterName: sample-cluster
+  replicas: 1
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: sample-cluster
+  template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/cluster-name: sample-cluster
+    spec:
+      bootstrap:
+        configRef:
+          apiGroup: bootstrap.cluster.x-k8s.io
+          kind: RKE2ConfigTemplate
+          name: sample-cluster-workers
+      clusterName: sample-cluster
+      infrastructureRef:
+        apiGroup: infrastructure.cluster.x-k8s.io
+        kind: Metal3MachineTemplate
+        name: sample-cluster-workers
+      deletion:
+        nodeDrainTimeoutSeconds: 0
+      version: {version-kubernetes-rke2}
+---
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: RKE2ConfigTemplate
+metadata:
+  name: sample-cluster-workers
+  namespace: default
+spec:
+  template:
+    spec:
+      agentConfig:
+        format: ignition
+        version: {version-kubernetes-rke2}
+        kubelet:
+          extraArgs:
+          - provider-id=metal3://BAREMETALHOST_UUID
+        additionalUserData:
+          config: |
+            variant: fcos
+            version: 1.4.0
+            systemd:
+              units:
+              - name: rke2-preinstall.service
+                enabled: true
+                contents: |
+                  [Unit]
+                  Description=rke2-preinstall
+                  Wants=network-online.target
+                  Before=rke2-install.service
+                  ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                  [Service]
+                  Type=oneshot
+                  User=root
+                  ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                  ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                  ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                  ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+                  ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                  ExecStartPost=/bin/sh -c "umount /mnt"
+                  [Install]
+                  WantedBy=multi-user.target
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: sample-cluster-workers
+  namespace: default
+spec:
+  template:
+    spec:
+      dataTemplate:
+        name: sample-cluster-workers-template
+      hostSelector:
+        matchLabels:
+          cluster-role: worker
+      image:
+        checksum: http://imagecache.local:8080/SLE-Micro-eib-output.raw.sha256
+        checksumType: sha256
+        format: raw
+        url: http://imagecache.local:8080/SLE-Micro-eib-output.raw
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3DataTemplate
+metadata:
+  name: sample-cluster-workers-template
+  namespace: default
+spec:
+  clusterName: sample-cluster
+  metaData:
+    objectNames:
+    - key: name
+      object: machine
+    - key: local-hostname
+      object: machine
+    - key: local_hostname
+      object: machine
+----
+
+
+Quando o exemplo acima tiver sido copiado e adaptado para atender ao seu ambiente, ele poderá ser aplicado via `kubectl`, então o status do cluster poderá ser monitorado com `clusterctl`
+
+[,bash]
+----
+% kubectl apply -f rke2-agent.yaml
+
+# Wait for the worker nodes to be provisioned
+% clusterctl describe cluster sample-cluster
+NAME                                                    READY  SEVERITY  REASON  SINCE  MESSAGE
+Cluster/sample-cluster                                  True                     25m
+├─ClusterInfrastructure - Metal3Cluster/sample-cluster  True                     30m
+├─ControlPlane - RKE2ControlPlane/sample-cluster        True                     25m
+│ └─Machine/sample-cluster-chflc                        True                     27m
+└─Workers
+  └─MachineDeployment/sample-cluster                    True                     22m
+    └─Machine/sample-cluster-56df5b4499-zfljj           True                     23m
+----
+
+
+=== Desprovisionamento de cluster
+
+O cluster downstream pode ser desprovisionado excluindo os recursos aplicados nas etapas de criação acima:
+
+[,bash]
+----
+% kubectl delete -f rke2-agent.yaml
+% kubectl delete -f rke2-control-plane.yaml
+----
+
+Isso aciona o desprovisionamento dos recursos BareMetalHost, o que pode levar vários minutos, após os quais eles devem estar no estado disponível novamente:
+
+[,bash]
+----
+% kubectl get bmh
+NAME             STATE            CONSUMER                            ONLINE   ERROR   AGE
+controlplane-0   deprovisioning   sample-cluster-controlplane-vlrt6   false            10m
+worker-0         deprovisioning   sample-cluster-workers-785x5        false            10m
+
+...
+
+% kubectl get bmh
+NAME             STATE       CONSUMER   ONLINE   ERROR   AGE
+controlplane-0   available              false            15m
+worker-0         available              false            15m
+----
+
+== Problemas conhecidos
+
+* O https://github.com/metal3-io/ip-address-manager[controlador de Gerenciamento de Endereço IP] upstream não é suportado atualmente, pois ainda não é compatível com nossa escolha de ferramentas de configuração de rede e cadeia de ferramentas de primeira inicialização no SLEMicro.
+* Relacionado a isso, os recursos de IPAM e os campos networkData do Metal3DataTemplate não são suportados atualmente.
+* Apenas a implantação via redfish-virtualmedia é suportada atualmente.
+
+== Mudanças planejadas
+
+* Habilitar o suporte aos recursos de IPAM e configuração via campos networkData
+
+== Recursos adicionais
+
+A <<atip-management-cluster,SUSE Telco Cloud Management Cluster Documentation>> contém exemplos de uso mais avançado do Metal^3^ para casos de uso em telecomunicações.
+
+=== Configuração de nó único
+
+Para ambientes de teste/PoC onde o cluster de gerenciamento é um nó único, é possível evitar o requisito de um IP flutuante adicional gerenciado via MetalLB.
+
+Neste modo, o endpoint para as APIs do cluster de gerenciamento é o IP do cluster de gerenciamento, portanto, ele deve ser reservado ao usar DHCP ou configurado estaticamente para garantir que o IP do cluster de gerenciamento não mude - referido como `<MANAGEMENT_CLUSTER_IP>` abaixo.
+
+Para habilitar este cenário, os valores do gráfico Metal^3^ necessários são os seguintes:
+
+[,yaml]
+----
+global:
+  ironicIP: <MANAGEMENT_CLUSTER_IP>
+metal3-ironic:
+  service:
+    type: NodePort
+----
+
+[#disabling-tls-for-virtualmedia-iso-attachment]
+=== Desabilitando TLS para anexo de ISO de virtualmedia
+
+Alguns fornecedores de servidores verificam a conexão SSL ao anexar imagens ISO de virtual-media ao BMC, o que pode causar um problema porque os certificados gerados para a implantação do Metal^3^ são autoassinados; para contornar esse problema, é possível desabilitar o TLS apenas para o anexo de disco de virtualmedia com os valores do gráfico Metal^3^ da seguinte forma:
+
+[,yaml]
+----
+global:
+  enable_vmedia_tls: false
+----
+
+Uma solução alternativa é configurar os BMCs com o certificado da CA - neste caso, você pode ler os certificados do cluster usando `kubectl`:
+
+[,bash]
+----
+kubectl get secret -n metal3-system ironic-vmedia-cert -o yaml
+----
+
+O certificado pode então ser configurado no console do BMC do servidor, embora o processo para isso seja específico do fornecedor (e não seja possível para todos os fornecedores, caso em que a flag `enable_vmedia_tls` pode ser necessária).
+
+=== Configuração de armazenamento
+
+Para ambientes de teste/PoC onde o cluster de gerenciamento é um nó único, nenhum armazenamento persistente é necessário, mas para casos de uso de produção, recomenda-se instalar o SUSE Storage (Longhorn) no cluster de gerenciamento para que as imagens relacionadas ao Metal^3^ possam ser persistidas durante uma reinicialização/reagendamento de pod.
+
+Para habilitar este armazenamento persistente, os valores do gráfico Metal^3^ necessários são os seguintes:
+
+[,yaml]
+----
+metal3-ironic:
+  persistence:
+    ironic:
+      size: "5Gi"
+----
+
+A <<atip-management-cluster, Documentação do SUSE Telco Cloud Management Cluster>> tem mais detalhes sobre como configurar um cluster de gerenciamento com armazenamento persistente.

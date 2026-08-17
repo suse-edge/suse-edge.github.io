@@ -1,0 +1,936 @@
+[#{cluster-type}-day2-fleet-helm-upgrade]
+== Fazer upgrade do Helm chart
+:revdate: 2025-07-30
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+:toc: auto
+
+Esta seção abrange as seguintes partes:
+
+. <<{cluster-type}-day2-fleet-helm-upgrade-air-gap>> - contém informações sobre como enviar charts e imagens OCI relacionados ao Edge para o seu registro privado.
+. <<{cluster-type}-day2-fleet-helm-upgrade-procedure>> - contém informações sobre diferentes casos de uso de upgrade do Helm chart e seu procedimento de upgrade.
+
+[#{cluster-type}-day2-fleet-helm-upgrade-air-gap]
+=== Preparação para ambientes air-gapped
+
+==== Certifique-se de ter acesso ao Fleet do seu Helm chart
+
+Dependendo do que seu ambiente suporta, você pode escolher uma das seguintes opções:
+
+. Hospede os recursos do Fleet do seu chart em um servidor Git local que seja acessível pelo seu `management cluster`.
+
+. Use a CLI do Fleet para link:https://fleet.rancher.io/bundle-add#convert-a-helm-chart-into-a-bundle[converter um Helm chart em um Bundle] que você pode usar diretamente e que não precisará ser hospedado em algum lugar. A CLI do Fleet pode ser obtida na página de link:https://github.com/rancher/fleet/releases/tag/v{version-fleet}[release], para usuários de Mac existe uma link:https://formulae.brew.sh/formula/fleet-cli[fleet-cli] Homebrew Formulae.
+
+==== Encontre os ativos necessários para a sua versão de release do Edge
+
+. Vá para a página de link:https://github.com/suse-edge/fleet-examples/releases[release] do "Day 2", encontre a release do Edge para a qual você deseja atualizar seu chart e clique em *Assets*.
+
+. Na seção *"Assets"*, baixe os seguintes arquivos:
++
+[cols="1,1"]
+|======
+|*Release File* 
+|*Descrição*
+
+|_edge-save-images.sh_
+|Extrai as imagens especificadas no arquivo `edge-release-images.txt` e as empacota dentro de um arquivo '.tar.gz'.
+
+|_edge-save-oci-artefacts.sh_
+|Extrai as imagens de chart OCI relacionadas à release específica do Edge e as empacota dentro de um arquivo '.tar.gz'.
+
+|_edge-load-images.sh_
+|Carrega imagens de um arquivo '.tar.gz', renomeia as tags e as envia para um registro privado.
+
+|_edge-load-oci-artefacts.sh_
+|Recebe um diretório contendo pacotes de chart OCI '.tgz' do Edge e os carrega em um registro privado.
+
+|_edge-release-helm-oci-artefacts.txt_
+|Contém uma lista de imagens de chart OCI relacionadas a uma release específica do Edge.
+
+|_edge-release-images.txt_
+|Contém uma lista de imagens relacionadas a uma release específica do Edge.
+|======
+
+==== Crie o arquivo de imagens de release do Edge
+
+_Em uma máquina com acesso à internet:_
+
+. Torne o `edge-save-images.sh` executável:
++
+[,bash]
+----
+chmod +x edge-save-images.sh
+----
+
+. Gere o arquivo de imagem:
++
+[,bash]
+----
+./edge-save-images.sh --source-registry registry.suse.com
+----
+
+. Isso criará um arquivo pronto para carregamento chamado `edge-images.tar.gz`.
++
+[NOTE]
+====
+Se a opção `-i|--images` for especificada, o nome do arquivo pode ser diferente.
+====
+
+. Copie este arquivo para sua máquina air-gapped:
++
+[,bash]
+----
+scp edge-images.tar.gz <user>@<machine_ip>:/path
+----
+
+==== Crie o arquivo de imagens de chart OCI do Edge
+
+_Em uma máquina com acesso à internet:_
+
+. Torne o `edge-save-oci-artefacts.sh` executável:
++
+[,bash]
+----
+chmod +x edge-save-oci-artefacts.sh
+----
+
+. Gere o arquivo de imagem de chart OCI:
++
+[,bash]
+----
+./edge-save-oci-artefacts.sh --source-registry registry.suse.com
+----
+
+. Isso criará um arquivo chamado `oci-artefacts.tar.gz`.
++
+[NOTE]
+====
+Se a opção `-a|--archive` for especificada, o nome do arquivo pode ser diferente.
+====
+
+. Copie este arquivo para sua máquina air-gapped:
++
+[,bash]
+----
+scp oci-artefacts.tar.gz <user>@<machine_ip>:/path
+----
+
+==== Carregue as imagens de release do Edge em sua máquina air-gapped
+
+_Em sua máquina air-gapped:_
+
+. Faça login no seu registro privado (se necessário):
++
+[,bash]
+----
+podman login <REGISTRY.YOURDOMAIN.COM:PORT>
+----
+
+. Torne o `edge-load-images.sh` executável:
++
+[,bash]
+----
+chmod +x edge-load-images.sh
+----
+
+. Execute o script, passando o arquivo *copiado* `edge-images.tar.gz` anteriormente:
++
+[,bash]
+----
+./edge-load-images.sh --source-registry registry.suse.com --registry <REGISTRY.YOURDOMAIN.COM:PORT> --images edge-images.tar.gz
+----
++
+[NOTE]
+====
+Isso carregará todas as imagens do `edge-images.tar.gz`, renomeará as tags e as enviará para o registro especificado na opção `--registry`.
+====
+
+==== Carregue as imagens de chart OCI do Edge para sua máquina air-gapped.
+
+_Em sua máquina air-gapped:_
+
+. Faça login no seu registro privado (se necessário):
++
+[,bash]
+----
+podman login <REGISTRY.YOURDOMAIN.COM:PORT>
+----
+
+. Torne o `edge-load-oci-artefacts.sh` executável:
++
+[,bash]
+----
+chmod +x edge-load-oci-artefacts.sh
+----
+
+. Descompacte o arquivo copiado `oci-artefacts.tar.gz`:
++
+[,bash]
+----
+tar -xvf oci-artefacts.tar.gz
+----
+
+. Isso produzirá um diretório com o modelo de nomenclatura `edge-release-oci-tgz-<date>`
+
+. Passe este diretório para o script `edge-load-oci-artefacts.sh` para carregar as imagens do chart Edge OCI para seu registro privado:
++
+[NOTE]
+====
+Este script pressupõe que a CLI `helm` tenha sido pré-instalada em seu ambiente. Para instruções de instalação do Helm, consulte link:https://helm.sh/docs/intro/install/[Instalando o Helm].
+====
++
+[,bash]
+----
+./edge-load-oci-artefacts.sh --archive-directory edge-release-oci-tgz-<date> --registry <REGISTRY.YOURDOMAIN.COM:PORT> --source-registry registry.suse.com
+----
+
+==== Configure seu registro privado em sua distribuição Kubernetes
+
+Para RKE2, consulte link:https://docs.rke2.io/install/private_registry[Configuração de Registro Privado]
+
+Para K3s, consulte link:https://docs.k3s.io/installation/private-registry[Configuração de Registro Privado]
+
+[#{cluster-type}-day2-fleet-helm-upgrade-procedure]
+=== Procedimento de upgrade
+
+Esta seção foca nos seguintes casos de uso do procedimento de upgrade do Helm:
+
+. <<{cluster-type}-day2-fleet-helm-upgrade-procedure-new-cluster>>
+
+. <<{cluster-type}-day2-fleet-helm-upgrade-procedure-fleet-managed-chart>>
+
+. <<{cluster-type}-day2-fleet-helm-upgrade-procedure-eib-deployed-chart>>
+
+[IMPORTANT]
+====
+Charts do Helm implantados manualmente não podem ser atualizados de forma confiável. Sugerimos reimplantar o chart do Helm usando o método <<{cluster-type}-day2-fleet-helm-upgrade-procedure-new-cluster>>.
+====
+
+[#{cluster-type}-day2-fleet-helm-upgrade-procedure-new-cluster]
+==== Tenho um novo cluster e gostaria de implantar e gerenciar um chart Helm do Edge.
+
+Esta seção aborda como:
+
+. <<{cluster-type}-day2-fleet-helm-upgrade-procedure-new-cluster-prepare>>.
+
+. <<{cluster-type}-day2-fleet-helm-upgrade-procedure-new-cluster-deploy>>.
+
+. <<{cluster-type}-day2-fleet-helm-upgrade-procedure-new-cluster-manage>>.
+
+[#{cluster-type}-day2-fleet-helm-upgrade-procedure-new-cluster-prepare]
+===== Prepare os recursos do Fleet para o seu chart.
+
+. Adquira os recursos do Fleet do chart a partir da tag de link:https://github.com/suse-edge/fleet-examples/releases[release] do Edge que você deseja usar.
+
+. Navegue até o Fleet do chart do Helm (`fleets/day2/chart-templates/<chart>`).
+
+. *Se você pretende usar um fluxo de trabalho GitOps*, copie o diretório do Fleet do chart para o repositório Git de onde você fará o GitOps.
+
+. *Opcionalmente*, se o chart do Helm exigir configurações em seus *values*, edite a configuração `.helm.values` dentro do arquivo `fleet.yaml` do diretório copiado.
+
+. *Opcionalmente*, podem existir casos de uso em que você precise adicionar recursos adicionais ao Fleet do seu chart para que ele possa se ajustar melhor ao seu ambiente. Para obter informações sobre como aprimorar seu diretório Fleet, consulte link:https://fleet.rancher.io/gitrepo-content[Conteúdo do Repositório Git].
+
+[NOTE]
+====
+Em alguns casos, o tempo limite padrão que o Fleet usa para operações do Helm pode ser insuficiente, resultando no seguinte erro:
+[,bash]
+----
+failed pre-install: context deadline exceeded
+----
+
+Nesses casos, adicione a propriedade link:https://fleet.rancher.io/ref-crds#helmoptions[timeoutSeconds] sob a configuração `helm` do seu arquivo `fleet.yaml`.
+====
+
+Um *exemplo* para o Helm chart `longhorn` seria assim:
+
+* Estrutura do repositório Git do usuário:
++
+[,bash]
+----
+<user_repository_root>
+├── longhorn
+│   └── fleet.yaml
+└── longhorn-crd
+    └── fleet.yaml
+----
+
+* Conteúdo `fleet.yaml` preenchido com dados `Longhorn` do usuário:
++
+[,yaml,subs="attributes"]
+----
+defaultNamespace: longhorn-system
+
+helm:
+  # timeoutSeconds: 10
+  releaseName: "longhorn"
+  chart: "longhorn"
+  repo: "https://charts.rancher.io/"
+  version: "{version-longhorn-chart}"
+  takeOwnership: true
+  # custom chart value overrides
+  values: 
+    # Example for user provided custom values content
+    defaultSettings:
+      deletingConfirmationFlag: true
+
+# https://fleet.rancher.io/bundle-diffs
+diff:
+  comparePatches:
+  - apiVersion: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: engineimages.longhorn.io
+    operations:
+    - {"op":"remove", "path":"/status/conditions"}
+    - {"op":"remove", "path":"/status/storedVersions"}
+    - {"op":"remove", "path":"/status/acceptedNames"}
+  - apiVersion: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: nodes.longhorn.io
+    operations:
+    - {"op":"remove", "path":"/status/conditions"}
+    - {"op":"remove", "path":"/status/storedVersions"}
+    - {"op":"remove", "path":"/status/acceptedNames"}
+  - apiVersion: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: volumes.longhorn.io
+    operations:
+    - {"op":"remove", "path":"/status/conditions"}
+    - {"op":"remove", "path":"/status/storedVersions"}
+    - {"op":"remove", "path":"/status/acceptedNames"}
+----
++
+[NOTE]
+====
+Estes são apenas valores de exemplo que são usados para ilustrar configurações personalizadas no chart `longhorn`. Eles *NÃO* devem ser tratados como diretrizes de implantação para o chart `longhorn`.
+====
+
+[#{cluster-type}-day2-fleet-helm-upgrade-procedure-new-cluster-deploy]
+===== Implante o Fleet para o seu chart
+
+Você pode implantar o Fleet para o seu chart usando um <<{cluster-type}-day2-fleet-helm-upgrade-procedure-new-cluster-deploy-gitrepo, GitRepo>> ou um <<{cluster-type}-day2-fleet-helm-upgrade-procedure-new-cluster-deploy-bundle, Bundle>>.
+
+[NOTE]
+====
+Ao implantar o Fleet, se você receber uma mensagem `Modified`, certifique-se de adicionar uma entrada `comparePatches` correspondente à seção `diff` do Fleet. Para mais informações, consulte link:https://fleet.rancher.io/bundle-diffs[Gerando Diffs para Ignorar GitRepos Modificados].
+====
+
+[#{cluster-type}-day2-fleet-helm-upgrade-procedure-new-cluster-deploy-gitrepo]
+====== GitRepo
+
+O recurso link:https://fleet.rancher.io/ref-gitrepo[GitRepo] do Fleet contém informações sobre como acessar os recursos do Fleet do seu chart e a quais clusters ele precisa aplicar esses recursos.
+
+O recurso `GitRepo` pode ser implantado através da link:https://ranchermanager.docs.rancher.com/{rancher-docs-version}/integrations-in-rancher/fleet/overview#accessing-fleet-in-the-rancher-ui[Rancher UI], ou manualmente, link:https://fleet.rancher.io/tut-deployment[implantando] o recurso no `management cluster`.
+
+Exemplo de recurso *Longhorn* `GitRepo` para implantação manual *:
+
+[,yaml,subs="attributes"]
+----
+apiVersion: fleet.cattle.io/v1alpha1
+kind: GitRepo
+metadata:
+  name: longhorn-git-repo
+  namespace: {fleet-workspace}
+spec:
+  # If using a tag
+  # revision: user_repository_tag
+  # 
+  # If using a branch
+  # branch: user_repository_branch
+  paths:
+  # As seen in the 'Prepare your Fleet resources' example
+  - longhorn
+  - longhorn-crd
+  repo: user_repository_url
+ifeval::["{cluster-type}" == "downstream"]
+  targets:
+  # Match all clusters
+  - clusterSelector: {}
+endif::[]
+----
+
+[#{cluster-type}-day2-fleet-helm-upgrade-procedure-new-cluster-deploy-bundle]
+====== Pacote
+
+Os recursos link:https://fleet.rancher.io/bundle-add[Bundle] contêm os recursos brutos do Kubernetes que precisam ser implantados pelo Fleet. Normalmente, recomenda-se usar a abordagem `GitRepo`, mas para casos de uso em que o ambiente é air-gapped e não pode suportar um servidor Git local, o `Bundles` pode ajudá-lo a propagar o Fleet do seu chart Helm para seus clusters de destino.
+
+Um `Bundle` pode ser implantado através da Rancher UI (`Continuous Delivery -> Advanced -> Bundles -> Create from YAML`) ou implantando manualmente o recurso `Bundle` no namespace correto do Fleet. Para obter informações sobre os namespaces do Fleet, consulte a link:https://fleet.rancher.io/namespaces#gitrepos-bundles-clusters-clustergroups[documentação] upstream.
+
+`Bundles` para charts Helm do Edge podem ser criados utilizando a abordagem link:https://fleet.rancher.io/bundle-add#convert-a-helm-chart-into-a-bundle[Converter um chart Helm em um Bundle] do Fleet.
+
+Abaixo você pode encontrar um exemplo de como criar um recurso `Bundle` a partir dos modelos de Fleet de charts Helm link:https://github.com/suse-edge/fleet-examples/blob/{release-tag-fleet-examples}/fleets/day2/chart-templates/longhorn/longhorn/fleet.yaml[longhorn] e link:https://github.com/suse-edge/fleet-examples/blob/{release-tag-fleet-examples}/fleets/day2/chart-templates/longhorn/longhorn-crd/fleet.yaml[longhorn-crd] e implantar manualmente este bundle no seu `management cluster`.
+
+[NOTE]
+====
+Para ilustrar o fluxo de trabalho, o exemplo abaixo usa a estrutura de diretório link:https://github.com/suse-edge/fleet-examples[suse-edge/fleet-examples].
+====
+
+. Navegue até o modelo de Fleet do chart link:https://github.com/suse-edge/fleet-examples/blob/{release-tag-fleet-examples}/fleets/day2/chart-templates/longhorn/longhorn/fleet.yaml[longhorn]:
++
+[,bash]
+----
+cd fleets/day2/chart-templates/longhorn/longhorn
+----
+
+. Crie um arquivo `targets.yaml` que instruirá o Fleet para quais clusters ele deve implantar o chart Helm:
++
+[,bash]
+----
+cat > targets.yaml <<EOF
+targets:
+ifeval::["{cluster-type}" == "downstream"]
+# Matches all downstream clusters
+- clusterSelector: {}
+endif::[]
+ifeval::["{cluster-type}" == "management"]
+# Match your local (management) cluster
+- clusterName: local
+endif::[]
+EOF
+----
++
+ifeval::["{cluster-type}" == "downstream"]
+Para uma seleção de cluster downstream mais granular, consulte link:https://fleet.rancher.io/gitrepo-targets[Mapeamento para Clusters downstream].
+endif::[]
+ifeval::["{cluster-type}" == "management"]
+[NOTE]
+====
+Existem alguns casos de uso onde seu local cluster pode ter um nome diferente.
+
+Para recuperar o nome do seu local cluster, execute o comando abaixo:
+
+[,bash]
+----
+kubectl get clusters.fleet.cattle.io -n fleet-local
+----
+====
+endif::[]
+
+. Converta o Fleet do chart Helm `Longhorn` em um recurso Bundle usando o link:https://fleet.rancher.io/cli/fleet-cli/fleet[fleet-cli].
++
+[NOTE]
+====
+A CLI do Fleet pode ser obtida na página de link:https://github.com/rancher/fleet/releases/tag/v{version-fleet}[release] *Assets* (`fleet-linux-amd64`).
+
+Para usuários de Mac, existe uma fórmula Homebrew chamada link:https://formulae.brew.sh/formula/fleet-cli[fleet-cli].
+====
++
+[,bash,subs="attributes"]
+----
+fleet apply --compress --targets-file=targets.yaml -n {fleet-workspace} -o - longhorn-bundle > longhorn-bundle.yaml
+----
+
+. Navegue até o template do chart Fleet link:https://github.com/suse-edge/fleet-examples/blob/{release-tag-fleet-examples}/fleets/day2/chart-templates/longhorn/longhorn-crd/fleet.yaml[longhorn-crd]:
++
+[,bash]
+----
+cd fleets/day2/chart-templates/longhorn/longhorn-crd
+----
+
+. Crie um arquivo `targets.yaml` que instruirá o Fleet sobre a quais clusters ele deve implantar o gráfico Helm:
++
+[,bash]
+----
+cat > targets.yaml <<EOF
+targets:
+ifeval::["{cluster-type}" == "downstream"]
+# Matches all downstream clusters
+- clusterSelector: {}
+endif::[]
+ifeval::["{cluster-type}" == "management"]
+# Match your local (management) cluster
+- clusterName: local
+endif::[]
+EOF
+----
+
+. Converta o gráfico Helm `Longhorn CRD` do Fleet em um recurso Bundle usando o link:https://fleet.rancher.io/cli/fleet-cli/fleet[fleet-cli].
++
+[,bash,subs="attributes"]
+----
+fleet apply --compress --targets-file=targets.yaml -n {fleet-workspace} -o - longhorn-crd-bundle > longhorn-crd-bundle.yaml
+----
+
+. Implante os arquivos `longhorn-bundle.yaml` e `longhorn-crd-bundle.yaml` no seu `management cluster`:
++
+[,bash]
+----
+kubectl apply -f longhorn-crd-bundle.yaml
+kubectl apply -f longhorn-bundle.yaml
+----
+
+Seguir estes passos garantirá que o `SUSE Storage` seja implantado em todos os clusters {cluster-type} especificados.
+
+[#{cluster-type}-day2-fleet-helm-upgrade-procedure-new-cluster-manage]
+===== Gerenciar o gráfico Helm implantado
+
+Uma vez implantado com o Fleet, para fazer upgrade de gráficos Helm, consulte <<{cluster-type}-day2-fleet-helm-upgrade-procedure-fleet-managed-chart>>.
+
+[#{cluster-type}-day2-fleet-helm-upgrade-procedure-fleet-managed-chart]
+==== Eu gostaria de fazer upgrade de um gráfico Helm gerenciado pelo Fleet
+
+. Determine a versão para a qual você precisa fazer upgrade do seu gráfico para que ele seja compatível com a versão do Edge desejada. A versão do gráfico Helm por versão do Edge pode ser visualizada nas <<release-notes, notas de lançamento>>.
+
+. No seu repositório Git monitorado pelo Fleet, edite o arquivo `fleet.yaml` do gráfico Helm com a *versão* e o *repositório* corretos das <<release-notes, notas de lançamento>>.
+
+. Após confirmar e enviar as alterações para o seu repositório, isso acionará o fazer upgrade do Helm chart desejado.
+
+[#{cluster-type}-day2-fleet-helm-upgrade-procedure-eib-deployed-chart]
+==== Eu gostaria de fazer upgrade de um Helm chart implantado via EIB.
+
+<<components-eib>> implanta Helm charts criando um recurso `HelmChart` e utilizando o `helm-controller` introduzido pelo recurso de integração Helm link:https://docs.rke2.io/helm[RKE2]/link:https://docs.k3s.io/helm[K3s].
+
+Para garantir que um Helm chart implantado via `EIB` seja feito upgrade com sucesso, os usuários precisam fazer upgrade dos respectivos recursos `HelmChart`.
+
+Abaixo você pode encontrar informações sobre:
+
+* A <<{cluster-type}-day2-fleet-helm-upgrade-procedure-eib-deployed-chart-overview,visão geral>> do processo de upgrade.
+
+* As <<{cluster-type}-day2-fleet-helm-upgrade-procedure-eib-deployed-chart-upgrade-steps,etapas de upgrade>> necessárias.
+
+* Um <<{cluster-type}-day2-fleet-helm-upgrade-procedure-eib-deployed-chart-upgrade-example,exemplo>> que demonstra o upgrade do chart link:https://longhorn.io[Longhorn] usando o método explicado.
+
+* Como usar o processo de upgrade com <<{cluster-type}-day2-fleet-helm-upgrade-procedure-eib-deployed-chart-upgrade-third-party,uma ferramenta GitOps diferente>>.
+
+[#{cluster-type}-day2-fleet-helm-upgrade-procedure-eib-deployed-chart-overview]
+===== Visão geral
+
+Os Helm charts implantados via `EIB` são feitos upgrade por meio de um `fleet` chamado link:https://github.com/suse-edge/fleet-examples/tree/{release-tag-fleet-examples}/fleets/day2/eib-charts-upgrader[eib-charts-upgrader].
+
+Este `fleet` processa dados *fornecidos pelo usuário* para *atualizar* um conjunto específico de recursos HelmChart.
+
+A atualização desses recursos aciona o link:https://github.com/k3s-io/helm-controller[helm-controller], que *faz upgrade* dos Helm charts associados aos recursos `HelmChart` modificados.
+
+Espera-se que o usuário apenas:
+
+. link:https://helm.sh/docs/helm/helm_pull/[Baixe] localmente os arquivos para cada Helm chart que precisa ser feito upgrade.
+
+. Passe esses arquivos para o link:https://github.com/suse-edge/fleet-examples/blob/{release-tag-fleet-examples}/scripts/day2/generate-chart-upgrade-data.sh[generate-chart-upgrade-data.sh] `generate-chart-upgrade-data.sh` script, que incluirá os dados desses arquivos na frota `eib-charts-upgrader`.
+
+. Implante a frota `eib-charts-upgrader` em seu `management cluster`. Isso é feito por meio de um recurso `GitRepo` ou `Bundle`.
+
+Uma vez implantado, o `eib-charts-upgrader`, com a ajuda do Fleet, enviará seus recursos para o cluster {cluster-type} desejado.
+
+Esses recursos incluem:
+
+. Um conjunto de `Secrets` contendo os dados do Helm chart *fornecidos pelo usuário*.
+
+. Um `Kubernetes Job` que implantará um `Pod` que montará o `Secrets` mencionado anteriormente e, com base neles, link:https://kubernetes.io/docs/reference/kubectl/generated/kubectl_patch/[patch] os recursos HelmChart correspondentes.
+
+Como mencionado anteriormente, isso acionará o `helm-controller` que realizará a atualização real do chart Helm.
+
+Abaixo você pode encontrar um diagrama da descrição acima:
+
+image::fleet-day2-{cluster-type}-helm-eib-upgrade.png[scaledwidth=100%]
+
+[#{cluster-type}-day2-fleet-helm-upgrade-procedure-eib-deployed-chart-upgrade-steps]
+===== Etapas de upgrade
+
+. Clone o repositório `suse-edge/fleet-examples` da tag de lançamento correta link:https://github.com/suse-edge/fleet-examples/releases/tag/{release-tag-fleet-examples}[tag].
+
+. Crie um diretório no qual você armazenará o(s) arquivo(s) do chart Helm baixado(s).
++
+[,bash]
+----
+mkdir archives
+----
+
+. Dentro do diretório recém-criado para os arquivos, link:https://helm.sh/docs/helm/helm_pull/[pull] os arquivos dos charts Helm que você deseja fazer upgrade:
++
+[,bash]
+----
+cd archives
+helm pull [chart URL | repo/chartname]
+
+# Alternatively if you want to pull a specific version:
+# helm pull [chart URL | repo/chartname] --version 0.0.0
+----
+
+. De *Assets* da link:https://github.com/suse-edge/fleet-examples/releases/tag/{release-tag-fleet-examples}[release tag] desejada, baixe o script `generate-chart-upgrade-data.sh`.
+
+. Execute o script `generate-chart-upgrade-data.sh`:
++
+[,bash]
+----
+chmod +x ./generate-chart-upgrade-data.sh
+
+./generate-chart-upgrade-data.sh --archive-dir /foo/bar/archives/ --fleet-path /foo/bar/fleet-examples/fleets/day2/eib-charts-upgrader
+----
++
+Para cada arquivo de chart no diretório `--archive-dir`, o script gera um arquivo `Kubernetes Secret YAML` contendo os dados de upgrade do chart e o armazena no diretório `base/secrets` da frota especificada por `--fleet-path`.
++
+O script `generate-chart-upgrade-data.sh` também aplica modificações adicionais à frota para garantir que os arquivos `Kubernetes Secret YAML` gerados sejam utilizados corretamente pela carga de trabalho implantada pela frota.
++
+[IMPORTANT]
+====
+Os usuários não devem fazer alterações além do que o script `generate-chart-upgrade-data.sh` gera.
+====
+
+As etapas abaixo dependem do ambiente em que você está executando:
+
+. Para um ambiente que suporta GitOps (por exemplo, não é air-gapped, ou é air-gapped, mas permite o suporte a um servidor Git local):
+
+.. Copie a `fleets/day2/eib-charts-upgrader` Fleet para o repositório que você usará para GitOps.
++
+[NOTE]
+====
+Certifique-se de que a Fleet inclua as alterações que foram feitas pelo script `generate-chart-upgrade-data.sh`.
+====
+
+.. Configure um recurso `GitRepo` que será usado para enviar todos os recursos da `eib-charts-upgrader` Fleet.
+
+... Para configuração e implantação do `GitRepo` por meio da interface do Rancher, consulte link:https://ranchermanager.docs.rancher.com/{rancher-docs-version}/integrations-in-rancher/fleet/overview#accessing-fleet-in-the-rancher-ui[Accessing Fleet in the Rancher UI].
+
+... Para configuração e implantação manual do `GitRepo`, consulte link:https://fleet.rancher.io/tut-deployment[Creating a Deployment].
+
+. Para um ambiente que não suporta GitOps (por exemplo, é isolado da rede e não permite o uso de servidor Git local):
+
+.. Baixe o binário `fleet-cli` da página de `rancher/fleet` link:https://github.com/rancher/fleet/releases/tag/v{version-fleet}[release] (`fleet-linux-amd64` para Linux). Para usuários de Mac, existe uma Homebrew Formulae que pode ser usada - link:https://formulae.brew.sh/formula/fleet-cli[fleet-cli].
+
+.. Navegue até a `eib-charts-upgrader` Fleet:
++
+[,bash]
+----
+cd /foo/bar/fleet-examples/fleets/day2/eib-charts-upgrader
+----
+
+.. Crie um arquivo `targets.yaml` que instruirá o Fleet sobre onde implantar seus recursos:
++
+[,bash]
+----
+cat > targets.yaml <<EOF
+targets:
+ifeval::["{cluster-type}" == "downstream"]
+# To match all downstream clusters
+- clusterSelector: {}
+endif::[]
+ifeval::["{cluster-type}" == "management"]
+# To map the local(management) cluster
+- clusterName: local
+endif::[]
+EOF
+----
++
+ifeval::["{cluster-type}" == "downstream"]
+Para obter informações sobre como mapear clusters de destino, consulte a link:https://fleet.rancher.io/gitrepo-targets[documentation] upstream.
+endif::[]
+ifeval::["{cluster-type}" == "management"]
+[NOTE]
+====
+Existem alguns casos de uso em que seu cluster `local` pode ter um nome diferente.
+
+Para recuperar o nome do seu cluster `local`, execute o comando abaixo:
+
+[,bash]
+----
+kubectl get clusters.fleet.cattle.io -n fleet-local
+----
+====
+endif::[]
+
+.. Use o `fleet-cli` para converter o Fleet em um recurso `Bundle`:
++
+[,bash,subs="attributes"]
+----
+fleet apply --compress --targets-file=targets.yaml -n {fleet-workspace} -o - eib-charts-upgrade > bundle.yaml
+----
++
+Isso criará um Bundle (`bundle.yaml`) que conterá todos os recursos modelados do Fleet `eib-charts-upgrader`.
++
+Para mais informações sobre o comando `fleet apply`, consulte link:https://fleet.rancher.io/cli/fleet-cli/fleet_apply[fleet apply].
++
+Para mais informações sobre a conversão de Fleets em Bundles, consulte link:https://fleet.rancher.io/bundle-add#convert-a-helm-chart-into-a-bundle[Convert a Helm Chart into a Bundle].
+
+.. Implante o `Bundle`. Isso pode ser feito de duas maneiras:
+
+... Através da interface do Rancher - Navegue até *Continuous Delivery -> Advanced -> Bundles -> Create from YAML* e cole o conteúdo do `bundle.yaml` ou clique na opção `Read from File` e envie o próprio arquivo.
+
+... Manualmente - Implante o arquivo `bundle.yaml` manualmente dentro do seu `management cluster`.
+
+A execução dessas etapas resultará em um recurso `GitRepo/Bundle` implantado com sucesso. O recurso será captado pelo Fleet e seu conteúdo será implantado nos clusters de destino que o usuário especificou nas etapas anteriores. Para uma visão geral do processo, consulte <<{cluster-type}-day2-fleet-helm-upgrade-procedure-eib-deployed-chart-overview>>.
+
+Para obter informações sobre como acompanhar o processo de fazer upgrade, você pode consultar <<{cluster-type}-day2-fleet-helm-upgrade-procedure-eib-deployed-chart-upgrade-example>>.
+
+[IMPORTANT]
+====
+Assim que o upgrade do chart for verificado com sucesso, remova o recurso `Bundle/GitRepo`. 
+
+Isso removerá os recursos de upgrade que não são mais necessários do seu cluster `{cluster-type}`, garantindo que nenhum conflito de versão futuro ocorra.
+====
+
+[#{cluster-type}-day2-fleet-helm-upgrade-procedure-eib-deployed-chart-upgrade-example]
+===== Exemplo
+
+[NOTE]
+====
+O exemplo abaixo demonstra como fazer upgrade de um Helm chart implantado via `EIB` de uma versão para outra em um cluster `{cluster-type}`. Observe que as versões usadas neste exemplo *não* são recomendações. Para recomendações de versão específicas para uma versão Edge, consulte as <<release-notes, notas de versão>>.
+====
+
+_Caso de uso:_
+
+ifeval::["{cluster-type}" == "downstream"]
+- Um cluster chamado `doc-example` está executando uma versão mais antiga do link:https://longhorn.io[Longhorn].
+endif::[]
+ifeval::["{cluster-type}" == "management"]
+- Um cluster `management` está executando uma versão mais antiga do link:https://longhorn.io[Longhorn].
+endif::[]
+
+- O cluster foi implantado por meio do EIB, usando a seguinte definição de imagem _snippet_:
++
+[,yaml]
+----
+kubernetes:
+  helm:
+    charts:
+    - name: longhorn-crd
+      repositoryName: rancher-charts
+      targetNamespace: longhorn-system
+      createNamespace: true
+      version: 104.2.0+up1.7.1
+      installationNamespace: kube-system
+    - name: longhorn
+      repositoryName: rancher-charts
+      targetNamespace: longhorn-system
+      createNamespace: true
+      version: 104.2.0+up1.7.1
+      installationNamespace: kube-system
+    repositories:
+    - name: rancher-charts
+      url: https://charts.rancher.io/
+...
+----
+
+- O `SUSE Storage` precisa ser feito upgrade para uma versão compatível com a release {version-edge} do Edge. Ou seja, ele precisa ser feito upgrade para `{version-longhorn-chart}`.
+
+ifeval::["{cluster-type}" == "downstream"]
+- Assume-se que o `management cluster` responsável pelo gerenciamento do `doc-example` está *air-gapped*, sem suporte para um servidor Git local e possui uma configuração do Rancher funcional.
+endif::[]
+ifeval::["{cluster-type}" == "management"]
+- Assume-se que o `management cluster` está *air-gapped*, sem suporte para um servidor Git local e possui uma configuração do Rancher funcional.
+endif::[]
+
+Siga as <<{cluster-type}-day2-fleet-helm-upgrade-procedure-eib-deployed-chart-upgrade-steps, etapas para fazer upgrade>>:
+
+. Clone o repositório `suse-edge/fleet-example` a partir da tag `{release-tag-fleet-examples}`.
++
+[,bash,subs="attributes"]
+----
+git clone -b {release-tag-fleet-examples} https://github.com/suse-edge/fleet-examples.git
+----
+
+. Crie um diretório onde o arquivo de fazer upgrade do `Longhorn` será armazenado.
++
+[,bash]
+----
+mkdir archives
+----
+
+. Faça o pull da versão desejada do arquivo do chart `Longhorn`:
++
+[,bash,subs="attributes"]
+----
+# First add the Rancher Helm chart repository
+helm repo add rancher-charts https://charts.rancher.io/
+
+# Pull the Longhorn {version-longhorn} chart archive
+helm pull oci://dp.apps.rancher.io/charts/suse-storage --version {version-longhorn-chart}
+----
+
+. Fora do diretório `archives`, baixe o script `generate-chart-upgrade-data.sh` do release `suse-edge/fleet-examples` link:https://github.com/suse-edge/fleet-examples/releases/tag/{release-tag-fleet-examples}[tag].
+
+. A configuração do diretório deve ser semelhante a:
++
+[,bash,subs="attributes"]
+----
+.
+├── archives
+│   └── longhorn-{version-longhorn-chart}.tgz
+├── fleet-examples
+...
+│   ├── fleets
+│   │   ├── day2
+|   |   |   ├── ...
+│   │   │   ├── eib-charts-upgrader
+│   │   │   │   ├── base
+│   │   │   │   │   ├── job.yaml
+│   │   │   │   │   ├── kustomization.yaml
+│   │   │   │   │   ├── patches
+│   │   │   │   │   │   └── job-patch.yaml
+│   │   │   │   │   ├── rbac
+│   │   │   │   │   │   ├── cluster-role-binding.yaml
+│   │   │   │   │   │   ├── cluster-role.yaml
+│   │   │   │   │   │   ├── kustomization.yaml
+│   │   │   │   │   │   └── sa.yaml
+│   │   │   │   │   └── secrets
+│   │   │   │   │       ├── eib-charts-upgrader-script.yaml
+│   │   │   │   │       └── kustomization.yaml
+│   │   │   │   ├── fleet.yaml
+│   │   │   │   └── kustomization.yaml
+│   │   │   └── ...
+│   └── ...
+└── generate-chart-upgrade-data.sh
+----
+
+. Execute o script `generate-chart-upgrade-data.sh`:
++
+[,bash,subs="attributes"]
+----
+# First make the script executable
+chmod +x ./generate-chart-upgrade-data.sh
+
+# Then execute the script
+./generate-chart-upgrade-data.sh --archive-dir ./archives --fleet-path ./fleet-examples/fleets/day2/eib-charts-upgrader
+----
++
+A estrutura do diretório após a execução do script deve ser semelhante a:
++
+[,bash,subs="attributes"]
+----
+.
+├── archives
+│   └── longhorn-{version-longhorn-chart}.tgz
+├── fleet-examples
+...
+│   ├── fleets
+│   │   ├── day2
+│   │   │   ├── ...
+│   │   │   ├── eib-charts-upgrader
+│   │   │   │   ├── base
+│   │   │   │   │   ├── job.yaml
+│   │   │   │   │   ├── kustomization.yaml
+│   │   │   │   │   ├── patches
+│   │   │   │   │   │   └── job-patch.yaml
+│   │   │   │   │   ├── rbac
+│   │   │   │   │   │   ├── cluster-role-binding.yaml
+│   │   │   │   │   │   ├── cluster-role.yaml
+│   │   │   │   │   │   ├── kustomization.yaml
+│   │   │   │   │   │   └── sa.yaml
+│   │   │   │   │   └── secrets
+│   │   │   │   │       ├── eib-charts-upgrader-script.yaml
+│   │   │   │   │       ├── kustomization.yaml
+│   │   │   │   │       ├── longhorn-VERSION.yaml - secret created by the generate-chart-upgrade-data.sh script
+│   │   │   │   │       └── longhorn-crd-VERSION.yaml - secret created by the generate-chart-upgrade-data.sh script
+│   │   │   │   ├── fleet.yaml
+│   │   │   │   └── kustomization.yaml
+│   │   │   └── ...
+│   └── ...
+└── generate-chart-upgrade-data.sh
+----
++
+Os arquivos alterados no git devem ser semelhantes a isto:
++
+[,bash]
+----
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+    modified:   fleets/day2/eib-charts-upgrader/base/patches/job-patch.yaml
+    modified:   fleets/day2/eib-charts-upgrader/base/secrets/kustomization.yaml
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+    fleets/day2/eib-charts-upgrader/base/secrets/longhorn-VERSION.yaml
+    fleets/day2/eib-charts-upgrader/base/secrets/longhorn-crd-VERSION.yaml
+----
+
+. Crie um `Bundle` para o Fleet `eib-charts-upgrader`:
+
+.. Primeiro, navegue até o próprio Fleet:
++
+[,bash]
+----
+cd ./fleet-examples/fleets/day2/eib-charts-upgrader
+----
+
+.. Em seguida, crie um arquivo `targets.yaml`:
++
+[,bash]
+----
+cat > targets.yaml <<EOF
+targets:
+ifeval::["{cluster-type}" == "downstream"]
+- clusterName: doc-example
+endif::[]
+ifeval::["{cluster-type}" == "management"]
+- clusterName: local
+endif::[]
+EOF
+----
+
+.. Em seguida, use o binário `fleet-cli` para converter o Fleet em um Bundle:
++
+[,bash,subs="attributes"]
+----
+fleet apply --compress --targets-file=targets.yaml -n {fleet-workspace} -o - eib-charts-upgrade > bundle.yaml
+----
+
+ifeval::["{cluster-type}" == "downstream"]
+.. Agora, transfira o `bundle.yaml` para sua máquina `management cluster`.
+endif::[]
+
+. Implante o Bundle através da interface do Rancher:
++
+.Implantar Bundle através da interface do Rancher
+image::day2_helm_chart_upgrade_example_1.png[scaledwidth=100%]
++
+A partir daqui, selecione *Ler de Arquivo* e encontre o arquivo `bundle.yaml` no seu sistema.
++
+Isso preencherá automaticamente o `Bundle` dentro da interface do Rancher.
++
+Selecione *Criar*.
+
+. Após uma implantação bem-sucedida, seu Bundle deverá ser semelhante a:
++
+.Bundle implantado com sucesso
+image::day2_helm_chart_upgrade_example_2.png[scaledwidth=100%]
+
+Após a implantação bem-sucedida do `Bundle`, para monitorar o processo de fazer upgrade:
+
+. Verifique os logs do `Upgrade Pod`:
++
+image::day2_helm_chart_upgrade_example_3_{cluster-type}.png[scaledwidth=100%]
+
+. Agora, verifique os logs do Pod criado para fazer upgrade pelo helm-controller:
+
+.. O nome do Pod seguirá o seguinte modelo - `helm-install-longhorn-<random-suffix>`
+
+.. O Pod estará no namespace onde o recurso `HelmChart` foi implantado. No nosso caso, este é `kube-system`.
++
+.Logs para o gráfico Longhorn que foi submetido a fazer upgrade com sucesso
++
+image::day2_helm_chart_upgrade_example_4_{cluster-type}.png[scaledwidth=100%]
+
+. Verifique se a versão do `HelmChart` foi atualizada navegando até a seção `HelmCharts` do Rancher (`More Resources -> HelmCharts`). Selecione o namespace onde o chart foi implantado; para este exemplo, seria `kube-system`.
+
+. Por fim, verifique se os Pods do Longhorn estão em execução.
+
+Após realizar as validações acima, é seguro presumir que o Helm chart do Longhorn foi submetido a fazer upgrade para a versão `{version-longhorn-chart}`.
+
+[#{cluster-type}-day2-fleet-helm-upgrade-procedure-eib-deployed-chart-upgrade-third-party]
+===== Fazer upgrade do Helm chart usando uma ferramenta GitOps de terceiros
+
+Pode haver casos de uso em que os usuários desejem usar este procedimento de fazer upgrade com um fluxo de trabalho GitOps diferente do Fleet (por exemplo, `Flux`).
+
+Para produzir os recursos necessários para o procedimento de fazer upgrade, você pode usar o script `generate-chart-upgrade-data.sh` para preencher o Fleet `eib-charts-upgrader` com os dados fornecidos pelo usuário. Para obter mais informações sobre como fazer isso, consulte <<{cluster-type}-day2-fleet-helm-upgrade-procedure-eib-deployed-chart-upgrade-steps>>.
+
+Depois de ter a configuração completa, você pode usar link:https://kustomize.io[kustomize] para gerar uma solução funcional completa que você pode implantar em seu cluster:
+
+[,bash]
+----
+cd /foo/bar/fleets/day2/eib-charts-upgrader
+
+kustomize build .
+----
+
+Se você quiser incluir a solução em seu fluxo de trabalho GitOps, você pode remover o arquivo `fleet.yaml` e usar o que restou como uma configuração `Kustomize` válida. Apenas não se esqueça de executar primeiro o script `generate-chart-upgrade-data.sh`, para que ele possa preencher a configuração `Kustomize` com os dados dos Helm charts que você deseja fazer upgrade.
+
+Para entender como este fluxo de trabalho deve ser usado, pode ser útil consultar <<{cluster-type}-day2-fleet-helm-upgrade-procedure-eib-deployed-chart-overview>> e <<{cluster-type}-day2-fleet-helm-upgrade-procedure-eib-deployed-chart-upgrade-steps>>.

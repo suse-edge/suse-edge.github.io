@@ -1,0 +1,132 @@
+[#troubleshooting-directed-network-provisioning]
+== ダイレクトネットワークプロビジョニングのトラブルシューティング
+:revdate: 2025-06-17
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+ダイレクトネットワークプロビジョニングのシナリオでは、Metal^3^およびCAPI要素を使用してダウンストリームクラスターをプロビジョニングします。また、OSイメージを作成するためのEIBも含まれています。ホストの初回起動時、またはインスペクションやプロビジョニングのプロセス中に問題が発生することがあります。
+
+.よくある問題
+
+* *古いファームウェア*:使用している物理ホストのすべてのファームウェアが最新であることを確認してください。これにはBMCファームウェアも含まれます。場合によっては、Metal^3^ https://book.metal3.io/bmo/supported_hardware#redfish-and-its-variants[が特定のものまたは更新されたもののファームウェアを必要とすることがあります。]
+* *SSLエラーでプロビジョニングに失敗した*:イメージを提供するWebサーバーがhttpsを使用している場合、IPAイメージ上で証明書を注入して信頼するようにMetal^3^を構成する必要があります。Metal^3^チャートに`ca-additional.crt`ファイルを含める方法については、<<mgmt-cluster-kubernetes-folder,Kubernetesフォルダー>>を参照してください。
+* *IPAでホストを起動する際の証明書の問題*:一部のサーバーベンダーは、仮想メディアISOイメージをBMCに接続する際にSSL接続を検証します。Metal3デプロイメント用に生成された証明書は自己署名されているため、これが問題を引き起こす可能性があります。ホストが起動しても、UEFIシェルにドロップされることがあります。これを修正する方法については、<<disabling-tls-for-virtualmedia-iso-attachment,仮想メディアISO接続のTLS無効化>>を参照してください。
+* *名前またはラベルの参照が誤っている*:クラスターが誤った名前またはラベルでノードを参照している場合、クラスターはデプロイ済みとなりますが、BMHは「Available（利用可能）」のままになります。BMHに関連するオブジェクトの参照を再確認してください。
+* *BMC通信の問題*:管理クラスター上で実行されているMetal^3^ポッドが、プロビジョニング対象のホストのBMCに到達できることを確認してください（通常、BMCネットワークは非常に制限されています）。
+* *ベアメタルホストの状態が正しくない*:BMHオブジェクトは、そのライフサイクル中にさまざまな状態（検査中、準備中、プロビジョニング済みなど）に移行します https://book.metal3.io/bmo/state_machine[ステートマシンのライフタイム]。誤った状態が検出された場合は、BMHオブジェクトの `status` フィールドを確認してください。これには `kubectl get bmh <name> -o jsonpath=’{.status}’| jq` として詳細な情報が含まれています。
+* *ホストがデプロビジョニングされない*:ホストのデプロビジョニングが意図した通りに失敗した場合は、BMHオブジェクトに「detached」アノテーションを追加した後に、次のように削除を試みることができます： `kubectl annotate bmh/<BMH> baremetalhost.metal3.io/detached=””`。
+* *イメージエラー*:EIBを使用してダウンストリームクラスター用にビルドされたイメージが利用可能であり、適切なチェックサムを持ち、解凍するには大きすぎず、ディスクに対して大きすぎないことを確認してください。
+* *ディスクサイズの不一致*:デフォルトでは、ディスクは全容量に拡張されません。<<growfs-script,Growfsスクリプト>>セクションで説明されているように、ダウンストリームクラスターのホスト用にEIBでビルドされるイメージには、Growfsスクリプトを含める必要があります。
+* *クリーンアッププロセスがスタックする*:クリーンアッププロセスは数回再試行されます。ホストのクリーンアップに関する問題により実行できなくなった場合は、BMHオブジェクトの `automatedCleanMode` フィールドを `disabled` に設定して、まずクリーンアップを無効にしてください。
++
+[WARNING]
+====
+クリーンアッププロセスに時間がかかりすぎている場合や失敗している場合に、手動でファイナライザーを削除することは推奨されません。そうすると、Kubernetesからホストレコードは削除されますが、Ironicには残ってしまいます。現在実行中のアクションはバックグラウンドで継続され、競合が発生してホストを再度追加しようとしても失敗する可能性があります。
+====
+* *Metal3/Rancher Turtles/CAPIポッドの問題*:必要なすべてのコンポーネントのデプロイフローは以下の通りです。
++
+** Rancher TurtlesコントローラーがCAPIオペレーターコントローラーをデプロイします。
+** 次に、CAPIオペレーターコントローラーがプロバイダーコントローラー（CAPIコア、CAPM3、およびRKE2コントロールプレーン/ブートストラップ）をデプロイします。
+
+すべてのポッドが正常に実行されていることを確認し、そうでない場合はログを確認してください。
+
+
+.ログ
+* *Metal^3^ ログ*:さまざまなポッドのログをチェックします。
++
+[,shell]
+----
+kubectl logs -n metal3-system -l app.kubernetes.io/component=baremetal-operator
+kubectl logs -n metal3-system -l app.kubernetes.io/component=ironic
+----
++
+[NOTE]
+====
+metal3-ironicポッドには、同じポッド上に少なくとも4つの異なるコンテナ（`ironic-httpd`、` ironic-log-watch`、`ironic`、`ironic-ipa-downloader`（init））が含まれています。各コンテナのログを検証するには、`kubectl logs`を使用する際に`-c`フラグを使用します。
+====
++
+[NOTE]
+====
+`ironic-log-watch`コンテナは、ネットワーク接続によってこれらのログを管理クラスターに送信できる場合に限り、検査/プロビジョニング後のホストからのコンソールログを公開します。これは、プロビジョニングエラーが発生しているものの、BMCコンソールログに直接アクセスできない場合に役立ちます。
+====
+
+* *Rancher Turtlesログ*:さまざまなポッドのログをチェックします。
++
+[,shell]
+----
+kubectl logs -n cattle-turtles-system -l control-plane=controller-manager
+kubectl logs -n cattle-turtles-system -l app.kubernetes.io/name=cluster-api-operator
+kubectl logs -n rke2-bootstrap-system -l cluster.x-k8s.io/provider=bootstrap-rke2
+kubectl logs -n rke2-control-plane-system -l cluster.x-k8s.io/provider=control-plane-rke2
+kubectl logs -n cattle-capi-system -l cluster.x-k8s.io/provider=cluster-api
+kubectl logs -n capm3-system -l cluster.x-k8s.io/provider=infrastructure-metal3
+----
+
+* *BMCログ*:通常、BMCにはほとんどの操作を実行できるUIがあります。通常、「ログ」セクションがあり、潜在的な問題（イメージに到達できない、ハードウェアエラーなど）を確認できます。
+
+* *コンソールログ*:BMCコンソール（BMC Web UI、シリアルなど経由）に接続し、書き込まれているログにエラーがないかチェックします。
+
+.問題の対策の手順
+
+. *`BareMetalHost`ステータスのチェック*:
+
+* `kubectl get bmh -A`は現在の状態を示します。`provisioning`、`ready`、`error`、`registering`を探します。
+* `kubectl describe bmh -n <namespace> <bmh_name>`は、BMHがスタックしている理由を説明する詳細なイベントと条件を提供します。
+
+. *RedFish接続のテスト*:
+
+* `curl`Metal^3^コントロールプレーンからを使用して、Redfish経由でBMCへの接続をテストします。
+* `BareMetalHost-Secret`定義で正しいBMC認証情報が提供されていることを確認します。
+
+. *turtles/CAPI/metal3ポッドステータスの確認*:管理クラスター上のコンテナが稼働していることを確認します: `kubectl get pods -n metal3-system` および `kubectl get pods -n cattle-turtles-system` (`cattle-capi-system`、`capm3-system`、`rke2-bootstrap-system`、および `rke2-control-plane-system` も参照してください)。
+
+. *プロビジョニング対象のホストからIronicエンドポイントに到達可能であることを確認します*:プロビジョニング対象のホストは、Metal^3^ に報告するためにIronicエンドポイントに到達できる必要があります。`kubectl get svc -n metal3-system metal3-metal3-ironic` でIPを確認し、`curl/nc` を介して到達できるか試してください。
+
+. *BMCからIPAイメージに到達可能であることを確認します*:IPAはIronicエンドポイントによって提供されており、仮想CDとして使用されるため、BMCから到達可能である必要があります。
+
+. *プロビジョニング対象のホストからOSイメージに到達可能であることを確認します*:ホストのプロビジョニングに使用されるイメージは、(IPA実行時に) ホスト自体から到達可能である必要があります。これは、一時的にダウンロードされてディスクに書き込まれるためです。
+
+. *Metal^3^ コンポーネントのログを確認します*:詳細については上記の説明を参照してください。
+
+. *BMHインスペクションの再トリガー*: インスペクションが失敗した場合や、利用可能なホストのハードウェアが変更された場合は、BMHオブジェクトに `inspect.metal3.io: ""` をアノテーションすることで、新しいインスペクションプロセスをトリガーできます。詳細については、 https://book.metal3.io/bmo/inspect_annotation[Metal^3^ インスペクションの制御] ガイドを参照してください。
+
+. *ベアメタルIPAコンソール*:IPAの問題をトラブルシュートするには、いくつかの代替策があります:
+
+* 「autologin」を有効にします。これにより、IPAコンソールに接続する際にルートユーザが自動的にログインできるようになります。
++
+[WARNING]
+====
+これはホストへのフルアクセスを許可するため、デバッグ目的のみに限定されます。
+====
++
+autologinを有効にするには、Metal3 helm `global.ironicKernelParams` 値を次のように設定する必要があります: `console=ttyS0 suse.autologin=ttyS0` (`ttyS0` はコンソールに応じて変更可能です)。その後、Metal^3^ チャートの再デプロイを実行する必要があります。(注: `ttyS0` は例であり、実際の端末と一致させる必要があります。例えば、ベアメタルでは多くの場合 `tty1` になる可能性があります。これは、起動時にIPAラムディスクからのコンソール出力を確認することで検証できます。そこでは `/etc/issue` がコンソール名を出力します)。
++
+別の方法として、`metal3-system` ネームスペースの `ironic` configmap で `IRONIC_KERNEL_PARAMS` パラメーターを変更する方法があります。これは `kubectl` 編集で行えるため簡単ですが、チャートを更新すると上書きされます。次に、Metal^3^ ポッドを `kubectl delete pod -n metal3-system -l app.kubernetes.io/component=ironic` で再起動する必要があります。
+
+* IPA のルートユーザに対してSSHキーを挿入します。
++ 
+[WARNING]
+====
+これはホストへのフルアクセスを許可するため、デバッグ目的のみに限定されます。
+====
++
+ルートユーザのSSHキーを挿入するには、Metal^3^ helm の `debug.ironicRamdiskSshKey` 値を使用する必要があります。次に、Metal^3^ チャートの再デプロイを実行する必要があります。
++
+別の方法として、`metal3-system` ネームスペースの `ironic configmap` で `IRONIC_RAMDISK_SSH_KEY` パラメーターを変更する方法があります。これは `kubectl` 編集で行えるため簡単ですが、チャートを更新すると上書きされます。次に、Metal^3^ ポッドを `kubectl delete pod -n metal3-system -l app.kubernetes.io/component=ironic` で再起動する必要があります。
+
+
+[NOTE]
+====
+https://cluster-api.sigs.k8s.io/user/troubleshooting[CAPI トラブルシューティング] ガイドと https://book.metal3.io/troubleshooting[Metal^3^ トラブルシューティング] ガイドを確認してください。
+====
+

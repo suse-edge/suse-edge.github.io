@@ -1,0 +1,339 @@
+[#guides-metallb-kubernetes]
+= MetalLB na frente do servidor de API do Kubernetes
+:revdate: 2025-05-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Este guia demonstra o uso de um serviço MetalLB para expor a API do RKE2/K3s externamente em um cluster de alta disponibilidade (HA) com três nós de plano de controle.
+Para conseguir isso, um Service do Kubernetes do tipo `LoadBalancer` será criado manualmente. Em seguida, um objeto `EndpointSlices` será criado automaticamente, o que mantém os IPs de todos os nós do plano de controle disponíveis no cluster.
+Para que os EndpointSlices sejam sincronizados continuamente com os eventos que ocorrem no cluster (adição/remoção de um nó ou um nó ficar offline), o <<components-eco,Endpoint Copier Operator>> será implantado. O operador monitora os eventos que ocorrem nos EndpointSlices `kubernetes` padrão e atualiza o gerenciado automaticamente para mantê-los sincronizados.
+Como o Service gerenciado é do tipo `LoadBalancer`, o MetalLB atribui a ele um `ExternalIP` estático. Este `ExternalIP` será usado para se comunicar com o servidor de API.
+
+== Pré-requisitos
+
+* Três hosts nos quais implantar o RKE2/K3s. 
+ ** Certifique-se de que os hosts tenham nomes de host diferentes.
+ ** Para testes, podem ser máquinas virtuais
+* Pelo menos 2 IPs disponíveis na rede (um para o serviço exposto do controlador de entrada Traefik e um para o serviço gerenciado).
+* Helm
+
+== Instalando o RKE2/K3s
+
+[NOTE]
+====
+Se você não quiser usar um cluster novo, mas quiser usar um existente, pule esta etapa e prossiga para a próxima.
+====
+
+Primeiro, um IP livre na rede deve ser reservado, o qual será usado posteriormente para `ExternalIP` do Service gerenciado.
+
+Conecte-se via SSH ao primeiro host e instale a distribuição desejada no modo de cluster.
+
+Para RKE2:
+[,bash]
+----
+# As a root user, create the /etc/rancher/rke2/config.yaml config file with the following content:
+
+mkdir -p /etc/rancher/rke2/
+cat <<EOF > /etc/rancher/rke2/config.yaml
+# An example of the config.yaml file for a server node: 
+write-kubeconfig-mode: "0644"
+ingress-controller: traefik
+tls-san:
+  - "${VIP_SERVICE_IP}"
+  - "https://${VIP_SERVICE_IP}.sslip.io"
+EOF
+
+# Install RKE2
+curl -sfL https://get.rke2.io | INSTALL_RKE2_EXEC="server" sh -
+
+# Enable and start the RKE2 service with the configuration specified in the config.yaml file
+systemctl enable rke2-server.service
+systemctl start rke2-server.service
+
+# Fetch the cluster token to be used later:
+RKE2_TOKEN=$(tr -d '\n' < /var/lib/rancher/rke2/server/node-token)
+----
+
+
+Para K3s:
+[,bash]
+----
+# Export the free IP mentioned above
+export VIP_SERVICE_IP=<ip>
+export INSTALL_K3S_SKIP_START=false
+
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --cluster-init \
+ --disable=servicelb --write-kubeconfig-mode=644 --tls-san=${VIP_SERVICE_IP} \
+ --tls-san=https://${VIP_SERVICE_IP}.sslip.io" K3S_TOKEN=foobar sh -
+----
+
+[NOTE]
+====
+Certifique-se de que a flag `--disable=servicelb` seja fornecida no comando `k3s server`.
+====
+
+[IMPORTANT]
+====
+A partir de agora, os comandos devem ser executados na máquina local.
+====
+
+Para acessar o servidor da API de fora, o IP da VM do RKE2/K3s será usado.
+
+[,bash]
+----
+# Replace <node-ip> with the actual IP of the machine
+export NODE_IP=<node-ip>
+export KUBE_DISTRIBUTION=<k3s/rke2>
+
+scp ${NODE_IP}:/etc/rancher/${KUBE_DISTRIBUTION}/${KUBE_DISTRIBUTION}.yaml ~/.kube/config && sed \
+ -i '' "s/127.0.0.1/${NODE_IP}/g" ~/.kube/config && chmod 600 ~/.kube/config
+----
+
+== Configurando um cluster existente
+
+[NOTE]
+====
+Esta etapa é válida apenas se você pretende usar um cluster RKE2/K3s existente.
+====
+
+Para usar um cluster existente, as flags `tls-san` devem ser modificadas. Adicionalmente, o LB `servicelb` deve ser desativado para o K3s.
+
+Para alterar as flags dos servidores RKE2 ou K3s, você precisa modificar o arquivo `/etc/systemd/system/rke2.service` ou `/etc/systemd/system/k3s.service` em todas as VMs no cluster, dependendo da distribuição.
+
+As flags devem ser inseridas no `ExecStart`. Por exemplo:
+
+Para RKE2:
+[,shell]
+----
+# Replace the <vip-service-ip> with the actual ip
+ExecStart=/usr/local/bin/rke2 \
+    server \
+        '--write-kubeconfig-mode=644' \
+        '--tls-san=<vip-service-ip>' \
+        '--tls-san=https://<vip-service-ip>.sslip.io' \
+----
+
+Para K3s:
+[,shell]
+----
+# Replace the <vip-service-ip> with the actual ip
+ExecStart=/usr/local/bin/k3s \
+    server \
+        '--cluster-init' \
+        '--write-kubeconfig-mode=644' \
+        '--disable=servicelb' \
+        '--tls-san=<vip-service-ip>' \
+        '--tls-san=https://<vip-service-ip>.sslip.io' \
+----
+
+Em seguida, os seguintes comandos devem ser executados para carregar as novas configurações:
+
+[,bash]
+----
+systemctl daemon-reload
+systemctl restart ${KUBE_DISTRIBUTION}
+----
+
+== Instalando o MetalLB
+
+Para implantar o `MetalLB`, o guia <<guides-metallb-k3s,MetalLB no K3s>> pode ser usado.
+
+*NOTA:* Certifique-se de que o endereço IP `VIP_SERVICE_IP` não se sobreponha ao `IPAddressPools` existente no cluster.
+
+Crie um `IpAddressPool` e um `L2Advertisement` separados que serão usados apenas para o Service gerenciado.
+
+*NOTA:* O IPAddressPool abaixo será atribuído a um serviço do tipo `LoadBalancer` no namespace `default`. Se existirem múltiplos serviços `LoadBalancer` lá, https://metallb.universe.tf/configuration/_advanced_ipaddresspool_configuration/#reduce-scope-of-address-allocation-to-specific-namespace-and-service[ServiceSelectors] adicionais podem ser configurados para corresponder a este serviço VIP explicitamente.
+
+[,yaml]
+----
+# Export the VIP_SERVICE_IP on the local machine
+# Replace with the actual IP
+export VIP_SERVICE_IP=<ip>
+
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: kubernetes-vip-ip-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - ${VIP_SERVICE_IP}/32
+  serviceAllocation:
+    priority: 100
+    namespaces:
+      - default
+EOF
+----
+
+[,yaml]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: kubernetes-vip-l2-adv
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - kubernetes-vip-ip-pool
+EOF
+----
+
+== Instalando o Operador Endpoint Copier
+
+[,bash,subs="attributes"]
+----
+helm install \
+endpoint-copier-operator oci://registry.suse.com/edge/charts/endpoint-copier-operator \
+--namespace endpoint-copier-operator \
+--create-namespace
+----
+
+O comando acima implantará o Deployment do operador `endpoint-copier-operator` com duas réplicas. Uma será a líder e a outra assumirá a função de líder, se necessário.
+
+Agora, o Service `kubernetes-vip` deve ser implantado, o qual será reconciliado pelo operador e um EndpointSlices com as portas e o IP configurados será criado.
+
+Para RKE2:
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubernetes-vip
+  namespace: default
+spec:
+  ports:
+  - name: rke2-api
+    port: 9345
+    protocol: TCP
+    targetPort: 9345
+  - name: k8s-api
+    port: 6443
+    protocol: TCP
+    targetPort: 6443
+  type: LoadBalancer
+EOF
+----
+
+Para K3s:
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubernetes-vip
+  namespace: default
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: https
+    port: 6443
+    protocol: TCP
+    targetPort: 6443
+  sessionAffinity: None
+  type: LoadBalancer
+EOF
+----
+
+
+Verifique se o Service `kubernetes-vip` possui o endereço IP correto:
+
+[,bash]
+----
+kubectl get service kubernetes-vip -n default \
+ -o=jsonpath='{.status.loadBalancer.ingress[0].ip}'
+----
+
+Certifique-se de que os recursos EndpointSlices `kubernetes-vip-*` e `kubernetes` no namespace `default` apontem para os mesmos IPs.
+
+[,bash]
+----
+kubectl get endpointslices | grep kubernetes
+----
+
+Se tudo estiver correto, a última coisa que resta é usar o `VIP_SERVICE_IP` em nosso `Kubeconfig`.
+
+[,bash]
+----
+sed -i '' "s/${NODE_IP}/${VIP_SERVICE_IP}/g" ~/.kube/config
+----
+
+A partir de agora, todos os `kubectl` passarão pelo Service `kubernetes-vip`.
+
+== Adicionando nós do plano de controle
+
+Para monitorar todo o processo, mais duas abas de terminal podem ser abertas.
+
+Primeiro terminal:
+
+[,bash]
+----
+watch kubectl get nodes
+----
+
+Segundo terminal:
+
+[,bash]
+----
+watch kubectl get endpointslices
+----
+
+Agora execute os comandos abaixo no segundo e terceiro nós.
+
+Para RKE2:
+[,bash]
+----
+# As a root user, create the /etc/rancher/rke2/config.yaml config file with the following content:
+
+mkdir -p /etc/rancher/rke2/
+cat <<EOF > /etc/rancher/rke2/config.yaml
+# An example of the config.yaml file for an additional server node: 
+server: https://${VIP_SERVICE_IP}:9345
+write-kubeconfig-mode: "0644"
+ingress-controller: traefik
+tls-san:
+  - "${VIP_SERVICE_IP}"
+  - "https://${VIP_SERVICE_IP}.sslip.io"
+# The one from above
+token: ${RKE2_TOKEN}
+EOF
+
+# Install RKE2
+curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE="server" sh -
+
+# Enable the RKE2 service with the configuration specified in the config.yaml file
+
+systemctl enable --now rke2-server.service
+
+# Fetch the cluster token to be used later:
+RKE2_TOKEN=$(tr -d '\n' < /var/lib/rancher/rke2/server/node-token)
+----
+
+Para K3s:
+[,bash]
+----
+# Export the VIP_SERVICE_IP in the VM
+# Replace with the actual IP
+export VIP_SERVICE_IP=<ip>
+export INSTALL_K3S_SKIP_START=false
+
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server \
+ --server https://${VIP_SERVICE_IP}:6443 --disable=servicelb \
+ --write-kubeconfig-mode=644" K3S_TOKEN=foobar sh -
+----

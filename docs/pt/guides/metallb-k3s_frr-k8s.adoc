@@ -1,0 +1,142 @@
+[#guides-metallb-k3s-frr-k8s]
+= MetalLB no K3s (usando o modo FRR-K8s)
+:revdate: 2026-05-04
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+O MetalLB é uma implementação de balanceador de carga para clusters Kubernetes bare metal, usando protocolos de roteamento padrão.
+
+Neste guia, demonstramos como implantar o MetalLB no modo BGP FRR-K8s de camada 3.
+
+== MetalLB no K3s (usando FRR-K8s)
+[NOTE]
+====
+O FRR-K8s é atualmente um recurso de Visualização de Tecnologia. A documentação da comunidade do FRR-K8s está https://github.com/metallb/frr-k8s/[aqui].
+====
+
+Neste início rápido, o modo FRR-K8s é usado.
+
+== Pré-requisitos
+
+* Todos os pré-requisitos para o FRR-K8s são os mesmos que para o <<guides-metallb-k3s-l3>>, exceto pela necessidade de um endereço IP livre.
++
+[NOTE]
+====
+O exemplo aqui não inclui a configuração de um serviço, portanto, não há necessidade de um endereço IP. 
+====
+
+* Um cluster K3s onde o MetalLB será implantado.
+* Roteador(es) na rede que suportam o protocolo BGP.
+
+
+== Configuração para Aceitar Rota de Entrada
+Por padrão, o BGP do MetalLB anuncia um endereço IP de Serviço para todos os pares BGP que estão configurados. Esses pares, que geralmente são roteadores, receberão uma rota para cada endereço IP de Serviço com uma máscara de rede de 32 bits. Ao usar o FRR-K8s com o CR FRRConfiguration, também é possível receber rotas de roteadores externos. Essas rotas externas aparecerão na tabela de roteamento de cada nó. Existem vários benefícios nisso, mas o principal é que elimina a necessidade de atualizar manualmente as tabelas de roteamento do Linux nos nós quando a rede externa muda, especificamente em casos onde é desejável evitar o envio de tráfego através do gateway padrão.
+
+== Implantação
+
+Usaremos o gráfico Helm do MetalLB publicado como parte da solução SUSE Edge. Observe que o FRR-K8s é um subchart do MetalLB e, para habilitá-lo, defina `frrk8s.enabled` como `true`. O FRR-K8s também requer alguns privilégios elevados no namespace. 
+
+[,bash,subs="attributes"]
+----
+kubectl create namespace metallb-system
+kubectl label namespace metallb-system pod-security.kubernetes.io/enforce=privileged
+kubectl label namespace metallb-system pod-security.kubernetes.io/audit=privileged
+kubectl label namespace metallb-system pod-security.kubernetes.io/warn=privileged
+helm install metallb \
+  oci://registry.suse.com/edge/charts/metallb \
+  --namespace metallb-system \
+  --set frrk8s.enabled=true --set frrk8s.external=false
+
+
+while ! kubectl wait --for condition=ready -n metallb-system $(kubectl get\
+ pods -n metallb-system -l app.kubernetes.io/component=controller -o name)\
+ --timeout=10s; do
+ sleep 2
+done
+----
+
+Verifique se você tem 4 pods no namespace `metallb-system` e se todos estão sendo executados sem problemas: 
+
+[,bash,subs="attributes"]
+----
+k get pods -n metallb-system
+NAME                                                      READY   STATUS    RESTARTS     AGE
+metallb-controller-7fbfd8977d-m2q9t                       1/1     Running   0            46s
+metallb-metallb-frr-k8s-9w7wl                             6/6     Running   0            46s
+metallb-metallb-frr-k8s-webhook-server-5d9d67ffd6-8jqnc   1/1     Running   1 (6s ago)   46s
+metallb-speaker-qx8bl                                     1/1     Running   0            46s
+----
+Neste ponto, a instalação do MetalLB e do FRR-K8s está concluída.
+
+== Configuração
+
+. Crie um `FRRConfiguration` para o FRR-K8s:
++
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: frrk8s.metallb.io/v1beta1
+kind: FRRConfiguration
+metadata:
+  name: frrdemo
+  namespace: metallb-system
+spec:
+  bgp:
+    routers:
+    - asn: 64513
+      neighbors:
+        - address: 192.168.20.154
+          asn: 64512
+          port: 179
+          toAdvertise:
+            allowed:
+              mode: all
+          toReceive:
+            allowed:
+              mode: all
+EOF
+----
++
+O roteador BGP externo tem ASN 64512, enquanto nosso `BGPPeer` terá 64513. Também podemos ver que o roteador BGP externo tem um endereço IP que é 192.168.20.154.
+
+. Verifique se o FRRConfiguration foi implantado: 
++
+[,bash]
+----
+k get FRRConfiguration -A
+NAMESPACE        NAME      AGE
+metallb-system   frrdemo   4s
+----
++
+
+[NOTE]
+====
+As configurações de `toReceive` acima farão com que seu cluster aceite todas as rotas recebidas. Isso pode não ser aconselhável em um ambiente de produção, pois, dependendo dos seus roteadores externos, pode fazer com que as tabelas de roteamento dos seus nós fiquem cheias. Consulte a documentação em https://github.com/metallb/frr-k8s/[como filtrar para receber mais informações.]
+====
+
+Com o FRR-K8s, essas são todas as configurações necessárias. Qualquer rota que seu roteador BGP externo estiver recebendo será compartilhada com seu cluster e todos os nós terão suas tabelas de roteamento atualizadas. 
+
+A configuração pode ser testada com o que está descrito em <<guides-metallb-k3s-l3>>. Para combinar essas configurações, existem alguns requisitos: 
+
+* A configuração do FRR-K8s é feita em um cluster separado. Isso é necessário para evitar o roteamento interno do cluster.
+* Alterações nos IDs de ASN e no endereço IP do roteador são necessárias para corresponder a ambas as configurações.
+
+Com ambas as configurações implementadas, o seguinte pode ser observado:
+
+* Uma vez que o Deployment e o Service tenham sido aplicados no cluster descrito em <<guides-metallb-k3s-l3>>, a rota para o Service estará visível no roteador FRR externo.
+* A rota será adicionada a todos os nós no cluster FRR-K8s.
+
+[NOTE]
+====
+Em configurações padrão de roteamento FRR, as rotas são compartilhadas com o próximo salto definido como o endereço IP do FRR Router. Para obter um próximo salto sem o endereço IP do FRR Router, pode-se adicionar uma linha \"neighbor BGPPG next-hop-unchanged\" e uma linha \"neighbor BGPPG as-override\" ao arquivo `/etc/frr/frr.conf` no FRR Router. Com isso implementado, os nós no cluster FRR-K8s obterão uma rota direta para o serviço.
+====

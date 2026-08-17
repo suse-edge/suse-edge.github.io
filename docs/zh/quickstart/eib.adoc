@@ -1,0 +1,618 @@
+[#quickstart-eib]
+= 使用 Edge Image Builder 的独立集群
+:revdate: 2025-07-31
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Edge Image Builder (EIB) 是一款简化了为引导机器生成定制化、即开即用 (CRB) 磁盘镜像流程的工具，即使在完全隔离的环境中也能使用。EIB 用于为所有三种 {product} 部署足迹创建部署镜像，因为它足够灵活，既能提供最小化的自定义（例如添加用户或设置时区），也能提供全面配置的镜像（例如设置复杂的网络配置、部署多节点 Kubernetes 集群、部署客户工作负载，以及通过 Rancher/Elemental 和 SUSE Multi-Linux Manager 注册到集中式管理平台）。EIB 作为容器镜像运行，使其在不同平台间具有极高的可移植性，并确保所有必需的依赖项都是自包含的，对用于操作该工具的系统所安装的软件包影响极小。
+
+[NOTE]
+====
+对于多节点场景，EIB 会自动部署 MetalLB 和 Endpoint Copier Operator，以便使用相同构建镜像配置的主机能够自动加入 Kubernetes 集群。
+====
+
+有关更多信息，请阅读 <<components-eib,Edge Image Builder 简介>>。
+
+[WARNING]
+====
+Edge Image Builder {version-eib} 支持自定义 SUSE Linux Micro {version-operatingsystem} 镜像。
+不支持较旧的版本，例如 SUSE Linux Enterprise Micro 5.5 或 6.0。
+====
+
+== 先决条件
+* 一台运行 SLES 15 SP6 的 {x86-64} 构建主机（物理机或虚拟机）。
+* Podman 容器引擎
+* 使用 <<guides-kiwi-builder-images,Kiwi Builder 流程>> 创建的 SUSE Linux Micro {version-operatingsystem} SelfInstall ISO 映像
+
+[NOTE]
+====
+对于非生产用途，可以使用 openSUSE Leap 15.6 或 openSUSE Tumbleweed 作为构建主机。
+只要有兼容的容器运行时，其他操作系统也可能可以运行。
+====
+
+=== 获取 EIB 镜像
+
+EIB 容器镜像已公开，可以通过在您的镜像构建主机上运行以下命令从 {product} 注册表下载：
+
+[,shell,subs="attributes"]
+----
+podman pull registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib}
+----
+
+== 创建镜像配置目录
+
+由于 EIB 在容器内运行，我们需要从主机挂载一个配置目录，以便您指定所需的配置，并且在构建过程中，EIB 可以访问任何所需的输入文件和支持工件。此目录必须遵循特定的结构。让我们创建它，假设该目录将存在于您的主目录中，并命名为“eib”：
+
+[,shell]
+----
+export CONFIG_DIR=$HOME/eib
+mkdir -p $CONFIG_DIR/base-images
+----
+
+在上一步中，我们创建了一个“base-images”目录，用于存放 SUSE Linux Micro {version-operatingsystem} 输入镜像，现在让我们确保该镜像已复制到配置目录中：
+
+[,shell,subs="attributes"]
+----
+cp /path/to/{micro-base-image-iso} $CONFIG_DIR/base-images/slemicro.iso
+----
+
+
+[NOTE]
+====
+在 EIB 运行期间，原始基础镜像 *不会* 被修改；系统会在 EIB 配置目录的根目录下创建一个包含所需配置的新的自定义版本。
+====
+
+此时的配置目录应如下所示：
+
+[,console]
+----
+└── base-images/
+    └── slemicro.iso
+----
+
+[#quickstart-eib-definition-file]
+== 创建镜像定义文件
+
+定义文件描述了 Edge Image Builder 支持的大多数可配置选项，选项的完整示例可以在 {link-eib-full-example}[此处] 找到，我们建议您查看 {link-eib-building-images}[上游构建镜像指南]，以获取比我们下面要介绍的示例更全面的示例。让我们从一个非常基础的操作系统镜像定义文件开始：
+
+[,console,subs="attributes,specialchars"]
+----
+cat << EOF > $CONFIG_DIR/iso-definition.yaml
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+EOF
+----
+
+此定义指定我们正在为 {x86-64} 系统生成输出镜像。将用作进一步修改基础的镜像是一个名为 `slemicro.iso` 的 `iso` 镜像，预计位于 `$CONFIG_DIR/base-images/slemicro.iso`。它还概述了在 EIB 完成镜像修改后，输出镜像将被命名为 `eib-image.iso`，并默认驻留在 `$CONFIG_DIR` 中。
+
+现在我们的目录结构应如下所示：
+[,console]
+----
+├── iso-definition.yaml
+└── base-images/
+    └── slemicro.iso
+----
+
+在接下来的章节中，我们将介绍几个常见操作的示例：
+
+=== 配置操作系统 (OS)
+
+EIB `operatingSystem` 部分旨在配置操作系统的安装位置、镜像大小等。
+这是一个可选部分，除非应用了一个或多个自定义设置，否则不应包含该部分。
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-Base-RT-SelfInstall.iso
+operatingSystem:
+  isoConfiguration:
+    installDevice: /dev/disk/by-id/ata-QEMU_HARDDISK_111-disk1 # first defined disk
+----
+
+.特定于类型的配置
+
+根据所自定义镜像的类型，可以包含以下可选部分之一。
+
+* `isoConfiguration` - 可选；此部分中的配置仅适用于 ISO 映像。
+  * `installDevice` - 可选；指定应用作安装设备的磁盘。这必须是一个块设备，并且默认会自动擦除磁盘上找到的任何数据。
+  此外，指定此属性会触发 GRUB 覆盖，以自动安装操作系统，而不是提示用户开始安装，从而实现完全无人值守的自动化安装。如果省略，系统会提示用户从 GRUB 菜单中选择“安装”选项，并要求用户选择安装磁盘，并确认在此过程中将擦除该设备。
++
+[NOTE]
+====
+`installDevice` 部分中使用的设备可以指定为 `/dev/sda`，或者使用 `/dev/disk/by-id`、`/dev/disk/by-path` 命名方式，以确保使用正确的设备。
+如果使用 libvirt 虚拟机，则可以在为虚拟机创建磁盘时指定 `serial` 属性值（例如 `serial=111-disk1`），以便将其用于 `installDevice` 值，并使用 `by-id` 命名方式，例如 `/dev/disk/by-id/ata-QEMU_HARDDISK_111-disk1`（如果使用 ATA 设备，`libvirt` 会自动为 ATA 设备添加 `ata-QEMU_HARDDISK_` 前缀，或为 virtio 设备添加 `virtio-` 前缀，有关更多信息，请参阅 https://github.com/systemd/systemd/issues/17670#issuecomment-731261739[#17670 virtio issue]）。
+====
+* `rawConfiguration` - 可选；此部分中的配置仅适用于 RAW 镜像。
+  * `diskSize` - 可选；设置所需的原始磁盘镜像大小，EIB 会将生成的镜像调整为此大小。这一点很重要，以确保您的磁盘镜像足够大，能够容纳嵌入镜像中的任何工件。建议将其设置为略小于您的 SD 卡大小（如果直接写入磁盘，则为块设备大小），因为系统会在启动时自动扩展以填满块设备的大小。这是可选的，但强烈建议设置。指定为一个整数，并以“M”（兆字节）、“G”（吉字节）或“T”（太字节）作为后缀（例如）“32G”）。
+  * `luksKey` - 加密镜像必需；用于加密原始镜像的给定 LUKS 密钥，这是 EIB 完成构建过程所必需的。
+  * `expandEncryptedPartition` - 可选；默认禁用，启用后，会自动将加密分区扩展至其最大大小。例如，如果 `diskSize` 为 `25G` 且此字段为 `true`，EIB 将在构建过程中将加密分区扩展至 `25G`。
+
+
+=== 配置操作系统用户
+
+EIB 允许您预配置具有登录信息（例如密码或 SSH 密钥）的用户，包括设置固定的 root 密码。作为本示例的一部分，我们将固定 root 密码，第一步是使用 `OpenSSL` 创建一个单向加密密码：
+
+[,console]
+----
+openssl passwd -6 SecurePassword
+----
+
+这将输出类似以下内容：
+
+[,console]
+----
+$6$G392FCbxVgn[...]Y7zTXnC1
+----
+
+然后，我们可以在定义文件中添加一个名为 `operatingSystem` 的部分，并在其中包含一个 `users` 数组。生成的文件应如下所示：
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$G392FCbxVgn[...]Y7zTXnC1
+----
+
+[NOTE]
+====
+还可以添加其他用户、创建主目录、设置用户 ID、添加 SSH 密钥认证以及修改组信息。请参阅 {link-eib-building-images}[上游构建镜像指南] 以获取更多示例。
+====
+
+[#configuring-os-time]
+=== 配置操作系统时间
+
+`time` 部分是可选的，但强烈建议进行配置，以避免证书和时钟偏差带来的潜在问题。EIB 将根据此处的参数配置 chronyd 和 `/etc/localtime`。
+
+[,console]
+----
+operatingSystem:
+  time:
+    timezone: Europe/London
+    ntp:
+      forceWait: true
+      pools:
+        - 2.suse.pool.ntp.org
+      servers:
+        - 10.0.0.1
+        - 10.0.0.2
+----
+
+* `timezone` 以“地区/地点”格式指定时区（例如“欧洲/伦敦”）。可以通过在 Linux 系统上运行 `timedatectl list-timezones` 来找到完整列表。
+* ntp - 定义与配置 NTP（使用 chronyd）相关的属性：
+  * forceWait - 请求 chronyd 在启动其他服务之前尝试同步时间源，超时时间为 180 秒。
+  * pools - 指定 chronyd 将用作数据源的池列表（使用 `iburst` 以缩短初始同步所需的时间）。
+  * servers - 指定 chronyd 将用作数据源的服务器列表（使用 `iburst` 以缩短初始同步所需的时间）。
+
+[NOTE]
+====
+本示例中提供的值仅供参考。请根据您的具体要求进行调整。
+====
+
+[#adding-certificates]
+=== 添加证书
+
+存储在 `certificates` 目录中且扩展名为“.pem”或“.crt”的证书文件将被安装到节点系统范围的证书存储中：
+
+[,console]
+----
+.
+├── definition.yaml
+└── certificates
+    ├── my-ca.pem
+    └── my-ca.crt
+----
+
+有关更多信息，请参阅 https://documentation.suse.com/smart/security/html/tls-certificates/index.html#tls-adding-new-certificates[“使用 TLS 证书保护通信”指南]。
+
+[#adding-operating-system-files]
+=== 添加操作系统文件
+
+放置在镜像配置目录中 `os-files` 目录下的文件会自动复制到所构建镜像的文件系统中。
+复制时将保留完全相同的目录结构。
+例如，如果文件存在于名为 `os-files/etc` 的子目录中，它将被放置在所构建镜像的 `/etc` 目录中。
+
+[NOTE]
+====
+如果 `os-files` 目录存在，它不能为空。
+====
+
+[,console]
+----
+.
+├── definition.yaml
+└── os-files
+    └── etc
+        └── ssh
+            └── sshd_config
+----
+
+[#eib-configuring-rpm-packages]
+=== 配置 RPM 软件包
+
+EIB 的主要功能之一是提供一种机制，将额外的软件包添加到镜像中，以便在安装完成后，系统能够立即利用已安装的软件包。EIB 允许用户指定以下内容：
+
+* 镜像定义列表中按名称列出的软件包
+* 用于搜索这些软件包的网络存储库
+* 用于搜索官方 SUSE 存储库中列出软件包的 SUSE 客户中心 (SCC) 凭据
+* 通过 `$CONFIG_DIR/rpms` 目录，侧载网络存储库中不存在的自定义 RPM
+* 通过同一目录 (`$CONFIG_DIR/rpms/gpg-keys`)，提供用于启用第三方软件包验证的 GPG 密钥。
+
+EIB 随后将在镜像构建时运行软件包解析过程，以基础镜像作为输入，并尝试拉取和安装所有提供的软件包，无论是通过列表指定还是本地提供。EIB 会将所有软件包（包括任何依赖项）下载到输出镜像中的储存库，并指示系统在首次启动过程中安装这些软件包。在镜像构建期间执行此过程可确保软件包在目标平台（例如边缘节点）上首次启动时成功安装。这在您希望将额外软件包预置到镜像中，而不是在运行时通过网络拉取它们的环境中也具有优势，例如对于隔离的网络环境或受限网络环境。
+
+作为一个简单的演示示例，我们将安装在第三方供应商支持的 NVIDIA 存储库中找到的 `nvidia-container-toolkit` RPM 软件包：
+
+[,yaml]
+----
+  packages:
+    packageList:
+      - nvidia-container-toolkit
+    additionalRepos:
+      - url: https://nvidia.github.io/libnvidia-container/stable/rpm/x86_64
+----
+
+生成的定义文件如下所示：
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$G392FCbxVgn[...]Y7zTXnC1
+  packages:
+    packageList:
+      - nvidia-container-toolkit
+    additionalRepos:
+      - url: https://nvidia.github.io/libnvidia-container/stable/rpm/x86_64
+----
+
+以上是一个简单的示例，但为了完整起见，请在运行镜像生成之前下载 NVIDIA 软件包签名密钥：
+
+[,bash]
+----
+$ mkdir -p $CONFIG_DIR/rpms/gpg-keys
+$ curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey > $CONFIG_DIR/rpms/gpg-keys/nvidia.gpg
+----
+
+[WARNING]
+====
+通过此方法添加额外的 RPM 旨在用于添加受支持的第三方组件或用户提供（并维护）的软件包；此机制不应用于添加通常在 SUSE Linux Micro 上不受支持的软件包。如果使用此机制添加来自 openSUSE 存储库（不受支持）的组件（包括来自较新版本或服务包的组件），您最终可能会得到不受支持的配置，特别是当依赖项解析导致操作系统核心部分被替换时，即使生成的系统看起来运行正常。如果您不确定，请联系您的 SUSE 代表，以协助确定您所需配置的可支持性。
+====
+
+[NOTE]
+====
+更全面的指南及其他示例可以在 {link-eib-installing-packages}[上游安装软件包指南] 中找到。
+====
+
+=== 配置 Kubernetes 集群和用户工作负载
+
+EIB 的另一个功能是能够使用它来自动化部署“就地引导”（即不需要任何形式的集中式管理基础设施来协调）的单节点和多节点高可用 Kubernetes 集群。这种方法背后的主要驱动因素是针对隔离部署或网络受限环境，但它也可用作快速启动独立集群的一种方式，即使在可以使用完整且不受限制的网络访问的情况下也是如此。
+
+此方法不仅能够部署自定义操作系统，还能够指定 Kubernetes 配置、通过 Helm chart 提供的任何额外分层组件，以及通过提供的 Kubernetes 清单提供的任何用户工作负载。然而，使用此方法背后的设计原则是我们默认假设用户想要进行隔离部署。因此，镜像定义中指定的任何项目都将被拉取到镜像中，其中包括用户提供的工作负载。EIB 确保定义所需的任何已发现镜像都会被复制到本地，并由生成的已部署系统中的嵌入式镜像注册表提供服务。
+
+在下一个示例中，我们将采用现有的镜像定义并指定 Kubernetes 配置（在此示例中，它没有列出系统及其角色，因此我们默认假设为单节点），这将指示 EIB 配置单节点 RKE2 Kubernetes 集群。为了展示用户提供的工作负载（通过清单）和分层组件（通过 Helm）部署的自动化，我们将通过 {product} Helm chart 安装 KubeVirt，并通过 Kubernetes 清单安装 NGINX。我们需要添加到现有镜像定义中的额外配置如下：
+
+[,yaml,subs="attributes"]
+----
+kubernetes:
+  version: {version-kubernetes-rke2}
+  manifests:
+    urls:
+      - https://k8s.io/examples/application/nginx-app.yaml
+  helm:
+    charts:
+      - name: kubevirt
+        version: {version-kubevirt-chart}
+        repositoryName: suse-edge
+    repositories:
+      - name: suse-edge
+        url: oci://registry.suse.com/edge/charts
+----
+
+最终的完整定义文件现在应如下所示：
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$G392FCbxVgn[...]Y7zTXnC1
+  packages:
+    packageList:
+      - nvidia-container-toolkit
+    additionalRepos:
+      - url: https://nvidia.github.io/libnvidia-container/stable/rpm/x86_64
+kubernetes:
+  version: {version-kubernetes-k3s}
+  manifests:
+    urls:
+      - https://k8s.io/examples/application/nginx-app.yaml
+  helm:
+    charts:
+      - name: kubevirt
+        version: {version-kubevirt-chart}
+        repositoryName: suse-edge
+    repositories:
+      - name: suse-edge
+        url: oci://registry.suse.com/edge/charts
+----
+
+[NOTE]
+====
+有关多节点部署、自定义网络以及 Helm chart 选项/值的更多示例，请参阅 {link-eib-building-images}[上游文档]。
+====
+
+[#quickstart-eib-network]
+=== 配置网络
+
+在本快速入门的最后一个示例中，让我们配置当系统使用 EIB 生成的镜像进行配置时将启动的网络。务必理解，除非提供了网络配置，否则默认模式是在引导时发现的所有接口上使用 DHCP。然而，这并不总是理想的配置，特别是当 DHCP 不可用且您需要提供静态配置，或者您需要设置更复杂的网络结构（例如绑定、LACP 和 VLAN），或者需要覆盖某些参数（例如主机名、DNS 服务器和路由）时。
+
+EIB 提供了提供每个节点配置（其中相关系统通过其 MAC 地址进行唯一标识）的能力，或者提供用于为每台机器提供相同配置的覆盖，这在系统 MAC 地址未知时更为有用。EIB 使用了一个名为 Network Manager Configurator（简称 `nmc`）的附加工具，该工具由 {product} 团队构建，旨在允许根据 https://nmstate.io/[nmstate.io] 声明式网络模式应用自定义网络配置，并在引导时识别其正在引导的节点，并在任何服务启动之前应用所需的网络配置。
+
+现在，我们将通过在所需的 `network` 目录中描述节点特定文件（基于所需的主机名）中的所需网络状态，为具有单个接口的系统应用静态网络配置：
+
+[,console]
+----
+mkdir $CONFIG_DIR/network
+
+cat << EOF > $CONFIG_DIR/network/host1.local.yaml
+routes:
+  config:
+  - destination: 0.0.0.0/0
+    metric: 100
+    next-hop-address: 192.168.122.1
+    next-hop-interface: eth0
+    table-id: 254
+  - destination: 192.168.122.0/24
+    metric: 100
+    next-hop-address: 192.168.122.1
+    next-hop-interface: eth0
+    table-id: 254
+dns-resolver:
+  config:
+    server:
+    - 192.168.122.1
+    - 8.8.8.8
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mac-address: 34:8A:B1:4B:16:E7
+  ipv4:
+    address:
+    - ip: 192.168.122.50
+      prefix-length: 24
+    dhcp: false
+    enabled: true
+  ipv6:
+    enabled: false
+EOF
+----
+
+[WARNING]
+====
+上述示例是为默认 `192.168.122.0/24` 子网设置的，假设测试是在虚拟机上执行的，请根据您的环境进行调整，不要忘记 MAC 地址。由于同一个镜像可用于配置多个节点，因此由 EIB（通过 `nmc`）配置的网络依赖于它能够通过 MAC 地址唯一标识节点，因此在引导期间 `nmc` 将为每台机器应用正确的网络配置。这意味着您需要知道要安装到的系统的 MAC 地址。或者，默认行为是依赖 DHCP，但您可以利用 `configure-network.sh` 钩子将通用配置应用于所有节点 - 有关更多详细信息，请参阅 <<components-nmc,网络指南>>。
+====
+
+生成的文件结构应如下所示：
+
+[,console]
+----
+├── iso-definition.yaml
+├── base-images/
+│   └── slemicro.iso
+└── network/
+    └── host1.local.yaml
+----
+
+我们刚刚创建的网络配置将被解析，必要的 NetworkManager 连接文件将自动生成并插入到 EIB 将创建的新安装镜像中。这些文件将在主机配置期间应用，从而形成完整的网络配置。
+
+[NOTE]
+====
+有关上述配置的更全面解释和此功能的示例，请参阅 <<components-nmc,边缘网络组件>>。
+====
+
+[#eib-how-to-build-image]
+== 构建镜像
+
+现在我们已经有了基础镜像和供 EIB 使用的镜像定义，让我们继续构建镜像。为此，我们只需使用 `podman` 调用带有“build”命令的 EIB 容器，并指定定义文件：
+
+[,bash,subs="attributes"]
+----
+podman run --rm -it --privileged -v $CONFIG_DIR:/eib \
+registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+build --definition-file iso-definition.yaml
+----
+
+命令的输出应类似于：
+
+[,console]
+----
+Setting up Podman API listener...
+Downloading file: dl-manifest-1.yaml 100% (498/498 B, 9.5 MB/s)
+Pulling selected Helm charts... 100% (1/1, 43 it/min)
+Generating image customization components...
+Identifier ................... [SUCCESS]
+Custom Files ................. [SKIPPED]
+Time ......................... [SKIPPED]
+Network ...................... [SUCCESS]
+Groups ....................... [SKIPPED]
+Users ........................ [SUCCESS]
+Proxy ........................ [SKIPPED]
+Resolving package dependencies...
+Rpm .......................... [SUCCESS]
+Os Files ..................... [SKIPPED]
+Systemd ...................... [SKIPPED]
+Fips ......................... [SKIPPED]
+Elemental .................... [SKIPPED]
+Suma ......................... [SKIPPED]
+Populating Embedded Artifact Registry... 100% (3/3, 10 it/min)
+Embedded Artifact Registry ... [SUCCESS]
+Keymap ....................... [SUCCESS]
+Configuring Kubernetes component...
+The Kubernetes CNI is not explicitly set, defaulting to 'cilium'.
+Downloading file: rke2_installer.sh
+Downloading file: rke2-images-core.linux-amd64.tar.zst 100% (657/657 MB, 48 MB/s)
+Downloading file: rke2-images-cilium.linux-amd64.tar.zst 100% (368/368 MB, 48 MB/s)
+Downloading file: rke2.linux-amd64.tar.gz 100% (35/35 MB, 50 MB/s)
+Downloading file: sha256sum-amd64.txt 100% (4.3/4.3 kB, 6.2 MB/s)
+Kubernetes ................... [SUCCESS]
+Certificates ................. [SKIPPED]
+Cleanup ...................... [SKIPPED]
+Building ISO image...
+Kernel Params ................ [SKIPPED]
+Build complete, the image can be found at: eib-image.iso
+----
+
+构建的 ISO 映像存储在 `$CONFIG_DIR/eib-image.iso`：
+
+[,console]
+----
+├── iso-definition.yaml
+├── eib-image.iso
+├── _build
+│   └── cache/
+│       └── ...
+│   └── build-<timestamp>/
+│       └── ...
+├── base-images/
+│   └── slemicro.iso
+└── network/
+    └── host1.local.yaml
+----
+
+每次构建都会在 `$CONFIG_DIR/_build/` 中创建一个带时间戳的文件夹，其中包含构建日志、构建期间使用的工件，以及包含添加到 CRB 镜像的所有脚本和工件的 `combustion` 和 `artefacts` 目录。
+
+此目录的内容应如下所示：
+[,console]
+----
+├── build-<timestamp>/
+│   │── combustion/
+│   │   ├── 05-configure-network.sh
+│   │   ├── 10-rpm-install.sh
+│   │   ├── 12-keymap-setup.sh
+│   │   ├── 13b-add-users.sh
+│   │   ├── 20-k8s-install.sh
+│   │   ├── 26-embedded-registry.sh
+│   │   ├── 48-message.sh
+│   │   ├── network/
+│   │   │   ├── host1.local/
+│   │   │   │   └── eth0.nmconnection
+│   │   │   └── host_config.yaml
+│   │   ├── nmc
+│   │   └── script
+│   │── artefacts/
+│   │   │── registry/
+│   │   │   ├── hauler
+│   │   │   ├── nginx:<version>-registry.tar.zst
+│   │   │   ├── rancher_kubectl:<version>-registry.tar.zst
+│   │   │   └── registry.suse.com_suse_sles_15.6_virt-operator:<version>-registry.tar.zst
+│   │   │── rpms/
+│   │   │   └── rpm-repo
+│   │   │       ├── addrepo0
+│   │   │       │   ├── nvidia-container-toolkit-<version>.rpm
+│   │   │       │   ├── nvidia-container-toolkit-base-<version>.rpm
+│   │   │       │   ├── libnvidia-container1-<version>.rpm
+│   │   │       │   └── libnvidia-container-tools-<version>.rpm
+│   │   │       ├── repodata
+│   │   │       │   ├── ...
+│   │   │       └── zypper-success
+│   │   └── kubernetes/
+│   │       ├── rke2_installer.sh
+│   │       ├── registries.yaml
+│   │       ├── server.yaml
+│   │       ├── images/
+│   │       │   ├── rke2-images-cilium.linux-amd64.tar.zst
+│   │       │   └── rke2-images-core.linux-amd64.tar.zst
+│   │       ├── install/
+│   │       │   ├── rke2.linux-amd64.tar.gz
+│   │       │   └── sha256sum-amd64.txt
+│   │       └── manifests/
+│   │           ├── dl-manifest-1.yaml
+│   │           └── kubevirt.yaml
+│   ├── createrepo.log
+│   ├── eib-build.log
+│   ├── embedded-registry.log
+│   ├── helm
+│   │   └── kubevirt
+│   │       └── kubevirt-0.4.0.tgz
+│   ├── helm-pull.log
+│   ├── helm-template.log
+│   ├── iso-build.log
+│   ├── iso-build.sh
+│   ├── iso-extract
+│   │   └── ...
+│   ├── iso-extract.log
+│   ├── iso-extract.sh
+│   ├── modify-raw-image.sh
+│   ├── network-config.log
+│   ├── podman-image-build.log
+│   ├── podman-system-service.log
+│   ├── prepare-resolver-base-tarball-image.log
+│   ├── prepare-resolver-base-tarball-image.sh
+│   ├── raw-build.log
+│   ├── raw-extract
+│   │   └── ...
+│   └── resolver-image-build
+│       └──...
+└── cache
+    └── ...
+----
+
+如果构建失败，`eib-build.log` 是包含相关信息的第一个日志。从那里，它将引导您找到失败的组件进行调试。
+
+此时，您应该拥有一个可直接使用的镜像，它将：
+
+1. 部署 SUSE Linux Micro {version-operatingsystem}
+2. 配置 root 密码
+3. 安装 `nvidia-container-toolkit` 软件包
+4. 配置嵌入式容器注册表以在本地提供内容
+5. 安装单节点 RKE2
+6. 配置静态网络
+7. 安装 KubeVirt
+8. 部署用户提供的清单
+
+[#quickstart-eib-image-debug]
+== 调试镜像构建过程
+
+如果镜像构建过程失败，请参考 {link-eib-debugging}[上游调试指南]。
+
+[#quickstart-eib-image-test]
+== 测试您新构建的镜像
+
+有关如何测试新构建的 CRB 镜像的说明，请参考 {link-eib-testing}[上游镜像测试指南]。

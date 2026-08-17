@@ -1,0 +1,474 @@
+[#{cluster-type}-day2-fleet-os-upgrade]
+== 操作系统升级
+:revdate: 2025-05-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+:toc: auto
+
+本节介绍如何使用 <<components-fleet>> 和 <<components-system-upgrade-controller>> 执行操作系统升级。
+
+本节涵盖以下主题：
+
+. <<{cluster-type}-day2-fleet-os-upgrade-components>> - 升级过程中使用的附加组件。
+. <<{cluster-type}-day2-fleet-os-upgrade-overview>> - 升级过程概述。
+. <<{cluster-type}-day2-fleet-os-upgrade-requirements>> - 升级过程的要求。
+. <<{cluster-type}-day2-fleet-os-upgrade-plan-deployment>> - 有关如何部署负责触发升级过程的 `SUC plans` 的信息。
+
+[#{cluster-type}-day2-fleet-os-upgrade-components]
+=== 组件
+
+本节涵盖 `OS upgrade` 过程在默认“第 2 天”<<{cluster-type}-day2-fleet-components,组件>> 之外使用的自定义组件。
+
+[#{cluster-type}-day2-fleet-os-upgrade-components-systemd-service]
+==== systemd.service
+
+特定节点上的操作系统升级由 link:https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html[systemd.service] 处理。
+
+根据操作系统从一个 Edge 版本升级到另一个版本所需的升级类型，会创建不同的服务：
+
+* 对于需要相同操作系统版本（例如 `6.1`）的 Edge 版本，将创建 `os-pkg-update.service`。它使用 link:https://kubic.opensuse.org/documentation/man-pages/transactional-update.8.html[事务更新] 来执行 link:https://en.opensuse.org/SDB:Zypper_usage#Updating_packages[常规软件包升级]。
+
+* 对于需要操作系统版本迁移（例如 `6.1` -> `6.2`）的 Edge 版本，将创建 `os-migration.service`。它使用 link:https://kubic.opensuse.org/documentation/man-pages/transactional-update.8.html[事务更新] 来执行：
+
+.. link:https://en.opensuse.org/SDB:Zypper_usage#Updating_packages[常规软件包升级]，确保所有软件包均为最新，以减少迁移过程中因旧软件包版本导致的任何故障。
+
+.. 利用 `zypper migration` 命令进行操作系统迁移。
+
+上述服务通过 `SUC plan` 在每个节点上部署，该服务必须位于需要操作系统升级的 {cluster-type} 集群上。
+
+[#{cluster-type}-day2-fleet-os-upgrade-overview]
+=== 概述
+
+{cluster-type} 集群节点的操作系统升级是通过利用 `Fleet` 和 `System Upgrade Controller (SUC)` 完成的。
+
+*Fleet* 用于在目标集群上部署和管理 `SUC plans`。
+
+[NOTE]
+====
+`SUC plans` 是 link:https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/[自定义资源]，用于描述 `SUC` 为在节点集上执行特定任务所需遵循的步骤。有关 `SUC plan` 外观的示例，请参阅 link:https://github.com/rancher/system-upgrade-controller?tab=readme-ov-file#example-plans[上游储存库]。
+====
+
+`OS SUC plans` 通过将 https://fleet.rancher.io/gitrepo-add[GitRepo] 或 https://fleet.rancher.io/bundle-add[Bundle] 资源部署到特定的 Fleet link:https://fleet.rancher.io/namespaces#gitrepos-bundles-clusters-clustergroups[工作区] 来分发到每个集群。Fleet 会检索已部署的 `GitRepo/Bundle` 并将其内容（即 `OS SUC plans`）部署到目标集群。
+
+[NOTE]
+====
+`GitRepo/Bundle` 资源始终部署在 `management cluster` 上。是否使用 `GitRepo` 或 `Bundle` 资源取决于您的用例，请查看 <<{cluster-type}-day2-fleet-determine-use-case>> 以获取更多信息。
+====
+
+`OS SUC plans` 描述了以下工作流程：
+
+. 在操作系统升级之前，请务必 link:https://kubernetes.io/docs/reference/kubectl/generated/kubectl_cordon/[隔离] 节点。
+
+. 请务必先升级 `control-plane` 节点，然后再升级 `worker` 节点。
+
+. 请务必一次只升级一个 *one* 节点。
+
+一旦部署了 `OS SUC plans`，工作流程如下所示：
+
+. SUC 会协调已部署的 `OS SUC plans` 并在 *每个节点* 上创建一个 `Kubernetes Job`。
+
+. `Kubernetes Job` 会为软件包升级或操作系统迁移创建一个 <<{cluster-type}-day2-fleet-os-upgrade-components-systemd-service, `systemd.service`>>。
+
+. 所创建的 `systemd.service` 会触发特定节点上的操作系统升级过程。
++
+[IMPORTANT]
+====
+一旦操作系统升级过程完成，相应的节点将被 `rebooted` 以应用系统更新。
+====
+
+您可以在下方找到上述描述的图示：
+
+image::fleet-day2-{cluster-type}-os-upgrade.png[scaledwidth=100%]
+
+[#{cluster-type}-day2-fleet-os-upgrade-requirements]
+=== 要求
+
+_常规：_
+
+. *SCC 注册机器* - 所有 {cluster-type} 集群节点都应注册到 `https://scc.suse.com/`，这是使相应的 `systemd.service` 能够成功连接到所需 RPM 储存库所必需的。
++
+[IMPORTANT]
+====
+对于需要操作系统版本迁移的 Edge 版本（例如 `6.1` -> `6.2`），请确保您的 SCC 密钥支持迁移到新版本。
+====
+
+. *确保 SUC Plan 容忍度与节点容忍度匹配* - 如果您的 Kubernetes 集群节点具有自定义 *污点*，请确保在 *SUC Plans* 中为这些污点添加 link:https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/[容忍度]。默认情况下，*SUC Plans* 仅具有针对 *控制平面* 节点的容忍度。默认容忍度包括：
+
+* _CriticalAddonsOnly=true:NoExecute_
+
+* _node-role.kubernetes.io/control-plane:NoSchedule_
+
+* _node-role.kubernetes.io/etcd:NoExecute_
++
+[NOTE]
+====
+任何额外的容忍度必须添加到每个计划的 `.spec.tolerations` 部分下。与操作系统升级相关的*SUC 计划*可以在`fleets/day2/system-upgrade-controller-plans/os-upgrade`下的link:https://github.com/suse-edge/fleet-examples[suse-edge/fleet-examples]储存库中找到。*确保您使用来自有效存储库link:https://github.com/suse-edge/fleet-examples/releases[发布]标签的计划。*
+
+为*控制平面* SUC 计划定义自定义容忍度的示例如下：
+[,yaml]
+----
+apiVersion: upgrade.cattle.io/v1
+kind: Plan
+metadata:
+  name: os-upgrade-control-plane
+spec:
+  ...
+  tolerations:
+  # default tolerations
+  - key: "CriticalAddonsOnly"
+    operator: "Equal"
+    value: "true"
+    effect: "NoExecute"
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Equal"
+    effect: "NoSchedule"
+  - key: "node-role.kubernetes.io/etcd"
+    operator: "Equal"
+    effect: "NoExecute"
+  # custom toleration
+  - key: "foo"
+    operator: "Equal"
+    value: "bar"
+    effect: "NoSchedule"
+...
+----
+====
+
+_隔离的：_
+
+. *镜像 SUSE RPM 储存库* - 应在本地镜像操作系统 RPM 储存库，以便`systemd.service`可以访问它们。这可以通过使用link:https://documentation.suse.com/sles/15-SP6/html/SLES-all/book-rmt.html[RMT]或link:https://documentation.suse.com/suma/5.0/en/suse-manager/index.html[SUMA]来实现。
+
+[#{cluster-type}-day2-fleet-os-upgrade-plan-deployment]
+=== 操作系统升级 - SUC 计划部署
+
+[IMPORTANT]
+====
+对于之前使用此过程升级过的环境，用户应确保完成以下其中*一*步骤：
+
+* `Remove any previously deployed SUC Plans related to older Edge release versions from the {cluster-type} cluster` - 可以通过从现有的 `GitRepo/Bundle`link:https://fleet.rancher.io/gitrepo-targets#target-matching[目标配置] 中移除所需的集群，或者完全移除 `GitRepo/Bundle` 资源来完成。
+
+* `Reuse the existing GitRepo/Bundle resource` - 可以通过将资源的修订版本指向包含所需 `suse-edge/fleet-examples`link:https://github.com/suse-edge/fleet-examples/releases[release] 的正确 Fleet 的新标签来完成。
+
+这样做是为了避免旧版 Edge 发行版本之间的`SUC Plans`冲突。
+
+如果用户在 {cluster-type} 集群上存在现有的 `SUC Plans` 时尝试升级，他们将看到以下 fleet 错误：
+
+[,bash]
+----
+Not installed: Unable to continue with install: Plan <plan_name> in namespace <plan_namespace> exists and cannot be imported into the current release: invalid ownership metadata; annotation validation error..
+----
+====
+
+如 <<{cluster-type}-day2-fleet-os-upgrade-overview>> 中所述，操作系统升级是通过以下方式之一将 `SUC plans` 部署到目标集群来完成的：
+
+* Fleet `GitRepo` 资源 - <<{cluster-type}-day2-fleet-os-upgrade-plan-deployment-gitrepo>>。
+
+* Fleet `Bundle` 资源 - <<{cluster-type}-day2-fleet-os-upgrade-plan-deployment-bundle>>。
+
+要确定应使用哪种资源，请参阅<<{cluster-type}-day2-fleet-determine-use-case>>。
+
+对于希望从第三方 GitOps 工具部署`OS SUC plans`的用例，请参阅<<{cluster-type}-day2-fleet-os-upgrade-plan-deployment-third-party>>
+
+[#{cluster-type}-day2-fleet-os-upgrade-plan-deployment-gitrepo]
+==== SUC 计划部署 - GitRepo 资源
+
+可以采用以下方式之一部署包含所需`OS SUC plans`的*GitRepo*资源：
+
+. 通过 `Rancher UI` - <<{cluster-type}-day2-fleet-os-upgrade-plan-deployment-gitrepo-rancher>>（当 `Rancher` 可用时）。
+
+. 通过 <<{cluster-type}-day2-fleet-os-upgrade-plan-deployment-gitrepo-manual,手动部署>> 资源到您的 `management cluster`。
+
+部署完成后，要监控目标集群节点的操作系统升级过程，请参阅 <<components-system-upgrade-controller-monitor-plans>>。
+
+[#{cluster-type}-day2-fleet-os-upgrade-plan-deployment-gitrepo-rancher]
+===== GitRepo 创建 - Rancher UI
+
+要通过 Rancher UI 创建 `GitRepo` 资源，请遵循其官方 link:https://ranchermanager.docs.rancher.com/{rancher-docs-version}/integrations-in-rancher/fleet/overview#accessing-fleet-in-the-rancher-ui[文档]。
+
+Edge 团队维护着一个可直接使用的 link:https://github.com/suse-edge/fleet-examples/tree/{release-tag-fleet-examples}/fleets/day2/system-upgrade-controller-plans/os-upgrade[Fleet]。根据您的环境，此 Fleet 可以直接使用或作为模板使用。
+
+[IMPORTANT]
+====
+请务必使用来自有效 Edge link:https://github.com/suse-edge/fleet-examples/releases[发布] 标签的此 Fleet。
+====
+
+对于不需要对 Fleet 附带的 `SUC plans` 进行任何自定义更改的用例，用户可以直接引用来自 `suse-edge/fleet-examples` 储存库的 `os-upgrade` Fleet。
+
+如果需要自定义更改（例如添加自定义容忍度），用户应引用来自单独储存库的 `os-upgrade` Fleet，以便根据需要将更改添加到 SUC 计划中。
+
+关于如何配置 `GitRepo` 以使用来自 `suse-edge/fleet-examples` 储存库的 Fleet 的示例，可以在 link:https://github.com/suse-edge/fleet-examples/blob/{release-tag-fleet-examples}/gitrepos/day2/os-upgrade-gitrepo.yaml[此处] 查看。
+
+[#{cluster-type}-day2-fleet-os-upgrade-plan-deployment-gitrepo-manual]
+===== GitRepo 创建 - 手动
+
+. 拉取 *GitRepo* 资源：
++
+[,bash,subs="attributes"]
+----
+curl -o os-upgrade-gitrepo.yaml https://raw.githubusercontent.com/suse-edge/fleet-examples/refs/tags/{release-tag-fleet-examples}/gitrepos/day2/os-upgrade-gitrepo.yaml
+----
+
+ifeval::["{cluster-type}" == "downstream"]
+. 编辑 *GitRepo* 配置，在 `spec.targets` 下指定您所需的目标列表。默认情况下，来自 `suse-edge/fleet-examples` 的 `GitRepo` 资源 *不会* 映射到任何下游集群。
+
+** 要匹配所有集群，请将默认 `GitRepo` *目标* 更改为：
++
+[,yaml]
+----
+spec:
+  targets:
+  - clusterSelector: {}
+----
+
+** 或者，如果您需要更细粒度的集群选择，请参阅 link:https://fleet.rancher.io/gitrepo-targets[映射到下游集群]
+endif::[]
+
+ifeval::["{cluster-type}" == "management"]
+. 编辑 *GitRepo* 配置：
+
+** 删除 `spec.targets` 部分 - 仅下游集群需要。
++
+[,bash]
+----
+# Example using sed
+sed -i.bak '/^  targets:/,$d' os-upgrade-gitrepo.yaml && rm -f os-upgrade-gitrepo.yaml.bak
+
+# Example using yq (v4+)
+yq eval 'del(.spec.targets)' -i os-upgrade-gitrepo.yaml
+----
+
+** 将 `GitRepo` 的命名空间指向 `{fleet-workspace}` 命名空间 - 这样做是为了在管理集群上部署资源。
++
+[,bash]
+----
+# Example using sed
+sed -i.bak 's/namespace: fleet-default/namespace: fleet-local/' os-upgrade-gitrepo.yaml && rm -f os-upgrade-gitrepo.yaml.bak
+
+# Example using yq (v4+)
+yq eval '.metadata.namespace = "fleet-local"' -i os-upgrade-gitrepo.yaml 
+----
+endif::[]
+
+. 应用 *GitRepo* 资源到您的 `management cluster`：
++
+[,bash]
+----
+kubectl apply -f os-upgrade-gitrepo.yaml
+----
+
+. 在 `{fleet-workspace}` 名称空间下查看已创建的 *GitRepo* 资源：
++
+[,bash,subs="attributes"]
+----
+kubectl get gitrepo os-upgrade -n {fleet-workspace}
+
+# Example output
+NAME            REPO                                              COMMIT         BUNDLEDEPLOYMENTS-READY   STATUS
+os-upgrade      https://github.com/suse-edge/fleet-examples.git   {release-tag-fleet-examples}  0/0
+----
+
+[#{cluster-type}-day2-fleet-os-upgrade-plan-deployment-bundle]
+==== SUC 计划部署 - Bundle 资源
+
+一个 *Bundle* 资源（用于交付所需的 `OS SUC Plans`）可以通过以下方式之一进行部署：
+
+. 通过 `Rancher UI` - <<{cluster-type}-day2-fleet-os-upgrade-plan-deployment-bundle-rancher>>（当 `Rancher` 可用时）。
+
+. 通过 <<{cluster-type}-day2-fleet-os-upgrade-plan-deployment-bundle-manual,手动部署>> 资源到您的 `management cluster`。
+
+部署完成后，要监控目标集群节点的操作系统升级过程，请参阅 <<components-system-upgrade-controller-monitor-plans>>。
+
+[#{cluster-type}-day2-fleet-os-upgrade-plan-deployment-bundle-rancher]
+===== Bundle 创建 - Rancher UI
+
+Edge 团队维护了一个可直接使用的 link:https://github.com/suse-edge/fleet-examples/blob/{release-tag-fleet-examples}/bundles/day2/system-upgrade-controller-plans/os-upgrade/os-upgrade-bundle.yaml[bundle]，可用于以下步骤。
+
+[IMPORTANT]
+====
+请务必使用来自有效 Edge link:https://github.com/suse-edge/fleet-examples/releases[发布] 标签的此 bundle。
+====
+
+通过 Rancher UI 创建 bundle：
+
+. 在左上角，点击 *☰ -> 持续交付*
+
+. 转到 *高级* > *Bundles*
+
+. 选择 *从 YAML 创建*
+
+. 在此处，您可以通过以下方式之一创建 Bundle：
++
+[NOTE]
+====
+在某些用例中，您可能需要将自定义更改包含到 bundle 所交付的 `SUC plans` 中（例如，添加自定义容忍度）。请确保将这些更改包含在通过以下步骤生成的 bundle 中。
+====
+
+.. 通过手动将 link:https://raw.githubusercontent.com/suse-edge/fleet-examples/refs/tags/{release-tag-fleet-examples}/bundles/day2/system-upgrade-controller-plans/os-upgrade/os-upgrade-bundle.yaml[bundle 内容] 从 `suse-edge/fleet-examples` 复制到 *从 YAML 创建* 页面。
+
+.. 通过从所需的 link:https://github.com/suse-edge/fleet-examples/releases[发布] 标签克隆 link:https://github.com/suse-edge/fleet-examples[suse-edge/fleet-examples] 储存库，并在 *从 YAML 创建* 页面中选择 *从文件读取* 选项。从那里，导航到 bundle 位置 (`bundles/day2/system-upgrade-controller-plans/os-upgrade`) 并选择 bundle 文件。这将自动填充 *从 YAML 创建* 页面中的 bundle 内容。
+
+ifeval::["{cluster-type}" == "downstream"]
+. 更改 `Bundle` 的 *目标* 集群：
+
+** 要匹配所有下游集群，请将默认 Bundle `.spec.targets` 更改为：
++
+[, yaml]
+----
+spec:
+  targets:
+  - clusterSelector: {}
+----
+
+** 有关更细粒度的下游集群映射，请参阅 link:https://fleet.rancher.io/gitrepo-targets[映射到下游集群]。
+endif::[]
+
+ifeval::["{cluster-type}" == "management"]
+. 在 Rancher UI 中编辑 Bundle：
+
+** 将 `Bundle` 的 *名称空间* 更改为指向 `{fleet-workspace}` 的名称空间。
++
+[,yaml,subs="attributes"]
+----
+# Example
+kind: Bundle
+apiVersion: fleet.cattle.io/v1alpha1
+metadata:
+  name: os-upgrade
+  namespace: {fleet-workspace}
+...
+----
+
+** 将 `Bundle` 的 *目标* 集群更改为指向您的 `local`（管理）集群：
++
+[, yaml]
+----
+spec:
+  targets:
+  - clusterName: local
+----
++
+[NOTE]
+====
+在某些用例中，您的 `local` 集群可能具有不同的名称。
+
+要检索您的 `local` 集群名称，请执行以下命令：
+
+[,bash]
+----
+kubectl get clusters.fleet.cattle.io -n fleet-local
+----
+====
+endif::[]
+
+. 选择 *创建*
+
+[#{cluster-type}-day2-fleet-os-upgrade-plan-deployment-bundle-manual]
+===== Bundle 创建 - 手动
+
+. 拉取 *Bundle* 资源：
++
+[,bash,subs="attributes"]
+----
+curl -o os-upgrade-bundle.yaml https://raw.githubusercontent.com/suse-edge/fleet-examples/refs/tags/{release-tag-fleet-examples}/bundles/day2/system-upgrade-controller-plans/os-upgrade/os-upgrade-bundle.yaml
+----
+
+ifeval::["{cluster-type}" == "downstream"]
+. 编辑 `Bundle` *目标* 配置，在 `spec.targets` 下提供您所需的目标列表。默认情况下，来自 `suse-edge/fleet-examples` 的 `Bundle` 资源 *不* 映射到任何下游集群。
+
+** 要匹配所有集群，请将默认 `Bundle` *目标* 更改为：
++
+[, yaml]
+----
+spec:
+  targets:
+  - clusterSelector: {}
+----
+
+** 或者，如果您需要更细粒度的集群选择，请参阅 link:https://fleet.rancher.io/gitrepo-targets[映射到下游集群]
+endif::[]
+
+ifeval::["{cluster-type}" == "management"]
+. 编辑 `Bundle` 配置：
+
+** 将 `Bundle` 的 *目标* 集群更改为指向您的 `local`（管理）集群：
++
+[, yaml]
+----
+spec:
+  targets:
+  - clusterName: local
+----
++
+[NOTE]
+====
+在某些用例中，您的 `local` 集群可能具有不同的名称。
+
+要检索您的 `local` 集群名称，请执行以下命令：
+
+[,bash]
+----
+kubectl get clusters.fleet.cattle.io -n fleet-local
+----
+====
+
+** 将 `Bundle` 的 *名称空间* 更改为指向 `{fleet-workspace}` 的名称空间。
++
+[,yaml,subs="attributes"]
+----
+# Example
+kind: Bundle
+apiVersion: fleet.cattle.io/v1alpha1
+metadata:
+  name: os-upgrade
+  namespace: {fleet-workspace}
+...
+----
+endif::[]
+
+. 将 *Bundle* 资源应用到您的 `management cluster`：
++
+[,bash]
+----
+kubectl apply -f os-upgrade-bundle.yaml
+----
+
+. 在 `{fleet-workspace}` 名称空间下查看已创建的 *Bundle* 资源：
++
+[,bash,subs="attributes"]
+----
+kubectl get bundles -n {fleet-workspace}
+----
+
+[#{cluster-type}-day2-fleet-os-upgrade-plan-deployment-third-party]
+==== SUC 计划部署 - 第三方 GitOps 工作流
+
+在某些用例中，用户可能希望将 `OS SUC plans` 集成到他们自己的第三方 GitOps 工作流（例如 `Flux`）中。
+
+要获取所需的操作系统升级资源，请首先确定您想要使用的 link:https://github.com/suse-edge/fleet-examples[suse-edge/fleet-examples] 储存库的 Edge link:https://github.com/suse-edge/fleet-examples/releases[发布] 标签。
+
+之后，可以在 `fleets/day2/system-upgrade-controller-plans/os-upgrade` 处找到资源，其中：
+
+* `plan-control-plane.yaml` 是用于 *控制平面* 节点的 SUC 计划资源。
+
+* `plan-worker.yaml` 是用于 *工作节点* 的 SUC 计划资源。
+
+* `secret.yaml` 是一个包含 `upgrade.sh` 脚本的 Secret，该脚本负责创建 <<{cluster-type}-day2-fleet-os-upgrade-components-systemd-service, systemd.service>>。
+
+* `config-map.yaml` 是一个 ConfigMap，其中保存了供 `upgrade.sh` 脚本使用的配置。
+
+[IMPORTANT]
+====
+这些 `Plan` 资源由 `System Upgrade Controller` 进行解释，并应部署在您希望升级的每个下游集群上。有关 SUC 部署信息，请参见 <<components-system-upgrade-controller-install>>。
+====
+
+为了更好地了解如何使用 GitOps 工作流来部署用于操作系统升级的 *SUC Plans*，查看 <<{cluster-type}-day2-fleet-os-upgrade-overview,overview>> 会有所帮助。

@@ -1,0 +1,435 @@
+[#quickstart-elemental]
+= Elementalを使用したリモートホストのオンボーディング
+:revdate: 2025-06-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+このセクションでは、{product}の一部として「phone home network provisioning」ソリューションについて説明します。ここでは、Elementalを使用してノードのオンボーディングを支援します。Elementalは、リモートホストの登録と、KubernetesによるクラウドネイティブOSの一元管理を可能にするソフトウェアスタックです。{product}スタックでは、Elementalの登録機能を使用してリモートホストをRancherにオンボーディングします。これにより、ホストを一元管理プラットフォームに統合し、そこからKubernetesクラスターや階層化されたコンポーネント、アプリケーション、およびそれらのライフサイクルをすべて共通の場所からデプロイおよび管理できるようになります。
+
+このアプローチは、制御したいデバイスが管理クラスターと同じネットワーク上にない場合や、より直接的な制御を可能にする帯域外管理コントローラーが搭載されていない場合、またエッジで多くの異なる「未知の」システムを起動し、それらを大規模に安全にオンボーディングおよび管理する必要があるシナリオで役立ちます。これは、小売、産業用IoT、またはデバイスがインストールされるネットワークをほとんど制御できないその他の分野のユースケースにおける一般的なシナリオです。
+
+== 上位レベルのアーキテクチャ
+
+image::quickstart-elemental-architecture.png[scaledwidth=100%]
+
+== 必要なリソース
+
+以下に、このクイックスタートを実行するための最小限のシステム要件および環境要件を説明します。
+
+* 集中管理クラスター用のホスト（RancherおよびElementalをホストするもの）：
+ ** 開発またはテスト用に最低8 GBのRAMと20 GBのディスク容量（本番環境での使用については https://ranchermanager.docs.rancher.com/{rancher-docs-version}/getting-started/installation-and-upgrade/installation-requirements#hardware-requirements[こちら]を参照）
+* プロビジョニング対象のノード、つまりエッジデバイス（デモやテスト目的であれば仮想マシンを使用可能）
+ ** 最低4GBのRAM、2 CPUコア、20 GBのディスク
+* 管理クラスターの解決可能なホスト名、またはsslip.ioのようなサービスで使用する静的IPアドレス
+* Edge Image Builderを使用してインストールメディアを構築するためのホスト
+ ** PodmanをサポートするSLES 15 SP6、openSUSE Leap 15.6、またはその他の互換性のあるオペレーティングシステムを実行していること。
+ ** https://kubernetes.io/docs/reference/kubectl/kubectl/[Kubectl]、 https://podman.io[Podman]、および https://helm.sh[Helm]がインストールされていること
+* 起動用のUSBフラッシュ ドライブ（物理ハードウェアを使用する場合）
+* https://www.suse.com/download/sle-micro/[こちら]から入手可能な、最新のSUSE Linux Micro {version-operatingsystem} SelfInstall ISOイメージのダウンロード済みコピー。
+
+NOTE: ターゲットマシン上の既存のデータは、このプロセスの一環として上書きされます。ターゲットデプロイメントノードに接続されているUSBストレージデバイスやディスク上のデータは、必ずバックアップしてください。
+
+このガイドは、アップストリームクラスタをホストするためのDigital Oceanドロップレットと、ダウンストリームデバイスとしてのIntel NUCを使用して作成されています。インストールメディアの構築には、SUSE Linux Enterprise Serverが使用されます。
+
+== ブートストラップクラスタ[[build-bootstrap-cluster]]を構築します
+
+まずは、RancherとElementalをホストできるクラスタを作成することから始めます。このクラスタは、ダウンストリームノードが接続されているネットワークからルーティング可能である必要があります。
+
+=== Kubernetesクラスタを作成します
+
+ハイパースケーラー（Azure、AWS、Google Cloudなど）を使用している場合、クラスタをセットアップする最も簡単な方法は、ビルトインツールを使用することです。このガイドでは簡潔にするため、これらの各オプションのプロセスについては詳しく説明しません。
+
+ベアメタルや、Kubernetesディストリビューション自体も提供する必要がある他のホスティングサービスにインストールする場合は、 https://docs.rke2.io/install/quickstart[RKE2]の使用をお勧めします。
+
+=== DNSを設定します。
+
+続行する前に、クラスタへのアクセスを設定する必要があります。クラスタ自体のセットアップと同様に、DNSの構成方法はホストされている場所によって異なります。
+
+[TIP]
+====
+DNSレコードの設定を処理したくない場合（例えば、これが一時的なテストサーバーである場合など）、代わりに https://sslip.io[sslip.io]のようなサービスを使用できます。このサービスを使用すると、任意のIPアドレスを`<address>.sslip.io`で解決できます。
+====
+
+== Rancher [[install-rancher]]をインストールします
+
+Rancherをインストールするには、作成したばかりのクラスタのKubernetes APIにアクセスする必要があります。これは、使用されているKubernetesのディストリビューションによって異なります。
+
+RKE2の場合、kubeconfigファイルは`/etc/rancher/rke2/rke2.yaml`に書き込まれています。
+このファイルをローカルシステム上の`~/.kube/config`として保存します。
+正しく外部からルーティング可能なIPアドレスまたはホスト名を含めるように、ファイルを編集する必要がある場合があります。
+
+https://ranchermanager.docs.rancher.com/{rancher-docs-version}/getting-started/installation-and-upgrade/install-upgrade-on-a-kubernetes-cluster[Rancher ドキュメント]のコマンドを使用して、Rancher を簡単にインストールできます。
+
+https://cert-manager.io[cert-manager] をインストールします。
+[,bash]
+----
+helm repo add jetstack https://charts.jetstack.io
+helm repo update
+helm install cert-manager jetstack/cert-manager \
+ --namespace cert-manager \
+ --create-namespace \
+ --set crds.enabled=true
+----
+
+次に、Rancher 自体をインストールします。
+
+[,bash,subs="attributes,specialchars"]
+----
+helm repo add rancher-prime https://charts.rancher.com/server-charts/prime
+helm repo update
+helm install rancher rancher-prime/rancher \
+  --namespace cattle-system \
+  --create-namespace \
+  --set hostname=<DNS or sslip from above> \
+  --set replicas=1 \
+  --set bootstrapPassword=<PASSWORD_FOR_RANCHER_ADMIN> \
+  --version {version-rancher-prime}
+----
+
+[NOTE]
+====
+これが本番システムを目的としている場合は、cert-manager を使用して（Let's Encrypt などの）実際の証明書を設定してください。
+====
+
+設定したホスト名にブラウザでアクセスし、使用した `bootstrapPassword` で Rancher にログインします。簡単なセットアッププロセスが案内されます。
+
+== Elemental [[install-elemental]] をインストールします
+
+Rancher がインストールされたので、Elemental オペレーターと必要な CRD をインストールできます。Elemental の Helm チャートは OCI アーティファクトとして公開されているため、他のチャートよりもインストールが少し簡単です。
+Rancher をインストールしたのと同じシェル、または Rancher 内のブラウザのシェルからインストールできます。
+
+[,bash,subs="attributes"]
+----
+helm install --create-namespace -n cattle-elemental-system \
+ elemental-operator-crds \
+ oci://registry.suse.com/rancher/elemental-operator-crds-chart \
+ --version {version-elemental-operator}
+ 
+helm install -n cattle-elemental-system \
+ elemental-operator \
+ oci://registry.suse.com/rancher/elemental-operator-chart \
+ --version {version-elemental-operator}
+----
+
+=== （オプション）Elemental UI 拡張機能をインストールします
+
+. Elemental UI を使用するには、Rancher インスタンスにログインし、左上の3本線メニューをクリックします。
++
+image::installing-elemental-extension-1.png[Elemental 拡張機能 1 のインストール,scaledwidth=85%]
++
+. このページの「Available（利用可能）」タブから、Elemental カードの「Install（インストール）」をクリックします。
++
+image::installing-elemental-extension-2.png[Elemental 拡張機能 2 のインストール,scaledwidth=85%]
++
+. 拡張機能をインストールすることを確認します。
++
+image::installing-elemental-extension-3.png[Elemental 拡張機能 3 のインストール,scaledwidth=100%]
++
+. インストール後、ページをリロードするように求められます。
++
+image::installing-elemental-extension-4.png[Elemental 拡張機能 4 のインストール,scaledwidth=100%]
++
+. リロードすると、「OS Management（OS 管理）」グローバルアプリから Elemental 拡張機能にアクセスできるようになります。
++
+image::accessing-elemental-extension.png[Elemental 拡張機能へのアクセス,scaledwidth=100%]
+
+== Elemental [[configure-elemental]]を設定します。
+
+簡略化のため、変数 `$ELEM` に設定ディレクトリのフルパスを設定することをお勧めします。
+
+[,shell]
+----
+export ELEM=$HOME/elemental
+mkdir -p $ELEM
+----
+
+マシンがElementalに登録できるようにするには、`fleet-default` 名前空間に `MachineRegistration` オブジェクトを作成する必要があります。
+
+このオブジェクトの基本バージョンを作成しましょう。
+
+[,shell]
+----
+cat << EOF > $ELEM/registration.yaml
+apiVersion: elemental.cattle.io/v1beta1
+kind: MachineRegistration
+metadata:
+  name: ele-quickstart-nodes
+  namespace: fleet-default
+spec:
+  machineName: "\${System Information/Manufacturer}-\${System Information/UUID}"
+  machineInventoryLabels:
+    manufacturer: "\${System Information/Manufacturer}"
+    productName: "\${System Information/Product Name}"
+EOF
+
+kubectl apply -f $ELEM/registration.yaml
+----
+
+[NOTE]
+====
+`cat` コマンドは、Bashがテンプレート化しないように、各 `$` をバックスラッシュ (`\`) でエスケープします。手動でコピーする場合は、バックスラッシュを削除してください。
+====
+
+オブジェクトが作成されたら、割り当てられたエンドポイントを見つけてメモします。
+
+[,bash]
+----
+REGISURL=$(kubectl get machineregistration ele-quickstart-nodes -n fleet-default -o jsonpath='{.status.registrationURL}')
+----
+
+あるいは、UIからこれを行うこともできます。
+
+UI拡張機能::
++
+. OS管理拡張機能から、［登録エンドポイントの作成］をクリックします。
++
+image::click-create-registration.png[「登録の作成」をクリック,scaledwidth=100%]
++
+. この設定に名前を付けます。
++
+image::create-registration-name.png[名前の追加,scaledwidth=100%]
++
+[NOTE]
+====
+Edge Image Builderを使用した以下の手順でデータが上書きされるため、クラウド設定フィールドは無視してかまいません。
+====
+. 次に、下までスクロールし、マシン登録時に作成されるリソースへ追加する各ラベルに対して［ラベルの追加］をクリックします。これは、マシンを識別するのに役立ちます。
++
+image::create-registration-labels.png[ラベルの追加,scaledwidth=100%]
++
+. ［作成］をクリックして、設定を保存します。
+
+. 登録が作成されると、登録URLが表示されます。［コピー］をクリックしてアドレスをコピーできます。
++
+image::get-registration-url.png[URL のコピー,scaledwidth=100%]
++
+[TIP]
+====
+その画面から離れてしまった場合は、左側のメニューで「Registration Endpoints」をクリックし、作成したエンドポイントの名前をクリックしてください。
+====
++
+この URL は次のステップで使用します。
+
+== イメージ [[build-installation-media]] をビルドします
+
+Elemental の現在のバージョンには独自のインストールメディアをビルドする方法がありますが、{product} {version-edge} では代わりに Kiwi と Edge Image Builder を使用するため、結果として得られるシステムは https://www.suse.com/products/micro/[SUSE Linux Micro] をベースオペレーティングシステムとしてビルドされます。
+
+[TIP]
+====
+Kiwi の詳細については、まず <<guides-kiwi-builder-images,Kiwi Image Builder プロセス>> に従って新しいイメージをビルドしてください。Edge Image Builder については、<<quickstart-eib,Edge Image Builder 入門ガイド>> および <<components-eib,コンポーネントドキュメント>> を確認してください。
+====
+
+Podman がインストールされている Linux システムから、ディレクトリを作成し、Kiwi によってビルドされるベースイメージを配置します。
+
+[,bash]
+----
+mkdir -p $ELEM/eib_quickstart/base-images
+cp /path/to/{micro-base-image-iso} $ELEM/eib_quickstart/base-images/
+mkdir -p $ELEM/eib_quickstart/elemental
+----
+
+[,bash]
+----
+curl $REGISURL -o $ELEM/eib_quickstart/elemental/elemental_config.yaml
+----
+
+[,bash,subs="attributes,specialchars"]
+----
+cat << EOF > $ELEM/eib_quickstart/eib-config.yaml
+apiVersion: {version-eib-api-latest}
+image:
+    imageType: iso
+    arch: x86_64
+    baseImage: {micro-base-image-iso}
+    outputImageName: elemental-image.iso
+operatingSystem:
+  time:
+    timezone: Europe/London
+    ntp:
+      forceWait: true
+      pools:
+        - 2.suse.pool.ntp.org
+      servers:
+        - 10.0.0.1
+        - 10.0.0.2
+  isoConfiguration:
+    installDevice: /dev/vda
+  users:
+    - username: root
+      encryptedPassword: \$6\$jHugJNNd3HElGsUZ\$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+  packages:
+    sccRegistrationCode: XXX
+EOF
+----
+
+[NOTE]
+====
+* `time` セクションはオプションですが、証明書やクロックスキューに関する潜在的な問題を回避するために設定することを強く推奨します。この例で示されている値は、あくまで例示用です。お客様の特定の要件に合わせて調整してください。
+* エンコードされていないパスワードは `eib` です。
+* 公式ソースから必要な RPM をダウンロードしてインストールするには `sccRegistrationCode` が必要です（代わりに、`elemental-register` および `elemental-system-agent` RPM を手動でサイドロードすることも可能です）。
+* `cat` コマンドは、Bashがテンプレート化しないように、各 `$` をバックスラッシュ (`\`) でエスケープします。手動でコピーする場合は、バックスラッシュを削除してください。
+* インストール中にインストールデバイスは消去されます。
+====
+
+[,bash,subs="attributes"]
+----
+podman run --privileged --rm -it -v $ELEM/eib_quickstart/:/eib \
+ registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+ build --definition-file eib-config.yaml
+----
+
+物理デバイスを起動する場合は、イメージを USB フラッシュ ドライブに書き込む必要があります。これは次のように実行できます。
+
+[,bash]
+----
+sudo dd if=/eib_quickstart/elemental-image.iso of=/dev/<PATH_TO_DISK_DEVICE> status=progress
+----
+
+== ダウンストリームノード [[boot-downstream-nodes]] を起動します
+
+インストールメディアを作成しましたので、それを使用してダウンストリームノードを起動できます。
+
+Elemental で制御する各システムについて、インストールメディアを追加してデバイスを起動してください。インストール後、システムは再起動し、自動的に登録されます。
+
+UI 拡張機能を使用している場合は、「Inventory of Machines」にノードが表示されるはずです。
+
+NOTE: ログインプロンプトが表示されるまでインストールメディアを取り外さないでください。初回起動時は、USBスティック上のファイルにまだアクセスしています。
+
+== ダウンストリームクラスタ群を作成する [[create-downstream-clusters]]
+
+Elementalを使用して新しいクラスタをプロビジョニングする際に作成する必要があるオブジェクトが2つあります。
+
+[.tabs]
+Linux::
+1つ目は `MachineInventorySelectorTemplate` です。このオブジェクトを使用すると、クラスタとインベントリ内のマシン間のマッピングを指定できます。
++
+. インベントリ内のラベルを持つ任意のマシンに一致するセレクタを作成します：
++
+[,yaml]
+----
+cat << EOF > $ELEM/selector.yaml
+apiVersion: elemental.cattle.io/v1beta1
+kind: MachineInventorySelectorTemplate
+metadata:
+  name: location-123-selector
+  namespace: fleet-default
+spec:
+  template:
+    spec:
+      selector:
+        matchLabels:
+          locationID: '123'
+EOF
+----
++
+. リソースをクラスタに適用します：
++
+[,bash]
+----
+kubectl apply -f $ELEM/selector.yaml
+----
++
+. マシンの名前を取得し、一致するラベルを追加します：
++
+[,bash]
+----
+MACHINENAME=$(kubectl get MachineInventory -n fleet-default | awk 'NR>1 {print $1}')
+
+kubectl label MachineInventory -n fleet-default \
+ $MACHINENAME locationID=123
+----
++
+. シンプルなシングルノードのK3sクラスタリソースを作成し、それをクラスタに適用します：
++
+[,bash,subs="attributes,specialchars"]
+----
+cat << EOF > $ELEM/cluster.yaml
+apiVersion: provisioning.cattle.io/v1
+kind: Cluster
+metadata:
+  name: location-123
+  namespace: fleet-default
+spec:
+  kubernetesVersion: {version-kubernetes-k3s}
+  rkeConfig:
+    machinePools:
+      - name: pool1
+        quantity: 1
+        etcdRole: true
+        controlPlaneRole: true
+        workerRole: true
+        machineConfigRef:
+          kind: MachineInventorySelectorTemplate
+          name: location-123-selector
+          apiVersion: elemental.cattle.io/v1beta1
+EOF
+
+kubectl apply -f $ELEM/cluster.yaml
+----
++
+UI拡張機能::
+UI拡張機能を使用すると、いくつかのショートカットを利用できます。複数の場所を管理する場合、手作業が多くなりすぎる可能性があることに注意してください。
++
+. 以前と同様に、左側の3本線のメニューを開き、「OS Management」を選択します。これにより、Elementalシステムを管理するためのメイン画面に戻ります。
+. 左側のサイドバーで、「Inventory of Machines」をクリックします。これにより、登録済みのマシンインベントリが開きます。
+. これらのマシンからクラスタを作成するには、目的のシステムを選択し、「Actions」ドロップダウンリストをクリックしてから「Create Elemental Cluster」を選択します。これにより、クラスタ作成ダイアログが開くと同時に、バックグラウンドで使用するMachineSelectorTemplateが作成されます。
+. この画面で、構築するクラスタを設定します。このクイックスタートでは、K3s v1.30.5+k3s1が選択されており、その他のオプションはそのままにしています。
++
+[TIP]
+====
+他のオプションを表示するには、下にスクロールする必要がある場合があります。
+====
+
+これらのオブジェクトを作成すると、インストールしたばかりの新しいノードを使用して新しいKubernetesクラスターが起動するのを確認できるはずです。
+
+== ノードのリセット（オプション）
+
+SUSE Rancher Elementalは「ノードリセット」を実行する機能をサポートしており、Rancherからクラスター全体が削除された場合、クラスターから単一のノードが削除された場合、またはマシンインベントリからノードが手動で削除された場合に、オプションでトリガーできます。これは、孤立したリソースをリセットしてクリーンアップし、クリーンアップされたノードを自動的にマシンインベントリに戻して再利用できるようにしたい場合に便利です。これはデフォルトでは有効になっていないため、削除されたシステムはクリーンアップされません（つまり、データは削除されず、Kubernetesクラスターリソースはダウンストリームクラスター上で動作し続けます）。そのため、データを消去し、Elementalを介してマシンをRancherに再登録するには手動での介入が必要になります。
+
+この機能をデフォルトで有効にしたい場合は、`MachineRegistration`で`config.elemental.reset.enabled: true`を追加して明示的に有効にする必要があります。例：
+
+[,yaml]
+----
+config:
+  elemental:
+    registration:
+      auth: tpm
+    reset:
+      enabled: true
+----
+
+そうすれば、この`MachineRegistration`に登録されているすべてのシステムは、設定内に`elemental.cattle.io/resettable: 'true'`アノテーションを自動的に受け取ります。個々のノードでこれらを手動で行いたい場合（例：このアノテーションがない既存の`MachineInventory`がある場合や、すでにノードをデプロイ済みの場合など）、`MachineInventory`を変更して`resettable`設定を追加できます。例：
+
+[,yaml]
+----
+apiVersion: elemental.cattle.io/v1beta1
+kind: MachineInventory
+metadata:
+  annotations:
+    elemental.cattle.io/os.unmanaged: 'true'
+    elemental.cattle.io/resettable: 'true'
+----
+
+{product} 3.1では、Elemental Operatorがオペレーティングシステム上にマーカーを配置し、それが自動的にクリーンアッププロセスをトリガーします。これにより、すべてのKubernetesサービスが停止され、すべての永続データが削除され、すべてのKubernetesサービスがアンインストールされ、残っているKubernetes/Rancherディレクトリがクリーンアップされ、元のElemental `MachineRegistration`設定を介してRancherへの再登録が強制されます。これは自動的に行われるため、手動で介入する必要はありません。呼び出されるスクリプトは`/opt/edge/elemental_node_cleanup.sh`にあり、マーカーが配置されると`systemd.path`を介してトリガーされるため、即座に実行されます。
+
+[WARNING]
+====
+`resettable`機能を使用する場合、Rancherからノードやクラスターを削除した際の動作として、データを消去して再登録を強制することが前提となります。この状況ではデータが確実に失われるため、自動リセットを実行することが確実な場合にのみ使用してください。
+====
+
+== 次のステップ
+
+このガイドを使用した後に調査することをお勧めするリソースをいくつか紹介します。
+
+* <<components-fleet>>におけるエンドツーエンドの自動化
+* <<components-nmc>>における追加のネットワーク設定オプション

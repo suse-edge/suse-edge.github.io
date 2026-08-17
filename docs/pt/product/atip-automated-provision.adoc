@@ -1,0 +1,2456 @@
+[#atip-automated-provisioning]
+= Provisionamento de rede direcionado totalmente automatizado
+:revdate: 2026-05-27
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+== Introdução
+
+Este capítulo descreve como provisionar clusters downstream usando o Provisionamento de Rede Direcionado, o método de provisionamento suportado para o SUSE Telco Cloud. Ao contrário do Provisionamento baseado em imagem, este fluxo de trabalho mantém a imagem do SO genérica e direciona toda a configuração específica do cluster a partir do cluster de gerenciamento, permitindo implantações consistentes e totalmente automatizadas em escala em locais distribuídos.
+
+O Provisionamento de Rede Direcionado é um fluxo de trabalho totalmente automatizado e zero-touch, conduzido pelo cluster de gerenciamento. Cada host bare-metal é primeiro pré-registrado no Metal3 a partir do cluster de gerenciamento, registrando suas credenciais de BMC e detalhes de hardware. Uma vez que o host esteja instalado no rack, conectado às redes necessárias e ligado, o cluster de gerenciamento assume o controle: ele provisiona o SO usando uma imagem base gerada pelo EIB via interface de gerenciamento fora de banda e implanta a pilha completa do Kubernetes com todos os perfis de telecomunicações aplicados, sem qualquer intervenção manual adicional.
+
+O cluster de gerenciamento automatiza a implantação dos seguintes componentes em cada nó de cluster downstream:
+
+* <<components-slmicro,`SUSE Linux Micro`>> (ou `SUSE Linux Micro RT` para kernel de tempo real) como sistema operacional. Rede, armazenamento, usuários e argumentos de kernel podem ser personalizados dependendo do caso de uso.
+* <<components-rke2,`RKE2`>> como a distribuição Kubernetes. O plug-in CNI padrão é `Cilium`. Outras combinações de CNI, como `Cilium+Multus`, podem ser usadas dependendo do caso de uso.
+* (Opcional) <<components-suse-storage,`SUSE Storage`>>
+* (Opcional) <<components-suse-security,`SUSE Security`>>
+* (Opcional) `MetalLB` como balanceador de carga para clusters de vários nós de alta disponibilidade.
+
+As seções a seguir descrevem os diferentes fluxos de trabalho de provisionamento de rede direcionado e alguns recursos adicionais que podem ser adicionados ao processo de provisionamento:
+
+* xref:eib-edge-image-connected[]
+
+* xref:eib-edge-image-airgap[]
+
+* xref:single-node[]
+
+* xref:multi-node[]
+
+* xref:advanced-network-configuration[]
+
+* xref:add-telco[]
+
+* xref:atip-private-registry[]
+
+* xref:airgap-deployment[]
+
+
+[NOTE]
+====
+As seções a seguir mostram como preparar os diferentes cenários para o fluxo de trabalho de provisionamento de rede direcionado usando o SUSE Telco Cloud.
+Para exemplos das diferentes opções de configuração para implantação (incl. ambientes air-gapped, redes DHCP e sem DHCP, registros de contêiner privados, etc.), consulte o {link-telco-cloud-examples}[repositório do SUSE Telco Cloud].
+====
+
+[#single-node]
+
+[#eib-edge-image-connected]
+== Preparar a imagem do cluster downstream para cenários conectados
+
+O <<components-eib, Edge Image Builder>> é usado para preparar uma imagem base SLEMicro modificada que é provisionada nos hosts do cluster downstream.
+
+Grande parte da configuração via Edge Image Builder é possível, mas neste guia, cobrimos as configurações mínimas necessárias para configurar o cluster downstream.
+
+=== Pré-requisitos para cenários conectados
+
+* Um tempo de execução do contêiner como https://podman.io[Podman] ou https://rancherdesktop.io[Rancher Desktop] é necessário para executar o Edge Image Builder.
+* A imagem base será criada usando o seguinte guia <<guides-kiwi-builder-images>> com o perfil `Base` (ou `Base-RT` para o kernel de tempo real). O processo é o mesmo para ambas as arquiteturas (x86-64 e aarch64).
+
+[NOTE]
+====
+É necessário usar um host de compilação com a mesma arquitetura das imagens que estão sendo criadas. Em outras palavras, para criar uma imagem `aarch64`, é necessário usar um host de compilação `aarch64`, e vice-versa para `x86-64` (compilações cruzadas não são suportadas neste momento).
+====
+
+=== Configuração de imagem para cenários conectados
+
+Ao executar o Edge Image Builder, um diretório é montado a partir do host, portanto, é necessário criar uma estrutura de diretórios para armazenar os arquivos de configuração usados para definir a imagem de destino.
+
+* `downstream-cluster-config.yaml` é o arquivo de definição de imagem, veja <<quickstart-eib>> para mais detalhes.
+* A pasta da imagem base conterá a imagem bruta de saída gerada seguindo o guia <<guides-kiwi-builder-images>> com o perfil `Base` (ou `Base-RT` para o kernel de tempo real) deve ser copiada/movida para a pasta `base-images`.
+* O diretório `custom/files` contém os arquivos `performance-settings.sh` e `sriov-auto-filler.sh` a serem copiados para a imagem durante o processo de criação da imagem.
+* O diretório `custom/scripts` contém scripts a serem executados na primeira inicialização:
+    1. O script `01-fix-growfs.sh` é necessário para redimensionar a partição raiz do SO na implantação
+    2. O script `02-performance.sh` é opcional e pode ser usado para configurar o sistema para ajuste de desempenho.
+    3. O script `03-sriov.sh` é opcional e pode ser usado para configurar o sistema para SR-IOV.
+* A pasta `network` é opcional, veja <<add-network-eib>> para mais detalhes.
+* A pasta `os-files` contém os arquivos de configuração necessários para carregar, a cada inicialização de nó, os módulos do kernel `sctp` e `vfio-pci` com as opções necessárias.
+
+[,console,subs="attributes"]
+----
+├── downstream-cluster-config.yaml
+├── base-images
+│   └── {micro-base-image-raw}
+├── custom
+│   ├── files
+│   │   ├── performance-settings.sh
+│   │   └── sriov-auto-filler.sh
+│   └── scripts
+│       ├── 01-fix-growfs.sh
+│       ├── 02-performance.sh
+│       └── 03-sriov.sh
+├── network
+│   └── configure-network.sh
+└── os-files
+    └── etc
+        ├── modprobe.d
+        │   └── vfio-pci-options.conf
+        └── modules-load.d
+            ├── sctp.conf
+            └── vfio-pci.conf
+----
+
+==== Arquivo de definição de imagem de cluster downstream
+
+O arquivo `downstream-cluster-config.yaml` é o arquivo de configuração principal para a imagem do cluster downstream. O exemplo a seguir é um exemplo mínimo para implantação via Metal^3^:
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: raw
+  arch: x86_64
+  baseImage: {micro-base-image-raw}
+  outputImageName: eibimage-output-telco.raw
+operatingSystem:
+  kernelArgs:
+    - ignition.platform.id=openstack
+  systemd:
+    disable:
+      - rebootmgr
+      - transactional-update.timer
+      - transactional-update-cleanup.timer
+      - fstrim
+      - time-sync.target
+  users:
+    - username: root
+      encryptedPassword: $ROOT_PASSWORD
+      sshKeys:
+      - $USERKEY1
+      createHomeDir: true
+  packages:
+    packageList:
+      - jq
+    sccRegistrationCode: $SCC_REGISTRATION_CODE
+----
+
+Onde `$SCC_REGISTRATION_CODE` é o código de registro copiado do https://scc.suse.com/[SUSE Customer Center], e a lista de pacotes contém `jq`, que é necessário.
+
+`$ROOT_PASSWORD` é a senha criptografada para o usuário root, o que pode ser útil para teste/depuração.  Ele pode ser gerado com o comando `openssl passwd -6 PASSWORD`
+
+Para ambientes de produção, recomenda-se usar as chaves SSH que podem ser adicionadas ao bloco de usuários, substituindo `$USERKEY1` pelas chaves SSH reais.
+
+[NOTE]
+====
+`arch: x86_64` é a arquitetura da imagem. Para a arquitetura arm64, use `arch: aarch64`.
+
+Observe que `ignition.platform.id=openstack` é obrigatório; sem este argumento, a configuração do SLEMicro via ignition falhará no fluxo automatizado do Metal^3^.
+
+Para versões do SUSE Linux Micro anteriores à 6.2, `net.ifnames=1` deve ser definido explicitamente como um argumento de kernel para habilitar https://documentation.suse.com/smart/network/html/network-interface-predictable-naming/index.html[Predictable Network Interface Naming]. Isso é aplicado por padrão a partir da versão 6.2 em diante e a configuração explícita não é necessária. Isso está alinhado com a configuração `predictableNicNames` no gráfico Helm do Metal^3^ do Cluster de Gerenciamento, que é necessária para que o Provisionamento de Rede Direcionado funcione corretamente. A nomenclatura consistente de interfaces também é crítica quando o SR-IOV é utilizado.
+====
+
+[#add-custom-script-growfs]
+==== Script Growfs
+
+Atualmente, um script personalizado (`custom/scripts/01-fix-growfs.sh`) é necessário para expandir o sistema de arquivos para corresponder ao tamanho do disco na primeira inicialização após o provisionamento. O script `01-fix-growfs.sh` contém as seguintes informações:
+
+[,shell]
+----
+#!/bin/bash
+growfs() {
+  mnt="$1"
+  dev="$(findmnt --fstab --target ${mnt} --evaluate --real --output SOURCE --noheadings)"
+  # /dev/sda3 -> /dev/sda, /dev/nvme0n1p3 -> /dev/nvme0n1
+  parent_dev="/dev/$(lsblk --nodeps -rno PKNAME "${dev}")"
+  # Last number in the device name: /dev/nvme0n1p42 -> 42
+  partnum="$(echo "${dev}" | sed 's/^.*[^0-9]\([0-9]\+\)$/\1/')"
+  ret=0
+  growpart "$parent_dev" "$partnum" || ret=$?
+  [ $ret -eq 0 ] || [ $ret -eq 1 ] || exit 1
+  /usr/lib/systemd/systemd-growfs "$mnt"
+}
+growfs /
+----
+
+[#add-custom-script-performance]
+==== Script de desempenho
+
+O script opcional a seguir (`custom/scripts/02-performance.sh`) pode ser usado para configurar o sistema para ajuste de desempenho:
+
+[,shell]
+----
+#!/bin/bash
+
+# create the folder to extract the artifacts there
+mkdir -p /opt/performance-settings
+
+# copy the artifacts
+cp performance-settings.sh /opt/performance-settings/
+----
+
+O conteúdo de `custom/files/performance-settings.sh` é um script que pode ser usado para configurar o sistema para ajuste de desempenho e pode ser baixado do seguinte {link-telco-cloud-performance-settings}[link].
+
+[#add-custom-script-sriov]
+==== Script SR-IOV
+
+O script opcional a seguir (`custom/scripts/03-sriov.sh`) pode ser usado para configurar o sistema para SR-IOV:
+
+[,shell]
+----
+#!/bin/bash
+
+# create the folder to extract the artifacts there
+mkdir -p /opt/sriov
+# copy the artifacts
+cp sriov-auto-filler.sh /opt/sriov/sriov-auto-filler.sh
+----
+
+O conteúdo de `custom/files/sriov-auto-filler.sh` é um script que pode ser usado para configurar o sistema para SR-IOV e pode ser baixado do seguinte {link-telco-cloud-sriov-auto-filler}[link].
+
+[NOTE]
+====
+Adicione seus próprios scripts personalizados para serem executados durante o processo de provisionamento usando a mesma abordagem.
+Para obter mais informações, consulte <<quickstart-eib>>. 
+
+====
+
+[#add-telco-feature-eib]
+==== Configuração adicional para cargas de trabalho Telco
+
+Para habilitar recursos de Telco como `dpdk`, `sr-iov` ou `FEC`, pacotes adicionais podem ser necessários, conforme mostrado no exemplo a seguir.
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: raw
+  arch: x86_64
+  baseImage: {micro-base-image-raw}
+  outputImageName: eibimage-output-telco.raw
+operatingSystem:
+  kernelArgs:
+    - ignition.platform.id=openstack
+  systemd:
+    disable:
+      - rebootmgr
+      - transactional-update.timer
+      - transactional-update-cleanup.timer
+      - fstrim
+      - time-sync.target
+  users:
+    - username: root
+      encryptedPassword: $ROOT_PASSWORD
+      sshKeys:
+      - $user1Key1
+      createHomeDir: true
+  packages:
+    packageList:
+      - jq            # Non Telco specific - category: testing/utils
+      - dpdk          # TelCo Core-Network UserPlane (5G UPF) and RAN UserPlane (gNB: DU and CU-UP) - category: runtime
+      - dpdk-tools    # TelCo Core-Network UserPlane (5G UPF) and RAN UserPlane (gNB: DU and CU-UP) - category: testing/utils
+      - libdpdk-25    # TelCo Core-Network UserPlane (5G UPF) and RAN UserPlane (gNB: DU and CU-UP) - category: runtime
+      - pf-bb-config  # TelCo RAN (gNB: DU) - category: config.
+      - open-iscsi    # Non Telco specific (required by SUSE Storage/Longhorn) - category: runtime
+      - tuned         # Non Telco specific (linux tuning) - category: config.
+      - cpupower      # Non Telco specific (linux tuning - CPU power related settings) - category: config.
+      - rt-tests      # Non Telco specific (RT scheduler-latency testing) - category: testing/utils
+      - linuxptp      # TelCo RAN; time sync (gNB: DU) - category: runtime
+      - synce4l       # TelCo RAN; time sync (gNN: DU) - category: runtime
+      - pciutils      # Non Telco specific (provides "lspci" command) - category: testing/utils
+      - numactl       # Non Telco specific (provides "numactl" command) - category: testing/utils
+    sccRegistrationCode: $SCC_REGISTRATION_CODE
+----
+
+Onde `$SCC_REGISTRATION_CODE` é o código de registro copiado do https://scc.suse.com/[SUSE Customer Center], e a lista de pacotes contém os pacotes mínimos a serem usados para os perfis de Telco.
+
+[NOTE]
+====
+`arch: x86_64` é a arquitetura da imagem. Para a arquitetura arm64, use `arch: aarch64`.
+====
+
+[#add-network-eib]
+==== Script adicional para Configuração de Rede Avançada
+Se você precisar configurar IPs estáticos ou cenários de rede mais avançados conforme descrito em <<advanced-network-configuration>>, a configuração adicional a seguir é necessária.
+
+Na pasta `network`, crie o seguinte arquivo `configure-network.sh` - isso consome dados da unidade de configuração na primeira inicialização e configura a rede do host usando a https://github.com/suse-edge/nm-configurator[ferramenta NM Configurator].
+
+[,shell]
+----
+#!/bin/bash
+
+set -eux
+
+# Attempt to statically configure a NIC in the case where we find a network_data.json
+# In a configuration drive
+
+CONFIG_DRIVE=$(blkid --label config-2 || true)
+if [ -z "${CONFIG_DRIVE}" ]; then
+  echo "No config-2 device found, skipping network configuration"
+  exit 0
+fi
+
+mount -o ro $CONFIG_DRIVE /mnt
+
+META_DATA_FILE="/mnt/openstack/latest/meta_data.json"
+if [ ! -f "${META_DATA_FILE}" ]; then
+  umount /mnt
+  echo "No meta_data.json found, skipping hostname configuration"
+  exit 0
+fi
+
+DESIRED_HOSTNAME=$(cat /mnt/openstack/latest/meta_data.json | tr ',{}' '\n' | grep '"metal3-name"' | sed 's/.*\"metal3-name\": \"\(.*\)\"/\1/')
+echo "${DESIRED_HOSTNAME}" > /etc/hostname
+
+NETWORK_DATA_FILE="/mnt/openstack/latest/network_data.json"
+
+if [ ! -f "${NETWORK_DATA_FILE}" ]; then
+  umount /mnt
+  echo "No network_data.json found, skipping network configuration"
+  exit 0
+fi
+
+mkdir -p /tmp/nmc/{desired,generated}
+cp ${NETWORK_DATA_FILE} /tmp/nmc/desired/_all.yaml
+umount /mnt
+
+./nmc generate --config-dir /tmp/nmc/desired --output-dir /tmp/nmc/generated
+./nmc apply --config-dir /tmp/nmc/generated
+----
+
+[#add-kernel-modules-eib]
+==== Módulos de kernel necessários para Telco
+Para garantir que os módulos de kernel necessários para cargas de trabalho de telecomunicações sejam carregados na inicialização de cada nó, os seguintes arquivos de configuração devem ser adicionados à `os-files` pasta EIB:
+
+===== sctp.conf
+Para ser colocado no caminho `os-files/etc/modules-load.d/`, instruindo o https://www.freedesktop.org/software/systemd/man/latest/modules-load.d.html[systemd-modules-load.service] a carregar o módulo do kernel `sctp` na inicialização do nó.
+
+[,shell]
+----
+$ cat os-files/etc/modules-load.d/sctp.conf 
+# Request "systemd-modules-load.service" to load sctp module at boot time
+sctp
+----
+
+===== vfio-pci.conf
+Para ser colocado no caminho `os-files/etc/modules-load.d/`, instruindo o https://www.freedesktop.org/software/systemd/man/latest/modules-load.d.html[systemd-modules-load.service] a carregar o módulo do kernel `vfio-pci` na inicialização do nó.
+
+[,shell]
+----
+$ cat os-files/etc/modules-load.d/vfio-pci.conf 
+# Request "systemd-modules-load.service" to load vfio-pci module at boot time
+# NOTE: The (SRIOV & DPDK related) required load-module options settings are defined in related "/etc/modprobe.d/vfio-pci-options.conf" file
+vfio_pci
+----
+
+===== vfio-pci-options.conf
+Para ser colocado no caminho `os-files/etc/modprobe.d/`, definindo os parâmetros necessários do módulo do kernel `vfio-pci` a serem aplicados quando o módulo do kernel for carregado.
+
+[,shell]
+----
+$ cat os-files/etc/modprobe.d/vfio-pci-options.conf 
+# Enable SR-IOV and disable idle D3 state for vfio-pci driver
+options vfio_pci enable_sriov=1 disable_idle_d3=1
+----
+
+=== Criação de imagem
+
+Assim que a estrutura de diretórios estiver preparada seguindo as seções anteriores, execute o seguinte comando para criar a imagem:
+
+[,shell,subs="attributes"]
+----
+podman run --rm --privileged -it -v $PWD:/eib \
+ registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+ build --definition-file downstream-cluster-config.yaml
+----
+
+Isso cria o arquivo de imagem ISO de saída chamado `eibimage-output-telco.raw`, com base na definição descrita acima.
+
+A imagem de saída deve então ser disponibilizada via um servidor web, seja o contêiner media-server habilitado via a <<metal3-media-server,Documentação do Cluster de Gerenciamento>> ou algum outro servidor acessível localmente.  Nos exemplos abaixo, nos referimos a este servidor como `imagecache.local:8080`
+
+[#eib-edge-image-airgap]
+== Preparar imagem de cluster downstream para cenários de air gap
+
+O <<components-eib, Edge Image Builder>> é usado para preparar uma imagem base SLEMicro modificada que é provisionada nos hosts do cluster downstream.
+
+Grande parte da configuração é possível com o Edge Image Builder, mas neste guia, cobrimos as configurações mínimas necessárias para configurar o cluster downstream para cenários de air gap.
+
+=== Pré-requisitos para cenários de air gap
+
+* Um tempo de execução do contêiner, como https://podman.io[Podman] ou https://rancherdesktop.io[Rancher Desktop], é necessário para executar o Edge Image Builder.
+* A imagem base será criada usando o seguinte guia <<guides-kiwi-builder-images>> com o arquivo de controle `Base` (ou `Base-RT` para o kernel de tempo real). O processo é o mesmo para ambas as arquiteturas (x86-64 e aarch64).
+* Se você quiser usar SR-IOV ou qualquer outra carga de trabalho que exija uma imagem de contêiner, um registro privado local deve ser implantado e já configurado (com/sem TLS e/ou autenticação). Este registro será usado para armazenar as imagens e as imagens OCI de helm chart.
+
+[NOTE]
+====
+É necessário usar um host de compilação com a mesma arquitetura das imagens que estão sendo criadas. Em outras palavras, para criar uma imagem `aarch64`, é necessário usar um host de compilação `aarch64`, e vice-versa para `x86-64` (compilações cruzadas não são suportadas neste momento).
+====
+
+=== Configuração de imagem para cenários de air gap
+
+Ao executar o Edge Image Builder, um diretório é montado a partir do host, portanto, é necessário criar uma estrutura de diretórios para armazenar os arquivos de configuração usados para definir a imagem de destino.
+
+* `downstream-cluster-airgap-config.yaml` é o arquivo de definição de imagem, veja <<quickstart-eib>> para mais detalhes.
+* A pasta da imagem base conterá a imagem bruta de saída gerada seguindo o guia <<guides-kiwi-builder-images>> com o perfil `Base` (ou `Base-RT` para o kernel de tempo real) deve ser copiada/movida para a pasta `base-images`.
+* A pasta `network` é opcional, veja <<add-network-eib>> para mais detalhes.
+* O diretório `custom/scripts` contém scripts a serem executados na primeira inicialização:
+    1. O script `01-fix-growfs.sh` é necessário para redimensionar a partição raiz do SO na implantação.
+    2. O script `02-airgap.sh` é necessário para copiar as imagens para o local correto durante o processo de criação da imagem para ambientes air-gapped.
+    3. O script `03-performance.sh` é opcional e pode ser usado para configurar o sistema para ajuste de desempenho.
+    4. O script `04-sriov.sh` é opcional e pode ser usado para configurar o sistema para SR-IOV.
+* O diretório `custom/files` contém as imagens `rke2` e `cni` a serem copiadas para a imagem durante o processo de criação da imagem. Além disso, os arquivos opcionais `performance-settings.sh` e `sriov-auto-filler.sh` podem ser incluídos.
+* O diretório `os-files` contém os arquivos de configuração necessários para carregar, a cada inicialização de nó, os módulos do kernel `sctp` e `vfio-pci` com as opções necessárias.
+
+[,console,subs="attributes"]
+----
+├── downstream-cluster-airgap-config.yaml
+├── base-images
+│   └── {micro-base-image-raw}
+├── custom
+│   ├── files
+│   │   ├── install.sh
+│   │   ├── rke2-images-cilium.linux-amd64.tar.zst
+│   │   ├── rke2-images-core.linux-amd64.tar.zst
+│   │   ├── rke2-images-multus.linux-amd64.tar.zst
+│   │   ├── rke2-images.linux-amd64.tar.zst
+│   │   ├── rke2-images-traefik.linux-amd64.tar.zst
+│   │   ├── rke2.linux-amd64.tar.zst
+│   │   ├── sha256sum-amd64.txt
+│   │   ├── performance-settings.sh
+│   │   └── sriov-auto-filler.sh
+│   └── scripts
+│       ├── 01-fix-growfs.sh
+│       ├── 02-airgap.sh
+│       ├── 03-performance.sh
+│       └── 04-sriov.sh
+├── network
+│   └── configure-network.sh
+└── os-files
+    └── etc
+        ├── modprobe.d
+        │   └── vfio-pci-options.conf
+        └── modules-load.d
+            ├── sctp.conf
+            └── vfio-pci.conf
+----
+
+==== Arquivo de definição de imagem de cluster downstream
+
+O arquivo `downstream-cluster-airgap-config.yaml` é o arquivo de configuração principal para a imagem do cluster downstream e o conteúdo foi descrito na xref:add-telco-feature-eib[seção] anterior.
+
+==== Script Growfs
+
+Atualmente, um script personalizado (`custom/scripts/01-fix-growfs.sh`) é necessário para expandir o sistema de arquivos para corresponder ao tamanho do disco na primeira inicialização após o provisionamento. O script `01-fix-growfs.sh` contém as seguintes informações:
+
+[,shell]
+----
+#!/bin/bash
+growfs() {
+  mnt="$1"
+  dev="$(findmnt --fstab --target ${mnt} --evaluate --real --output SOURCE --noheadings)"
+  # /dev/sda3 -> /dev/sda, /dev/nvme0n1p3 -> /dev/nvme0n1
+  parent_dev="/dev/$(lsblk --nodeps -rno PKNAME "${dev}")"
+  # Last number in the device name: /dev/nvme0n1p42 -> 42
+  partnum="$(echo "${dev}" | sed 's/^.*[^0-9]\([0-9]\+\)$/\1/')"
+  ret=0
+  growpart "$parent_dev" "$partnum" || ret=$?
+  [ $ret -eq 0 ] || [ $ret -eq 1 ] || exit 1
+  /usr/lib/systemd/systemd-growfs "$mnt"
+}
+growfs /
+----
+
+==== Script de air-gap
+
+O script a seguir (`custom/scripts/02-airgap.sh`) é necessário para copiar as imagens para o local correto durante o processo de criação da imagem:
+
+[,shell]
+----
+#!/bin/bash
+
+# create the folder to extract the artifacts there
+mkdir -p /opt/rke2-artifacts
+mkdir -p /var/lib/rancher/rke2/agent/images
+
+# copy the artifacts
+cp install.sh /opt/
+cp rke2-images*.tar.zst rke2.linux-amd64.tar.gz sha256sum-amd64.txt /opt/rke2-artifacts/
+----
+
+[#add-custom-script-performance2]
+==== Script de desempenho
+
+O script opcional a seguir (`custom/scripts/03-performance.sh`) pode ser usado para configurar o sistema para ajuste de desempenho:
+
+[,shell]
+----
+#!/bin/bash
+
+# create the folder to extract the artifacts there
+mkdir -p /opt/performance-settings
+
+# copy the artifacts
+cp performance-settings.sh /opt/performance-settings/
+----
+
+O conteúdo de `custom/files/performance-settings.sh` é um script que pode ser usado para configurar o sistema para ajuste de desempenho e pode ser baixado do seguinte {link-telco-cloud-performance-settings}[link].
+
+[#add-custom-script-sriov2]
+==== Script SR-IOV
+
+O script opcional a seguir (`custom/scripts/04-sriov.sh`) pode ser usado para configurar o sistema para SR-IOV:
+
+[,shell]
+----
+#!/bin/bash
+
+# create the folder to extract the artifacts there
+mkdir -p /opt/sriov
+# copy the artifacts
+cp sriov-auto-filler.sh /opt/sriov/sriov-auto-filler.sh
+----
+
+O conteúdo de `custom/files/sriov-auto-filler.sh` é um script que pode ser usado para configurar o sistema para SR-IOV e pode ser baixado do seguinte https://github.com/suse-edge/telco-cloud-examples/blob/{release-tag-telco-cloud}/telco-examples/downstream-clusters/dhcp/eib/custom/files/sriov-auto-filler.sh[link].
+
+[#add-kernel-modules-eib-airgap]
+==== Módulos de kernel necessários para Telco
+Conforme descrito para o cenário sem air-gap na xref:add-kernel-modules-eib[seção].
+
+==== Preparando os artefatos de air-gap
+
+[#preload-private-registry]
+
+As etapas a seguir são necessárias para preparar os artefatos de air-gap usando a imagem do contêiner de lançamento para popular um registro com os artefatos da versão específica.
+Ele lida com a geração de tarball do RKE2, espelhamento OCI de Helm chart e espelhamento de imagem de contêiner em um único comando — não são necessários scripts separados.
+
+. Se o seu registro privado exigir autenticação, crie um arquivo de autenticação de registro com credenciais codificadas em base64:
++
+[,shell]
+----
+$ echo -n "$(echo -n 'myusername' | base64 -w 0):$(echo -n 'mypassword' | base64 -w 0)" > registry-auth.txt
+----
+
+. Se você usar um repositório de charts do Rancher Apps (necessário para charts do Longhorn e de origem Rancher), crie um arquivo de autenticação do Rancher Apps:
++
+[,shell]
+----
+$ echo -n "$(echo -n 'myusername@apps.rancher.io' | base64 -w 0):$(echo -n 'mypassword' | base64 -w 0)" > rancher-apps-auth.txt
+----
+
+. (Opcional) Se você quiser espelhar artefatos do SUSE Private Registry (charts/imagens do Harbor), crie um arquivo de autenticação do SUSE Private Registry usando seu `SCC mirroring credentials` recuperado seguindo a https://documentation.suse.com/cloudnative/suse-private-registry/html/private-registry/pr-introduction.html[documentação do SUSE Private Registry]:
++
+[,shell]
+----
+$ echo -n "$(echo -n 'SUSE_REGISTRY_USERNAME' | base64 -w 0):$(echo -n 'SUSE_REGISTRY_PASSWORD' | base64 -w 0)" > suse-private-registry-auth.txt
+----
+
+. Execute o comando `mirror` usando a imagem do contêiner de release para popular seu registro privado com todos os artefatos necessários para uma versão de release específica (imagens RKE2, imagens OCI de Helm chart e imagens de contêiner).
+Coloque quaisquer arquivos de autenticação e certificados no diretório atual para que fiquem acessíveis dentro do contêiner via bind mount `-v ./:/opt:z`.
++
+Sem o SUSE Private Registry (charts/imagens do Harbor serão ignorados):
++
+[,shell,subs="attributes"]
+----
+$ podman run --rm \
+  -v ./:/opt:z \
+  registry.suse.com/edge/{version-edge-registry}/release-manifest:{version-edge} \
+  mirror \
+  -o /opt/output \
+  -a /opt/registry-auth.txt \
+  -c /opt/cert.pem \
+  -r $\{REGISTRY_IP\}:5000 \
+  --rancher-apps-authfile /opt/rancher-apps-auth.txt \
+  --debug
+----
+onde `$\{REGISTRY_IP\}` é o endereço IP da instância de registro a ser populada.
++
+Com o SUSE Private Registry:
++
+[,shell,subs="attributes"]
+----
+$ podman run --rm \
+  -v ./:/opt:z \
+  registry.suse.com/edge/{version-edge-registry}/release-manifest:{version-edge} \
+  mirror \
+  -o /opt/output \
+  -a /opt/registry-auth.txt \
+  -c /opt/cert.pem \
+  -r $\{MGMT_CLUSTER_REGISTRY_IP\}:5000 \
+  --rancher-apps-authfile /opt/rancher-apps-auth.txt \
+  --suse-private-registry-authfile /opt/suse-private-registry-auth.txt \
+  --debug
+----
+onde `$\{MGMT_CLUSTER_REGISTRY_IP\}` é o endereço IP estático reservado fornecido à instância do SUSE Private Registry implantada no cluster de Gerenciamento, conforme descrito na xref:mgmt-cluster-kubernetes-folder-airgap[seção] anterior.
+
+. Copie os artefatos RKE2 gerados do diretório de saída (`/opt/output`no exemplo) para a pasta `custom/files` para que o EIB os consuma em clusters downstream durante o processo de build:
++
+[,shell]
+----
+$ cp output/rke2-images*.tar.zst custom/files/
+$ cp output/rke2.linux-amd64.tar.gz custom/files/
+$ cp output/sha256sum-amd64.txt custom/files/
+----
+
+[NOTE]
+====
+A imagem do contêiner de release já inclui `/release_manifest.yaml` e `/release_images.yaml` internamente, portanto, não é necessário fornecer arquivos de manifesto adicionais.
+Para referência completa de flags e uso avançado, consulte a https://github.com/suse-edge/seactl/blob/main/README.md[documentação do seactl].
+====
+
+
+=== Criação de imagem para cenários de air gap
+
+Assim que a estrutura de diretórios estiver preparada seguindo as seções anteriores, execute o seguinte comando para criar a imagem:
+
+[,shell,subs="attributes"]
+----
+podman run --rm --privileged -it -v $PWD:/eib \
+ registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+ build --definition-file downstream-cluster-airgap-config.yaml
+----
+
+Isso cria o arquivo de imagem ISO de saída chamado `eibimage-output-telco.raw`, com base na definição descrita acima.
+
+A imagem de saída deve então ser disponibilizada via um servidor web, seja o contêiner media-server habilitado via a <<metal3-media-server,Documentação do Cluster de Gerenciamento>> ou algum outro servidor acessível localmente.  Nos exemplos abaixo, nos referimos a este servidor como `imagecache.local:8080`.
+
+
+[#single-node]
+== Provisionamento de cluster downstream com provisionamento de rede direcionado (nó único)
+
+Esta seção descreve o fluxo de trabalho usado para automatizar o provisionamento de um cluster downstream de nó único usando provisionamento de rede direcionado.
+Esta é a maneira mais simples de automatizar o provisionamento de um cluster downstream.
+
+*Requisitos*
+
+- A imagem gerada usando `EIB`, conforme descrito na xref:eib-edge-image-connected[seção anterior], com a configuração mínima para configurar o cluster downstream deve estar localizada no cluster de gerenciamento exatamente no caminho que você configurou na xref:metal3-media-server[seção].
+- O servidor de gerenciamento foi criado e está disponível para ser usado nas seções a seguir. Para obter mais informações, consulte a seção de Cluster de Gerenciamento <<atip-management-cluster>>.
+
+*Fluxo de trabalho*
+
+O diagrama a seguir mostra o fluxo de trabalho usado para automatizar o provisionamento de um cluster downstream de nó único usando provisionamento de rede direcionado:
+
+image::atip-automated-singlenode1.png[scaledwidth=100%]
+
+Existem duas etapas diferentes para automatizar o provisionamento de um cluster downstream de nó único usando provisionamento de rede direcionado:
+
+1. Registre o host bare-metal para torná-lo disponível para o processo de provisionamento.
+2. Provisione o host bare-metal para instalar e configurar o sistema operacional e o cluster Kubernetes.
+
+[#enroll-bare-metal-host]
+*Registre o host bare-metal*
+
+A primeira etapa é registrar o novo host bare-metal no cluster de gerenciamento para torná-lo disponível para ser provisionado.
+Para fazer isso, o arquivo a seguir (`bmh-example.yaml`) deve ser criado no cluster de gerenciamento, para especificar as credenciais `BMC` a serem usadas e o objeto `BaremetalHost` a ser inscrito:
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: example-demo-credentials
+type: Opaque
+data:
+  username: ${BMC_USERNAME}
+  password: ${BMC_PASSWORD}
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: example-demo
+  labels:
+    cluster-role: control-plane
+spec:
+  architecture: x86_64
+  online: true
+  bootMACAddress: ${BMC_MAC}
+  rootDeviceHints:
+    deviceName: /dev/nvme0n1
+  bmc:
+    address: ${BMC_ADDRESS}
+    disableCertificateVerification: true
+    credentialsName: example-demo-credentials
+----
+em que:
+
+- `$\{BMC_USERNAME\}` — O nome de usuário para o `BMC` do novo host bare-metal.
+- `$\{BMC_PASSWORD\}` — A senha para o `BMC` do novo host bare-metal.
+- `$\{BMC_MAC\}` — O endereço `MAC` do novo host bare-metal a ser usado.
+- `$\{BMC_ADDRESS\}` — O `URL` para o host bare-metal `BMC` (por exemplo, `redfish-virtualmedia://192.168.200.75/redfish/v1/Systems/1/`). Para saber mais sobre as diferentes opções disponíveis dependendo do seu provedor de hardware, verifique o seguinte https://github.com/metal3-io/baremetal-operator/blob/main/docs/api.md[link].
+
+[NOTE]
+====
+* A arquitetura deve ser `x86_64` ou `aarch64`, dependendo da arquitetura do host bare-metal a ser inscrito.
+* Se nenhuma configuração de rede para o host tiver sido especificada, seja no momento da criação da imagem ou por meio da definição `BareMetalHost`, um mecanismo de autoconfiguração (DHCP, DHCPv6, SLAAC) será usado. Para mais detalhes ou configurações complexas, verifique o xref:advanced-network-configuration[].
+====
+
+Assim que o arquivo for criado, o comando a seguir deve ser executado no cluster de gerenciamento para iniciar a inscrição do novo host bare-metal no cluster de gerenciamento:
+
+[,shell]
+----
+$ kubectl apply -f bmh-example.yaml
+----
+
+O novo objeto de host bare-metal será inscrito, alterando seu estado de registering para inspecting e available. As alterações podem ser verificadas usando o seguinte comando:
+
+[,shell]
+----
+$ kubectl get bmh
+----
+
+[NOTE]
+====
+O objeto `BaremetalHost` fica no estado `registering` até que as credenciais `BMC` sejam validadas. Assim que as credenciais forem validadas, o objeto `BaremetalHost` altera seu estado para `inspecting`, e esta etapa pode levar algum tempo dependendo do hardware (até 20 minutos). Durante a fase de inspeção, as informações de hardware são recuperadas e o objeto Kubernetes é atualizado. Verifique as informações usando o seguinte comando: `kubectl get bmh -o yaml`.
+====
+
+[#single-node-provision]
+*Etapa de provisionamento*
+
+Uma vez que o host bare-metal esteja inscrito e disponível, a próxima etapa é provisionar o host bare-metal para instalar e configurar o sistema operacional e o cluster Kubernetes.
+Para fazer isso, o seguinte arquivo (`capi-provisioning-example.yaml`) deve ser criado no cluster de gerenciamento com as seguintes informações (o `capi-provisioning-example.yaml` pode ser gerado unindo os seguintes blocos).
+
+[NOTE]
+====
+Apenas valores entre `$\{...\}` devem ser substituídos pelos valores reais.
+====
+
+O bloco a seguir é a definição do cluster, onde a rede pode ser configurada usando os blocos `pods` e `services`. Além disso, ele contém as referências aos objetos do plano de controle e da infraestrutura (usando o provedor `Metal^3^`) a serem usados.
+
+[,yaml]
+----
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  name: single-node-cluster
+  namespace: default
+  labels:
+    cluster-api.cattle.io/rancher-auto-import: "true"
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks:
+        - 192.168.0.0/18
+        - fd00:bad:cafe::/48
+    services:
+      cidrBlocks:
+        - 10.96.0.0/12
+        - fd00:bad:bad:cafe::/112
+  controlPlaneRef:
+    apiGroup: controlplane.cluster.x-k8s.io
+    kind: RKE2ControlPlane
+    name: single-node-cluster
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3Cluster
+    name: single-node-cluster
+----
+
+[NOTE]
+====
+* Implantações de pilha única e pilha dupla são possíveis; remova os CIDRs IPv6 da definição acima para um cluster apenas IPv4.
+* Implantações de pilha única IPv6 estão em status de prévia técnica e ainda não são oficialmente suportadas.
+* Adicionar o rótulo `cluster-api.cattle.io/rancher-auto-import: "true"` aos objetos `cluster.x-k8s.io` importará o cluster para o Rancher (criando um objeto `clusters.management.cattle.io` correspondente).
+Consulte a https://documentation.suse.com/cloudnative/cluster-api/latest/en/tutorials/first-cluster.html#_mark_namespace_for_auto_import[documentação da API de Cluster] para obter mais informações.
+====
+
+O objeto `Metal3Cluster` especifica o endpoint do plano de controle (substituindo o `$\{DOWNSTREAM_CONTROL_PLANE_IPV4\}`) a ser configurado e o `noCloudProvider` porque um nó bare-metal é usado.
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3Cluster
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  controlPlaneEndpoint:
+    host: ${DOWNSTREAM_CONTROL_PLANE_IPV4}
+    port: 6443
+  noCloudProvider: true
+----
+
+O objeto `RKE2ControlPlane` especifica a configuração do plano de controle a ser usada e o objeto `Metal3MachineTemplate` especifica a imagem do plano de controle a ser usada.
+Além disso, ele contém as informações sobre o número de réplicas a serem usadas (neste caso, uma) e o plug-in `CNI` a ser usado (neste caso, `Cilium`).
+O bloco agentConfig contém o formato `Ignition` a ser usado e o `additionalUserData` a ser usado para configurar o nó `RKE2` com informações como um systemd chamado `rke2-preinstall.service` para substituir automaticamente o `BAREMETALHOST_UUID` e `node-name` durante o processo de provisionamento usando as informações do Ironic.
+Para habilitar o multus com cilium, um arquivo é criado no diretório de manifestos do servidor `rke2` chamado `rke2-cilium-config.yaml` com a configuração a ser usada.
+O último bloco de informações contém a versão do Kubernetes a ser usada. `$\{RKE2_VERSION\}` é a versão do `RKE2` a ser usada substituindo este valor (por exemplo, `{version-kubernetes-rke2}`).
+
+[,yaml,subs="attributes"]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+  annotations: {
+    rke2.controlplane.cluster.x-k8s.io/load-balancer-exclusion: "true"
+  }
+spec:
+  machineTemplate:
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  replicas: 1
+  version: $\{RKE2_VERSION}
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  serverConfig:
+    cni: cilium
+  agentConfig:
+    format: ignition
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+          - name: rke2-preinstall.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-preinstall
+              Wants=network-online.target
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+              ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStartPost=/bin/sh -c "umount /mnt"
+              [Install]
+              WantedBy=multi-user.target
+          # rke2-traefik-deployment.service unit to be removed once "traefik" being the default ingress controller (starting with RKE2 v1.36)
+          - name: rke2-traefik-deployment.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-traefik-deployment
+              Wants=rke2-preinstall.service
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo \"ingress-controller: traefik\" >> /etc/rancher/rke2/config.yaml"
+              [Install]
+              WantedBy=multi-user.target
+        storage:
+          directories:
+          - path: /var/lib/rancher/rke2/server/manifests
+            overwrite: true
+          files:
+          # https://docs.rke2.io/networking/multus_sriov#using-multus-with-cilium
+          - path: /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChartConfig
+                metadata:
+                  name: rke2-cilium
+                  namespace: kube-system
+                spec:
+                  valuesContent: |-
+                    cni:
+                      exclusive: false
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
+          - path: /var/lib/rancher/rke2/server/manifests/rke2-traefik-config.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChartConfig
+                metadata:
+                  name: rke2-traefik
+                  namespace: kube-system
+                spec:
+                  valuesContent: |-
+                    ingressClass:
+                      isDefaultClass: true
+                    ports:
+                      web:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 80
+                      websecure:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 443
+                    service:
+                      enabled: true
+                      type: LoadBalancer
+                      spec:
+                        externalTrafficPolicy: Local
+                        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
+    kubelet:
+      extraArgs:
+      - provider-id=metal3://BAREMETALHOST_UUID
+    nodeName: "localhost.localdomain"
+----
+
+O objeto `Metal3MachineTemplate` especifica as seguintes informações:
+
+- O `dataTemplate` a ser usado como referência para o modelo.
+- O `hostSelector` a ser usado correspondendo ao rótulo criado durante o processo de inscrição.
+- O `image` a ser usado como referência para a imagem gerada usando `EIB` na xref:eib-edge-image-connected[seção] anterior, e o `checksum` e `checksumType` a serem usados para validar a imagem.
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: single-node-cluster-controlplane
+  namespace: default
+spec:
+  template:
+    spec:
+      dataTemplate:
+        name: single-node-cluster-controlplane-template
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+      image:
+        checksum: http://imagecache.local:8080/eibimage-output-telco.raw.sha256
+        checksumType: sha256
+        format: raw
+        url: http://imagecache.local:8080/eibimage-output-telco.raw
+----
+
+O objeto `Metal3DataTemplate` especifica o `metaData` para o cluster downstream.
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3DataTemplate
+metadata:
+  name: single-node-cluster-controlplane-template
+  namespace: default
+spec:
+  clusterName: single-node-cluster
+  metaData:
+    objectNames:
+    - key: name
+      object: machine
+    - key: local-hostname
+      object: machine
+    - key: local_hostname
+      object: machine
+----
+
+Uma vez que o arquivo seja criado juntando os blocos anteriores, o seguinte comando deve ser executado no cluster de gerenciamento para iniciar o provisionamento do novo host bare-metal:
+
+[,shell]
+----
+$ kubectl apply -f capi-provisioning-example.yaml
+----
+
+
+[#multi-node]
+== Provisionamento de cluster downstream com provisionamento de rede direcionado (multi-nó)
+
+Esta seção descreve o fluxo de trabalho usado para automatizar o provisionamento de um cluster downstream multi-nó usando provisionamento de rede direcionado e `MetalLB` como estratégia de balanceador de carga.
+Esta é a maneira mais simples de automatizar o provisionamento de um cluster downstream. O diagrama a seguir mostra o fluxo de trabalho usado para automatizar o provisionamento de um cluster downstream multi-nó usando provisionamento de rede direcionado e `MetalLB`.
+
+
+
+*Requisitos*
+
+- A imagem gerada usando `EIB`, conforme descrito na xref:eib-edge-image-connected[seção anterior], com a configuração mínima para configurar o cluster downstream deve estar localizada no cluster de gerenciamento exatamente no caminho que você configurou nesta xref:metal3-media-server[seção].
+- O servidor de gerenciamento criado e disponível para ser usado nas seções a seguir. Para mais informações, consulte a seção Cluster de Gerenciamento: <<atip-management-cluster>>.
+
+*Fluxo de trabalho*
+
+O diagrama a seguir mostra o fluxo de trabalho usado para automatizar o provisionamento de um cluster downstream multi-nó usando provisionamento de rede direcionado:
+
+image::atip-automate-multinode1.png[scaledwidth=100%]
+
+1. Registre os três hosts bare-metal para torná-los disponíveis para o processo de provisionamento.
+2. Provisione os três hosts bare-metal para instalar e configurar o sistema operacional e o cluster Kubernetes usando `MetalLB`.
+
+*Registre os hosts bare-metal*
+
+O primeiro passo é inscrever os três hosts bare-metal no cluster de gerenciamento para torná-los disponíveis para serem provisionados.
+Para fazer isso, os seguintes arquivos (`bmh-example-node1.yaml`, `bmh-example-node2.yaml` e `bmh-example-node3.yaml`) devem ser criados no cluster de gerenciamento, para especificar as credenciais `BMC` a serem usadas e o objeto `BaremetalHost` a ser inscrito no cluster de gerenciamento.
+
+[NOTE]
+====
+* Apenas os valores entre `$\{...\}` devem ser substituídos pelos valores reais.
+* Nós o guiaremos pelo processo para apenas um host. As mesmas etapas se aplicam aos outros dois nós.
+====
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: node1-example-credentials
+type: Opaque
+data:
+  username: ${BMC_NODE1_USERNAME}
+  password: ${BMC_NODE1_PASSWORD}
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: node1-example
+  labels:
+    cluster-role: control-plane
+spec:
+  architecture: x86_64
+  online: true
+  bootMACAddress: ${BMC_NODE1_MAC}
+  bmc:
+    address: ${BMC_NODE1_ADDRESS}
+    disableCertificateVerification: true
+    credentialsName: node1-example-credentials
+----
+
+Onde:
+
+- `$\{BMC_NODE1_USERNAME\}` — O nome de usuário para o BMC do primeiro host bare-metal.
+- `$\{BMC_NODE1_PASSWORD\}` — A senha para o BMC do primeiro host bare-metal.
+- `$\{BMC_NODE1_MAC\}` — O endereço MAC do primeiro host bare-metal a ser usado.
+- `$\{BMC_NODE1_ADDRESS\}` — A URL para o BMC do primeiro host bare-metal (por exemplo, `redfish-virtualmedia://192.168.200.75/redfish/v1/Systems/1/`). A parte do host da URL pode ser um endereço IP (v4 ou v6) ou um nome de domínio, onde a infraestrutura existente permita. Para saber mais sobre as diferentes opções disponíveis dependendo do seu provedor de hardware, verifique o seguinte https://github.com/metal3-io/baremetal-operator/blob/main/docs/api.md[link].
+
+[NOTE]
+====
+* Se nenhuma configuração de rede para o host tiver sido especificada, seja no momento da criação da imagem ou por meio da definição `BareMetalHost`, um mecanismo de autoconfiguração (DHCP, DHCPv6, SLAAC) será usado. Para mais detalhes ou configurações complexas, verifique o xref:advanced-network-configuration[].
+* Clusters IPv6 de pilha única estão em status de prévia técnica e ainda não são oficialmente suportados.
+* A arquitetura deve ser `x86_64` ou `aarch64`, dependendo da arquitetura do host bare-metal a ser inscrito.
+* Todos os servidores modernos vêm com um BMC capaz de dual-stack; no entanto, o suporte a IPv6 (e possivelmente a opção de usar nomes de host para a capacidade VirtualMedia) deve ser verificado antes do uso em produção em um ambiente dual-stack.
+====
+
+Uma vez que o arquivo seja criado, o seguinte comando deve ser executado no cluster de gerenciamento para começar a inscrever os hosts bare-metal no cluster de gerenciamento:
+
+[,shell]
+----
+$ kubectl apply -f bmh-example-node1.yaml
+$ kubectl apply -f bmh-example-node2.yaml
+$ kubectl apply -f bmh-example-node3.yaml
+----
+
+Os novos objetos de host bare-metal são inscritos, alterando seu estado de registering para inspecting e available. As alterações podem ser verificadas usando o seguinte comando:
+
+[,shell]
+----
+$ kubectl get bmh -o wide
+----
+
+[NOTE]
+====
+O objeto `BaremetalHost` fica no estado `registering` até que as credenciais `BMC` sejam validadas. Assim que as credenciais forem validadas, o objeto `BaremetalHost` altera seu estado para `inspecting`, e esta etapa pode levar algum tempo dependendo do hardware (até 20 minutos). Durante a fase de inspeção, as informações de hardware são recuperadas e o objeto Kubernetes é atualizado. Verifique as informações usando o seguinte comando: `kubectl get bmh -o yaml`.
+====
+
+*Etapa de provisionamento*
+
+Uma vez que os três hosts bare-metal estejam inscritos e disponíveis, o próximo passo é provisionar os hosts bare-metal para instalar e configurar o sistema operacional e o cluster Kubernetes, criando um balanceador de carga para gerenciá-los.
+Para fazer isso, o seguinte arquivo (`capi-provisioning-example.yaml`) deve ser criado no cluster de gerenciamento com as seguintes informações (o `capi-provisioning-example.yaml pode ser gerado unindo os seguintes blocos).
+
+[NOTE]
+====
+- Apenas valores entre `$\{...\}` devem ser substituídos pelos valores reais.
+- O endereço `VIP` é um endereço IP reservado que não é atribuído a nenhum nó e é usado para configurar o balanceador de carga. Em um cluster dual-stack, tanto um IPv4 quanto um IPv6 podem ser especificados, mas nos exemplos a seguir será dada prioridade ao endereço IPv4.
+====
+
+Abaixo está a definição do cluster, onde a rede do cluster pode ser configurada usando os blocos `pods` e `services`. Além disso, ele contém as referências aos objetos do plano de controle e da infraestrutura (usando o provedor `Metal^3^`) a serem usados.
+
+[,yaml]
+----
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  name: multinode-cluster
+  namespace: default
+  labels:
+    cluster-api.cattle.io/rancher-auto-import: "true"
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks:
+        - 192.168.0.0/18
+        - fd00:1234:4321::/48
+    services:
+      cidrBlocks:
+        - 10.96.0.0/12
+        - fd00:5678:8765:4321::/112
+  controlPlaneRef:
+    apiGroup: controlplane.cluster.x-k8s.io
+    kind: RKE2ControlPlane
+    name: multinode-cluster
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3Cluster
+    name: multinode-cluster
+----
+
+[NOTE]
+====
+* Ambas as implantações single-stack e dual-stack são possíveis. Remova os CIDRs IPv6 e os endereços VIP IPv6 (nas seções subsequentes) para um cluster apenas IPv4.
+* Adicionar o rótulo `cluster-api.cattle.io/rancher-auto-import: "true"` aos objetos `cluster.x-k8s.io` importará o cluster para o Rancher (criando um objeto `clusters.management.cattle.io` correspondente).
+Consulte a https://documentation.suse.com/cloudnative/cluster-api/latest/en/tutorials/first-cluster.html#_mark_namespace_for_auto_import[documentação da API de Cluster] para obter mais informações.
+====
+
+O objeto `Metal3Cluster` especifica o endpoint do plano de controle que usa o endereço `VIP` já reservado (substituindo o `$\{EDGE_VIP_ADDRESS_IPV4\}`) a ser configurado e o `noCloudProvider` porque os três nós bare-metal são usados.
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3Cluster
+metadata:
+  name: multinode-cluster
+  namespace: default
+spec:
+  controlPlaneEndpoint:
+    host: ${EDGE_VIP_ADDRESS_IPV4}
+    port: 6443
+  noCloudProvider: true
+----
+
+O objeto `RKE2ControlPlane` especifica a configuração do plano de controle a ser usada, e o objeto `Metal3MachineTemplate` especifica a imagem do plano de controle a ser usada.
+
+* Uma anotação de exclusão de balanceador de carga que informa aos balanceadores de carga externos, como o MetalLB, que um nó será drenado durante operações de ciclo de vida, como fazer upgrade de clusters downstream. Para obter os detalhes, consulte: xref:load-balancer-exclusion[]
+* O número de réplicas a ser usado (neste caso, três).
+* O modo de anúncio a ser usado pelo Balanceador de Carga (`address` usa a implementação L2), bem como o endereço a ser usado (substituindo o `$\{EDGE_VIP_ADDRESS\}` pelo endereço `VIP`).
+* O `serverConfig` com o plug-in `CNI` a ser usado (neste caso, `Cilium`), e o(s) endereço(s) e nome(s) `VIP` adicionais a serem listados em `tlsSan`.
+* O bloco agentConfig contém o `Ignition` formato a ser usado e o `additionalUserData` a ser usado para configurar o `RKE2` nó com informações como:
+    ** O serviço systemd chamado `rke2-preinstall.service` para substituir automaticamente o `BAREMETALHOST_UUID` e o `node-name` durante o processo de provisionamento usando as informações do Ironic, além de adicionar o rótulo `metal3.io/uuid` aos objetos Node com o UUID `BareMetalHost`.
+    ** O serviço systemd chamado `rke2-traefik-deployment.service` para definir a opção de configuração server do RKE2 `ingress-controller` no arquivo `/etc/rancher/rke2/config.yaml` como `traefik`.
+    ** O bloco `storage` que contém os Helm charts a serem usados para instalar o `MetalLB` e o `endpoint-copier-operator`.
+    ** O arquivo de recurso personalizado `metalLB` com o `IPaddressPool` e o `L2Advertisement` a serem usados (substituindo `$\{EDGE_VIP_ADDRESS_IPV4\}` pelo endereço `VIP`).
+    ** O arquivo `endpoint-svc.yaml` a ser usado para configurar o serviço `kubernetes-vip` a ser usado pelo `MetalLB` para gerenciar o endereço `VIP`.
+* O último bloco de informações contém a versão do Kubernetes a ser usada. O `$\{RKE2_VERSION\}` é a versão do `RKE2` a ser usada substituindo este valor (por exemplo, `{version-kubernetes-rke2}`).
+
+[,yaml,subs="attributes"]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: RKE2ControlPlane
+metadata:
+  name: multinode-cluster
+  namespace: default
+  annotations: {
+    rke2.controlplane.cluster.x-k8s.io/load-balancer-exclusion: "true"
+  }
+spec:
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3MachineTemplate
+    name: multinode-cluster-controlplane
+  replicas: 3
+  version: $\{RKE2_VERSION}
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  registrationMethod: "control-plane-endpoint"
+  registrationAddress: $\{EDGE_VIP_ADDRESS}
+  serverConfig:
+    cni: cilium
+    tlsSan:
+      - $\{EDGE_VIP_ADDRESS_IPV4}
+      - $\{EDGE_VIP_ADDRESS_IPV6}
+      - https://$\{EDGE_VIP_ADDRESS_IPV4}.sslip.io
+      - https://$\{EDGE_VIP_ADDRESS_IPV6}.sslip.io
+  agentConfig:
+    format: ignition
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+          - name: rke2-preinstall.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-preinstall
+              Wants=network-online.target
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+              ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStartPost=/bin/sh -c "umount /mnt"
+              [Install]
+              WantedBy=multi-user.target
+          # rke2-traefik-deployment.service unit to be removed once "traefik" being the default ingress controller (starting with RKE2 v1.36)
+          - name: rke2-traefik-deployment.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-traefik-deployment
+              Wants=rke2-preinstall.service
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo \"ingress-controller: traefik\" >> /etc/rancher/rke2/config.yaml"
+              [Install]
+              WantedBy=multi-user.target
+        storage:
+          directories:
+          - path: /var/lib/rancher/rke2/server/manifests
+            overwrite: true
+          files:
+            # https://docs.rke2.io/networking/multus_sriov#using-multus-with-cilium
+            - path: /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChartConfig
+                  metadata:
+                    name: rke2-cilium
+                    namespace: kube-system
+                  spec:
+                    valuesContent: |-
+                      cni:
+                        exclusive: false
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /var/lib/rancher/rke2/server/manifests/endpoint-copier-operator.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChart
+                  metadata:
+                    name: endpoint-copier-operator
+                    namespace: kube-system
+                  spec:
+                    chart: oci://registry.suse.com/edge/charts/endpoint-copier-operator
+                    targetNamespace: endpoint-copier-operator
+                    version: {version-endpoint-copier-operator-chart}
+                    createNamespace: true
+            - path: /var/lib/rancher/rke2/server/manifests/metallb.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChart
+                  metadata:
+                    name: metallb
+                    namespace: kube-system
+                  spec:
+                    chart: oci://registry.suse.com/edge/charts/metallb
+                    targetNamespace: metallb-system
+                    version: {version-metallb-chart}
+                    createNamespace: true
+
+            - path: /var/lib/rancher/rke2/server/manifests/metallb-cr.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: metallb.io/v1beta1
+                  kind: IPAddressPool
+                  metadata:
+                    name: kubernetes-vip-ip-pool
+                    namespace: metallb-system
+                  spec:
+                    addresses:
+                      - $\{EDGE_VIP_ADDRESS_IPV4}/32
+                      - $\{EDGE_VIP_ADDRESS_IPV6}/128
+                    serviceAllocation:
+                      priority: 100
+                      namespaces:
+                        - default
+                      serviceSelectors:
+                        - matchExpressions:
+                          - {key: "serviceType", operator: In, values: [kubernetes-vip]}
+                  ---
+                  apiVersion: metallb.io/v1beta1
+                  kind: L2Advertisement
+                  metadata:
+                    name: ip-pool-l2-adv
+                    namespace: metallb-system
+                  spec:
+                    ipAddressPools:
+                      - kubernetes-vip-ip-pool
+            - path: /var/lib/rancher/rke2/server/manifests/endpoint-svc.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: v1
+                  kind: Service
+                  metadata:
+                    name: kubernetes-vip
+                    namespace: default
+                    labels:
+                      serviceType: kubernetes-vip
+                  spec:
+                    ipFamilyPolicy: PreferDualStack
+                    ports:
+                    - name: rke2-api
+                      port: 9345
+                      protocol: TCP
+                      targetPort: 9345
+                    - name: k8s-api
+                      port: 6443
+                      protocol: TCP
+                      targetPort: 6443
+                    type: LoadBalancer
+          - path: /var/lib/rancher/rke2/server/manifests/rke2-traefik-config.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChartConfig
+                metadata:
+                  name: rke2-traefik
+                  namespace: kube-system
+                spec:
+                  valuesContent: |-
+                    ingressClass:
+                      isDefaultClass: true
+                    ports:
+                      web:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 80
+                      websecure:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 443
+                    service:
+                      enabled: true
+                      type: LoadBalancer
+                      spec:
+                        externalTrafficPolicy: Local
+                        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
+    kubelet:
+      extraArgs:
+      - provider-id=metal3://BAREMETALHOST_UUID
+    nodeName: "Node-multinode-cluster"
+----
+
+O objeto `Metal3MachineTemplate` especifica as seguintes informações:
+
+- O `dataTemplate` a ser usado como referência para o modelo.
+- O `hostSelector` a ser usado correspondendo ao rótulo criado durante o processo de registro.
+- O `image` a ser usado como referência para a imagem gerada usando `EIB` na xref:eib-edge-image-connected[seção] anterior, e `checksum` e `checksumType` a serem usados para validar a imagem.
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: multinode-cluster-controlplane
+  namespace: default
+spec:
+  template:
+    spec:
+      dataTemplate:
+        name: multinode-cluster-controlplane-template
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+      image:
+        checksum: http://imagecache.local:8080/eibimage-output-telco.raw.sha256
+        checksumType: sha256
+        format: raw
+        url: http://imagecache.local:8080/eibimage-output-telco.raw
+----
+
+O objeto `Metal3DataTemplate` especifica o `metaData` para o cluster downstream.
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3DataTemplate
+metadata:
+  name: multinode-cluster-controlplane-template
+  namespace: default
+spec:
+  clusterName: multinode-cluster
+  metaData:
+    objectNames:
+    - key: name
+      object: machine
+    - key: local-hostname
+      object: machine
+    - key: local_hostname
+      object: machine
+----
+
+Os arquivos yaml a seguir são um exemplo de configuração para os nós de trabalho.
+
+A `MachineDeployment`:
+
+[,yaml]
+----
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: MachineDeployment
+metadata:
+  labels:
+    cluster.x-k8s.io/cluster-name: multinode-cluster
+    nodepool: nodepool-0
+  name: multinode-cluster-workers
+  namespace: default
+spec:
+  clusterName: multinode-cluster
+  replicas: 3
+  selector:
+    matchLabels:
+      cluster.x-k8s.io/cluster-name: multinode-cluster
+      nodepool: nodepool-0
+  template:
+    metadata:
+      labels:
+        cluster.x-k8s.io/cluster-name: multinode-cluster
+        nodepool: nodepool-0
+    spec:
+      bootstrap:
+        configRef:
+          apiGroup: bootstrap.cluster.x-k8s.io
+          kind: RKE2ConfigTemplate
+          name: multinode-cluster-workers
+      clusterName: multinode-cluster
+      infrastructureRef:
+        apiGroup: infrastructure.cluster.x-k8s.io
+        kind: Metal3MachineTemplate
+        name: multinode-cluster-workers
+      deletion:
+        nodeDrainTimeoutSeconds: 0
+      version: ${RKE2_VERSION}
+----
+
+O objeto RKE2ConfigTemplate especifica o modelo de configuração a ser usado para nós de trabalho de cluster com vários nós. 
+[,yaml]
+----
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: RKE2ConfigTemplate
+metadata:
+  name: multinode-cluster-workers
+  namespace: default
+spec:
+  template:
+    spec:
+      agentConfig:
+        format: ignition
+        kubelet:
+          extraArgs:
+          - provider-id=metal3://BAREMETALHOST_UUID
+        nodeName: "Node-multinode-cluster-worker"
+        additionalUserData:
+          config: |
+            variant: fcos
+            version: 1.4.0
+            systemd:
+              units:
+              - name: rke2-preinstall.service
+                enabled: true
+                contents: |
+                  [Unit]
+                  Description=rke2-preinstall
+                  Wants=network-online.target
+                  Before=rke2-install.service
+                  ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                  [Service]
+                  Type=oneshot
+                  User=root
+                  ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                  ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                  ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                  ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+                  ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                  ExecStartPost=/bin/sh -c "umount /mnt"
+                  [Install]
+                  WantedBy=multi-user.target
+
+----
+
+O objeto `Metal3MachineTemplate` contém referências a `dataTemplate`, `hostSelector` e `image` para os nós de trabalho:
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: multinode-cluster-workers
+  namespace: default
+spec:
+  template:
+    spec:
+      dataTemplate:
+        name: multinode-cluster-workers-template
+      hostSelector:
+        matchLabels:
+          cluster-role: worker
+      image:
+        checksum: http://imagecache.local:8080/eibimage-slmicro-rt-telco.raw.sha256
+        checksumType: sha256
+        format: raw
+        url: http://imagecache.local:8080/eibimage-slmicro-rt-telco.raw
+----
+
+O objeto `Metal3DataTemplate` especifica o `metaData` para o cluster downstream para os nós de trabalho:
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3DataTemplate
+metadata:
+  name: multinode-cluster-workers-template
+  namespace: default
+spec:
+  clusterName: multinode-cluster
+  metaData:
+    objectNames:
+    - key: name
+      object: machine
+    - key: local-hostname
+      object: machine
+    - key: local_hostname
+      object: machine
+----
+
+Assim que o arquivo for criado juntando os blocos anteriores, execute o seguinte comando no cluster de gerenciamento para iniciar o provisionamento dos três novos hosts bare-metal:
+
+[,shell]
+----
+$ kubectl apply -f capi-provisioning-example.yaml
+----
+
+
+[#advanced-network-configuration]
+== Configuração de rede avançada
+
+O fluxo de trabalho de provisionamento de rede direcionado permite configurações de rede específicas em clusters downstream, como IPs estáticos, vínculo, VLANs, IPv6, etc.
+
+As seções a seguir descrevem as etapas adicionais necessárias para habilitar o provisionamento de clusters downstream usando configuração de rede avançada.
+
+*Requisitos*
+
+- A imagem gerada usando `EIB` deve incluir a pasta de rede e o script seguindo <<add-network-eib,esta seção>>.
+
+*Configuração*
+
+Antes de prosseguir, consulte uma das seções a seguir para obter orientação sobre as etapas necessárias para registrar e provisionar o(s) host(s):
+
+* xref:single-node[Provisionamento de cluster downstream com provisionamento de rede direcionado (nó único)]
+* xref:multi-node[Provisionamento de cluster downstream com provisionamento de rede direcionado (nós múltiplos)]
+
+Qualquer configuração de rede avançada deve ser aplicada no momento da inscrição por meio da definição de host `BareMetalHost` e um Secret associado contendo um bloco `nmstate` formatado como `networkData`. O arquivo de exemplo a seguir define um secret contendo o `networkData` necessário que solicita um `IP` estático e `VLAN` para o host do cluster downstream:
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: controlplane-0-networkdata
+type: Opaque
+stringData:
+  networkData: |
+    interfaces:
+    - name: ${CONTROLPLANE_INTERFACE}
+      type: ethernet
+      state: up
+      mtu: 1500
+      identifier: mac-address
+      mac-address: "${CONTROLPLANE_MAC}"
+      ipv4:
+        address:
+        - ip:  "${CONTROLPLANE_IP}"
+          prefix-length: "${CONTROLPLANE_PREFIX}"
+        enabled: true
+        dhcp: false
+    - name: floating
+      type: vlan
+      state: up
+      vlan:
+        base-iface: ${CONTROLPLANE_INTERFACE}
+        id: ${VLAN_ID}
+    dns-resolver:
+      config:
+        server:
+        - "${DNS_SERVER}"
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-address: "${CONTROLPLANE_GATEWAY}"
+        next-hop-interface: ${CONTROLPLANE_INTERFACE}
+----
+
+Como você pode ver, o exemplo mostra a configuração para habilitar a interface com IPs estáticos, bem como a configuração para habilitar a VLAN usando a interface base, uma vez que as seguintes variáveis sejam substituídas pelos valores reais, de acordo com sua infraestrutura:
+
+- `$\{CONTROLPLANE_INTERFACE\}` — A interface do plano de controle a ser usada para o cluster downstream (por exemplo, `eth0`). Incluindo `identifier: mac-address`, a nomenclatura é inspecionada automaticamente pelo endereço MAC, portanto, qualquer nome de interface pode ser usado.
+- `$\{CONTROLPLANE_IP\}` — O endereço IP a ser usado como um endpoint para o cluster downstream (deve corresponder ao endpoint do kubeapi-server).
+- `$\{CONTROLPLANE_PREFIX\}` — O CIDR a ser usado para o cluster downstream (por exemplo, `24` se você quiser `/24` ou `255.255.255.0`).
+- `$\{CONTROLPLANE_GATEWAY\}` — O gateway a ser usado para o cluster downstream (por exemplo, `192.168.100.1`).
+- `$\{CONTROLPLANE_MAC\}` — O endereço MAC a ser usado para a interface do plano de controle (por exemplo, `00:0c:29:3e:3e:3e`).
+- `$\{DNS_SERVER\}` — O DNS a ser usado para o cluster downstream (por exemplo, `192.168.100.2`).
+- `$\{VLAN_ID\}` — O ID da VLAN a ser usado para o cluster downstream (por exemplo, `100`).
+
+Qualquer outra definição compatível com `nmstate` pode ser usada para configurar a rede para o cluster downstream para se adaptar aos requisitos específicos. Por exemplo, é possível especificar uma configuração de pilha dupla estática:
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: controlplane-0-networkdata
+type: Opaque
+stringData:
+  networkData: |
+    interfaces:
+    - name: ${CONTROLPLANE_INTERFACE}
+      type: ethernet
+      state: up
+      mac-address: ${CONTROLPLANE_MAC}
+      ipv4:
+        enabled: true
+        dhcp: false
+        address:
+        - ip: ${CONTROLPLANE_IP_V4}
+          prefix-length: ${CONTROLPLANE_PREFIX_V4}
+      ipv6:
+        enabled: true
+        dhcp: false
+        autoconf: false
+        address:
+        - ip: ${CONTROLPLANE_IP_V6}
+          prefix-length: ${CONTROLPLANE_PREFIX_V6}
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-address: ${CONTROLPLANE_GATEWAY_V4}
+        next-hop-interface: ${CONTROLPLANE_INTERFACE}
+      - destination: ::/0
+        next-hop-address: ${CONTROLPLANE_GATEWAY_V6}
+        next-hop-interface: ${CONTROLPLANE_INTERFACE}
+    dns-resolver:
+      config:
+        server:
+        - ${DNS_SERVER_V4}
+        - ${DNS_SERVER_V6}
+----
+
+Quanto ao exemplo anterior, substitua as seguintes variáveis pelos valores reais, de acordo com sua infraestrutura:
+
+- `$\{CONTROLPLANE_IP_V4\}` - o endereço IPv4 a ser atribuído ao host
+- `$\{CONTROLPLANE_PREFIX_V4\}` - o prefixo IPv4 da rede à qual o IP do host pertence
+- `$\{CONTROLPLANE_IP_V6\}` - o endereço IPv6 a ser atribuído ao host
+- `$\{CONTROLPLANE_PREFIX_V6\}` - o prefixo IPv6 da rede à qual o IP do host pertence
+- `$\{CONTROLPLANE_GATEWAY_V4\}` - o endereço IPv4 do gateway para o tráfego que corresponde à rota padrão
+- `$\{CONTROLPLANE_GATEWAY_V6\}` - o endereço IPv6 do gateway para o tráfego que corresponde à rota padrão
+- `$\{CONTROLPLANE_INTERFACE\}` - o nome da interface para atribuir os endereços e para usar para tráfego de saída que corresponde à rota padrão, tanto para IPv4 quanto para IPv6
+- `$\{DNS_SERVER_V4\}` e/ou `$\{DNS_SERVER_V6\}` - o(s) endereço(s) IP do(s) servidor(es) DNS a ser(em) usado(s), que pode(m) ser especificado(s) como entrada única ou múltipla. Há suporte para endereços IPv4 e/ou IPv6
+
+[NOTE]
+====
+* Você pode consultar o https://github.com/suse-edge/telco-cloud-examples/tree/main/telco-examples/downstream-clusters[repositório de exemplos do SUSE Telco Cloud] para exemplos mais complexos, incluindo configurações somente IPv6 e dual-stack.
+* Implantações de pilha única IPv6 estão em status de prévia técnica e ainda não são oficialmente suportadas.
+====
+
+Por fim, independentemente dos detalhes da configuração de rede, certifique-se de que o segredo seja referenciado anexando `preprovisioningNetworkDataName` ao objeto `BaremetalHost` para registrar o host com sucesso no cluster de gerenciamento.
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: example-demo-credentials
+type: Opaque
+data:
+  username: ${BMC_USERNAME}
+  password: ${BMC_PASSWORD}
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: example-demo
+  labels:
+    cluster-role: control-plane
+spec:
+  architecture: x86_64
+  online: true
+  bootMACAddress: ${BMC_MAC}
+  rootDeviceHints:
+    deviceName: /dev/nvme0n1
+  bmc:
+    address: ${BMC_ADDRESS}
+    disableCertificateVerification: true
+    credentialsName: example-demo-credentials
+  preprovisioningNetworkDataName: controlplane-0-networkdata
+----
+
+[NOTE]
+====
+* Se você precisar implantar um cluster de vários nós, o mesmo processo deve ser feito para cada nó.
+* `Metal3DataTemplate`, `networkData` e `Metal3 IPAM` atualmente não são suportados; apenas a configuração via segredos estáticos é totalmente suportada.
+* A arquitetura deve ser `x86_64` ou `aarch64`, dependendo da arquitetura do host bare-metal a ser registrado.
+====
+
+[#add-telco]
+==  Recursos de Telco (DPDK, SR-IOV, isolamento de CPU, huge pages, NUMA, etc.)
+
+O fluxo de trabalho de provisionamento de rede direcionado permite automatizar os recursos de Telco a serem usados nos clusters downstream para executar cargas de trabalho de Telco sobre esses servidores.
+
+*Requisitos*
+
+- A imagem gerada usando `EIB`, conforme descrito na xref:eib-edge-image-connected[seção anterior], deve estar localizada no cluster de gerenciamento exatamente no caminho que você configurou nesta xref:metal3-media-server[seção].
+- A imagem gerada usando `EIB` deve incluir os pacotes específicos de Telco conforme xref:add-telco-feature-eib[esta seção].
+- O servidor de gerenciamento foi criado e está disponível para ser usado nas seções a seguir. Para mais informações, consulte a seção Cluster de Gerenciamento: <<atip-management-cluster>>.
+
+*Configuração*
+
+Use as duas seções a seguir como base para registrar e provisionar os hosts:
+
+* xref:single-node[Provisionamento de cluster downstream com provisionamento de rede direcionado (nó único)]
+* xref:multi-node[Provisionamento de cluster downstream com provisionamento de rede direcionado (nós múltiplos)]
+
+Os recursos de Telco abordados nesta seção são os seguintes:
+
+* DPDK e criação de VFs
+* SR-IOV e alocação de VFs para serem usadas pelas cargas de trabalho
+* Isolamento de CPU e ajuste de desempenho
+* Configuração de páginas enormes
+* Ajuste de parâmetros do kernel
+
+[NOTE]
+====
+Para mais informações sobre os recursos de Telco, consulte <<atip-features>>.
+====
+
+As alterações necessárias para habilitar os recursos de Telco mostrados acima estão todas dentro do bloco `RKE2ControlPlane` no arquivo de provisionamento `capi-provisioning-example.yaml`. O restante das informações dentro do arquivo `capi-provisioning-example.yaml` é igual às informações fornecidas na xref:single-node-provision[seção de provisionamento].
+
+Para tornar o processo claro, as alterações necessárias nesse bloco (`RKE2ControlPlane`) para habilitar os recursos de Telco são as seguintes:
+
+* O arquivo de ignição `/var/lib/rancher/rke2/server/manifests/configmap-sriov-custom-auto.yaml` a ser usado para definir as interfaces, drivers e o número de `VFs` a serem criados e expostos às cargas de trabalho.
+    ** Os valores dentro do config map `sriov-custom-auto-config` são os únicos valores a serem substituídos por valores reais.
+        *** `$\{RESOURCE_NAME1\}` — O nome do recurso a ser usado para a primeira interface `PF` (por exemplo, `sriov-resource-du1`). Ele é adicionado ao prefixo `rancher.io` para ser usado como um rótulo a ser utilizado pelas cargas de trabalho (por exemplo, `rancher.io/sriov-resource-du1`).
+        *** `$\{SRIOV-NIC-NAME1\}` — O nome da primeira interface `PF` a ser usada (por exemplo, `eth0`).
+        *** `$\{PF_NAME1\}` — O nome da primeira função física `PF` a ser usada. Gere filtros mais complexos usando isto (por exemplo, `eth0#2-5`).
+        *** `$\{DRIVER_NAME1\}` — O nome do driver a ser usado para a primeira interface `VF` (por exemplo, `vfio-pci`).
+        *** `$\{NUM_VFS1\}` — O número de `VFs` a serem criados para a primeira interface `PF` (por exemplo, `8`).
+* O `/var/sriov-auto-filler.sh` a ser usado como um tradutor entre o config map de alto nível `sriov-custom-auto-config` e o `sriovnetworknodepolicy` que contém as informações de hardware de baixo nível. Este script foi criado para abstrair o usuário da complexidade de saber as informações de hardware com antecedência. Nenhuma alteração é necessária neste arquivo, mas ele deve estar presente se precisarmos habilitar `sr-iov` e criar `VFs`.
+* Os argumentos do kernel a serem usados para habilitar os seguintes recursos:
+
+|===
+| Parâmetro | Valor | Descrição
+| isolcpus| domain,nohz,managed_irq,1-30,33-62| Isole os núcleos 1-30 e 33-62.
+| skew_tick| 1 | Permite que o kernel desvie as interrupções do temporizador entre as CPUs isoladas.
+| nohz| on | Permite que o kernel execute o tick do temporizador em uma única CPU quando o sistema estiver ocioso.
+| nohz_full| 1-30,33-62 | o parâmetro de inicialização do kernel é a interface principal atual para configurar dynticks completos junto com o Isolamento de CPU.
+| rcu_nocbs| 1-30,33-62 | Permite que o kernel execute os callbacks RCU em uma única CPU quando o sistema estiver ocioso.
+| irqaffinity| 0,31,32,63 | Permite que o kernel execute as interrupções em uma única CPU quando o sistema estiver ocioso.
+| inativo| poll |  Minimiza a latência de saída do estado ocioso.
+| iommu       | pt         | Permite usar vfio para as interfaces dpdk.
+| intel_iommu | on         | Habilita o uso de vfio para VFs.
+| hugepagesz | 1G    | Permite definir o tamanho das huge pages para 1 G.
+| hugepages | 40    | Número de huge pages definido anteriormente.
+| default_hugepagesz| 1G | Valor padrão para habilitar huge pages.
+| nowatchdog |  | Desabilita o watchdog.
+| nmi_watchdog | 0 | Desabilita o watchdog NMI.
+|===
+
+* Os seguintes serviços do systemd são usados para habilitar o seguinte:
+    ** `rke2-preinstall.service` para substituir automaticamente o `BAREMETALHOST_UUID` e `node-name` durante o processo de provisionamento usando as informações do Ironic.
+    ** `cpu-partitioning.service` para habilitar os núcleos de isolamento do `CPU` (por exemplo, `1-30,33-62`).
+    ** `performance-settings.service` para habilitar o ajuste de desempenho da CPU.
+    ** `sriov-custom-auto-vfs.service` para instalar o Helm chart `sriov`, aguardar até que os recursos personalizados sejam criados e executar o `/var/sriov-auto-filler.sh` para substituir os valores no config map `sriov-custom-auto-config` e criar o `sriovnetworknodepolicy` a ser usado pelas cargas de trabalho.
+
+* O `$\{RKE2_VERSION\}` é a versão do `RKE2` a ser usada substituindo este valor (por exemplo, `{version-kubernetes-rke2}`).
+
+Com todas essas alterações mencionadas, o bloco `RKE2ControlPlane` no `capi-provisioning-example.yaml` ficará da seguinte forma:
+
+[,yaml,subs="attributes"]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  replicas: 1
+  version: $\{RKE2_VERSION}
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  serverConfig:
+    cni: calico
+    cniMultusEnable: true
+  agentConfig:
+    format: ignition
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        storage:
+          files:
+          - path: /var/lib/rancher/rke2/server/manifests/configmap-sriov-custom-auto.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: sriov-custom-auto-config
+                  namespace: kube-system
+                data:
+                  config.json: |
+                    [
+                        {
+                          "resourceName": "$\{RESOURCE_NAME1}",
+                          "interface": "$\{SRIOV-NIC-NAME1}",
+                          "pfname": "$\{PF_NAME1}",
+                          "driver": "$\{DRIVER_NAME1}",
+                          "numVFsToCreate": $\{NUM_VFS1}
+                        },
+                        {
+                          "resourceName": "$\{RESOURCE_NAME2}",
+                          "interface": "$\{SRIOV-NIC-NAME2}",
+                          "pfname": "$\{PF_NAME2}",
+                          "driver": "$\{DRIVER_NAME2}",
+                          "numVFsToCreate": $\{NUM_VFS2}
+                        }
+                    ]
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
+          - path: /var/lib/rancher/rke2/server/manifests/sriov-crd.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChart
+                metadata:
+                  name: sriov-crd
+                  namespace: kube-system
+                spec:
+                  chart: oci://registry.suse.com/edge/charts/sriov-crd
+                  targetNamespace: sriov-network-operator
+                  version: {version-sriov-crd-chart}
+                  createNamespace: true
+          - path: /var/lib/rancher/rke2/server/manifests/sriov-network-operator.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChart
+                metadata:
+                  name: sriov-network-operator
+                  namespace: kube-system
+                spec:
+                  chart: oci://registry.suse.com/edge/charts/sriov-network-operator
+                  targetNamespace: sriov-network-operator
+                  version: {version-sriov-network-operator-chart}
+                  createNamespace: true
+        kernel_arguments:
+          should_exist:
+            - intel_iommu=on
+            - iommu=pt
+            - idle=poll
+            - mce=off
+            - hugepagesz=1G hugepages=40
+            - hugepagesz=2M hugepages=0
+            - default_hugepagesz=1G
+            - irqaffinity=$\{NON-ISOLATED_CPU_CORES}
+            - isolcpus=domain,nohz,managed_irq,$\{ISOLATED_CPU_CORES}
+            - nohz_full=$\{ISOLATED_CPU_CORES}
+            - rcu_nocbs=$\{ISOLATED_CPU_CORES}
+            - rcu_nocb_poll
+            - nosoftlockup
+            - nowatchdog
+            - nohz=on
+            - nmi_watchdog=0
+            - skew_tick=1
+            - quiet
+        systemd:
+          units:
+          - name: rke2-preinstall.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-preinstall
+              Wants=network-online.target
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+              ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStartPost=/bin/sh -c "umount /mnt"
+              [Install]
+              WantedBy=multi-user.target
+          # rke2-traefik-deployment.service unit to be removed once "traefik" being the default ingress controller (starting with RKE2 v1.36)
+          - name: rke2-traefik-deployment.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-traefik-deployment
+              Wants=rke2-preinstall.service
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo \"ingress-controller: traefik\" >> /etc/rancher/rke2/config.yaml"
+              [Install]
+              WantedBy=multi-user.target
+          - name: cpu-partitioning.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=cpu-partitioning
+              Wants=network-online.target
+              After=network.target network-online.target
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo isolated_cores=$\{ISOLATED_CPU_CORES} > /etc/tuned/cpu-partitioning-variables.conf"
+              ExecStartPost=/bin/sh -c "tuned-adm profile cpu-partitioning"
+              ExecStartPost=/bin/sh -c "systemctl enable tuned.service"
+              [Install]
+              WantedBy=multi-user.target
+          - name: performance-settings.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=performance-settings
+              Wants=network-online.target
+              After=network.target network-online.target cpu-partitioning.service
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "/opt/performance-settings/performance-settings.sh"
+              [Install]
+              WantedBy=multi-user.target
+          - name: sriov-custom-auto-vfs.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=SRIOV Custom Auto VF Creation
+              Wants=network-online.target  rke2-server.target
+              After=network.target network-online.target rke2-server.target
+              [Service]
+              User=root
+              Type=forking
+              TimeoutStartSec=900
+              ExecStart=/bin/sh -c "while ! /var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml wait --for condition=ready nodes --all ; do sleep 2 ; done"
+              ExecStartPost=/bin/sh -c "while [ $(/var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml get sriovnetworknodestates.sriovnetwork.openshift.io --ignore-not-found --no-headers -A | wc -l) -eq 0 ]; do sleep 1; done"
+              ExecStartPost=/bin/sh -c "/opt/sriov/sriov-auto-filler.sh"
+              RemainAfterExit=yes
+              KillMode=process
+              [Install]
+              WantedBy=multi-user.target
+    kubelet:
+      extraArgs:
+      - provider-id=metal3://BAREMETALHOST_UUID
+    nodeName: "localhost.localdomain"
+----
+
+Uma vez que o arquivo seja criado unindo os blocos anteriores, o seguinte comando deve ser executado no cluster de gerenciamento para iniciar o provisionamento do novo cluster downstream usando os recursos de Telco:
+
+[,shell]
+----
+$ kubectl apply -f capi-provisioning-example.yaml
+----
+
+[#atip-private-registry]
+== Registro privado
+
+É possível configurar um registro privado como um espelho para imagens usadas pelas cargas de trabalho.
+
+Para fazer isso, criamos o segredo contendo as informações sobre o registro privado a ser usado pelo cluster downstream.
+
+[,yaml]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: private-registry-cert
+  namespace: default
+data:
+  tls.crt: ${TLS_CERTIFICATE}
+  tls.key: ${TLS_KEY}
+  ca.crt: ${CA_CERTIFICATE}
+type: kubernetes.io/tls
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: private-registry-auth
+  namespace: default
+data:
+  username: ${REGISTRY_USERNAME}
+  password: ${REGISTRY_PASSWORD}
+----
+
+`tls.crt`, `tls.key` e `ca.crt` são os certificados a serem usados para autenticar o registro privado. `username` e `password` são as credenciais a serem usadas para autenticar o registro privado.
+
+[NOTE]
+====
+`tls.crt`, `tls.key`, `ca.crt`, `username` e `password` devem ser codificados no formato base64 antes de serem usados no segredo.
+====
+
+Com todas essas alterações mencionadas, o bloco `RKE2ControlPlane` no `capi-provisioning-example.yaml` ficará da seguinte forma:
+
+[,yaml]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  replicas: 1
+  version: ${RKE2_VERSION}
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  privateRegistriesConfig:
+    mirrors:
+      "registry.example.com":
+        endpoint:
+          - "https://registry.example.com:5000"
+    configs:
+      "registry.example.com":
+        authSecret:
+          apiVersion: v1
+          kind: Secret
+          namespace: default
+          name: private-registry-auth
+        tls:
+          tlsConfigSecret:
+            apiVersion: v1
+            kind: Secret
+            namespace: default
+            name: private-registry-cert
+  serverConfig:
+    cni: calico
+    cniMultusEnable: true
+  agentConfig:
+    format: ignition
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+          - name: rke2-preinstall.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-preinstall
+              Wants=network-online.target
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+              ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStartPost=/bin/sh -c "umount /mnt"
+              [Install]
+              WantedBy=multi-user.target
+          # rke2-traefik-deployment.service unit to be removed once "traefik" being the default ingress controller (starting with RKE2 v1.36)
+          - name: rke2-traefik-deployment.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-traefik-deployment
+              Wants=rke2-preinstall.service
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo \"ingress-controller: traefik\" >> /etc/rancher/rke2/config.yaml"
+              [Install]
+              WantedBy=multi-user.target
+    kubelet:
+      extraArgs:
+      - provider-id=metal3://BAREMETALHOST_UUID
+    nodeName: "localhost.localdomain"
+----
+
+Onde `registry.example.com` é o nome de exemplo do registro privado a ser usado pelo cluster downstream, e ele deve ser substituído pelos valores reais.
+
+
+[#airgap-deployment]
+== Provisionamento de cluster downstream em cenários air-gapped
+
+O fluxo de trabalho de provisionamento de rede direcionado permite automatizar o provisionamento de clusters downstream em cenários air-gapped.
+
+=== Requisitos para cenários air-gapped
+
+. A imagem `raw` gerada usando `EIB` deve incluir as imagens de contêiner específicas (OCI de helm-chart e imagens de contêiner) necessárias para executar o cluster downstream em um cenário air-gapped. Para obter mais informações, consulte xref:eib-edge-image-airgap[esta seção].
+
+. No caso de usar SR-IOV ou qualquer outra carga de trabalho personalizada, as imagens necessárias para executar as cargas de trabalho devem ser pré-carregadas em seu registro privado seguindo a xref:preload-private-registry[seção de pré-carregamento de registro privado].
+
+=== Registrar os hosts bare metal em cenários air-gapped
+
+O processo para registrar os hosts bare metal no cluster de gerenciamento é o mesmo descrito na xref:enroll-bare-metal-host[seção anterior].
+
+=== Provisionar o cluster downstream em cenários air-gapped
+
+Existem algumas alterações importantes necessárias para provisionar o cluster downstream em cenários air-gapped:
+
+. O bloco `RKE2ControlPlane` no arquivo `capi-provisioning-example.yaml` deve incluir a diretiva `spec.agentConfig.airGapped: true`.
+
+. A configuração do registro privado deve ser incluída no bloco `RKE2ControlPlane` no arquivo `capi-provisioning-airgap-example.yaml` seguindo a xref:atip-private-registry[seção de registro privado].
+
+. Se você estiver usando SR-IOV ou qualquer outra configuração `AdditionalUserData` (script de combustão) que exija a instalação do helm-chart, você deve modificar o conteúdo para referenciar o registro privado em vez de usar o registro público.
+
+O exemplo a seguir mostra a configuração de SR-IOV no bloco `AdditionalUserData` no arquivo `capi-provisioning-airgap-example.yaml` com as modificações necessárias para referenciar o registro privado
+
+- Referências de segredos do Registro Privado
+- Definição de Helm-Chart usando o registro privado em vez das imagens OCI públicas.
+
+[,yaml,subs="attributes"]
+----
+# secret to include the private registry certificates
+apiVersion: v1
+kind: Secret
+metadata:
+  name: private-registry-cert
+  namespace: default
+data:
+  tls.crt: $\{TLS_BASE64_CERT}
+  tls.key: $\{TLS_BASE64_KEY}
+  ca.crt: $\{CA_BASE64_CERT}
+type: kubernetes.io/tls
+---
+# secret to include the private registry auth credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: private-registry-auth
+  namespace: default
+data:
+  username: $\{REGISTRY_USERNAME}
+  password: $\{REGISTRY_PASSWORD}
+---
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  replicas: 1
+  version: $\{RKE2_VERSION}
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  privateRegistriesConfig:       # Private registry configuration to add your own mirror and credentials
+    mirrors:
+      docker.io:
+        endpoint:
+          - "$\{PRIVATE_REGISTRY_URL}"
+        rewrite:
+          "^(.*)$": "mirror/$1"
+      registry.suse.com:
+        endpoint:
+          - "$\{PRIVATE_REGISTRY_URL}"
+        rewrite:
+          "^(.*)$": "mirror/$1"
+      registry.suse.de:
+        endpoint:
+          - "$\{PRIVATE_REGISTRY_URL}"
+        rewrite:
+          "^(.*)$": "mirror/$1"
+      registry.opensuse.org:
+        endpoint:
+          - "$\{PRIVATE_REGISTRY_URL}"
+        rewrite:
+          "^(.*)$": "mirror/$1"
+      registry.rancher.com:
+        endpoint:
+          - "$\{PRIVATE_REGISTRY_URL}"
+        rewrite:
+          "^(.*)$": "mirror/$1"
+    configs:
+      "192.168.100.22:5000":
+        authSecret:
+          apiVersion: v1
+          kind: Secret
+          namespace: default
+          name: private-registry-auth
+        tls:
+          tlsConfigSecret:
+            apiVersion: v1
+            kind: Secret
+            namespace: default
+            name: private-registry-cert
+          insecureSkipVerify: false
+  serverConfig:
+    cni: calico
+    cniMultusEnable: true
+  agentConfig:
+    airGapped: true       # Airgap true to enable airgap mode
+    format: ignition
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        storage:
+          files:
+          - path: /var/lib/rancher/rke2/server/manifests/configmap-sriov-custom-auto.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: sriov-custom-auto-config
+                  namespace: sriov-network-operator
+                data:
+                  config.json: |
+                    [
+                        {
+                          "resourceName": "$\{RESOURCE_NAME1}",
+                          "interface": "$\{SRIOV-NIC-NAME1}",
+                          "pfname": "$\{PF_NAME1}",
+                          "driver": "$\{DRIVER_NAME1}",
+                          "numVFsToCreate": $\{NUM_VFS1}
+                        },
+                        {
+                          "resourceName": "$\{RESOURCE_NAME2}",
+                          "interface": "$\{SRIOV-NIC-NAME2}",
+                          "pfname": "$\{PF_NAME2}",
+                          "driver": "$\{DRIVER_NAME2}",
+                          "numVFsToCreate": $\{NUM_VFS2}
+                        }
+                    ]
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
+          - path: /var/lib/rancher/rke2/server/manifests/sriov.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: v1
+                data:
+                  .dockerconfigjson: $\{REGISTRY_AUTH_DOCKERCONFIGJSON}
+                kind: Secret
+                metadata:
+                  name: privregauth
+                  namespace: kube-system
+                type: kubernetes.io/dockerconfigjson
+                ---
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  namespace: kube-system
+                  name: example-repo-ca
+                data:
+                  ca.crt: |-
+                    -----BEGIN CERTIFICATE-----
+                    $\{CA_BASE64_CERT}
+                    -----END CERTIFICATE-----
+                ---
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChart
+                metadata:
+                  name: sriov-crd
+                  namespace: kube-system
+                spec:
+                  chart: oci://$\{PRIVATE_REGISTRY_URL}/mirror/sriov-crd
+                  dockerRegistrySecret:
+                    name: privregauth
+                  repoCAConfigMap:
+                    name: example-repo-ca
+                  createNamespace: true
+                  set:
+                    global.clusterCIDR: 192.168.0.0/18
+                    global.clusterCIDRv4: 192.168.0.0/18
+                    global.clusterDNS: 10.96.0.10
+                    global.clusterDomain: cluster.local
+                    global.rke2DataDir: /var/lib/rancher/rke2
+                    global.serviceCIDR: 10.96.0.0/12
+                  targetNamespace: sriov-network-operator
+                  version: {version-sriov-crd-chart}
+                ---
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChart
+                metadata:
+                  name: sriov-network-operator
+                  namespace: kube-system
+                spec:
+                  chart: oci://$\{PRIVATE_REGISTRY_URL\}/mirror/sriov-network-operator
+                  dockerRegistrySecret:
+                    name: privregauth
+                  repoCAConfigMap:
+                    name: example-repo-ca
+                  createNamespace: true
+                  set:
+                    global.clusterCIDR: 192.168.0.0/18
+                    global.clusterCIDRv4: 192.168.0.0/18
+                    global.clusterDNS: 10.96.0.10
+                    global.clusterDomain: cluster.local
+                    global.rke2DataDir: /var/lib/rancher/rke2
+                    global.serviceCIDR: 10.96.0.0/12
+                  targetNamespace: sriov-network-operator
+                  version: {version-sriov-network-operator-chart}
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
+        kernel_arguments:
+          should_exist:
+            - intel_iommu=on
+            - iommu=pt
+            - idle=poll
+            - mce=off
+            - hugepagesz=1G hugepages=40
+            - hugepagesz=2M hugepages=0
+            - default_hugepagesz=1G
+            - irqaffinity=$\{NON-ISOLATED_CPU_CORES}
+            - isolcpus=domain,nohz,managed_irq,$\{ISOLATED_CPU_CORES}
+            - nohz_full=$\{ISOLATED_CPU_CORES}
+            - rcu_nocbs=$\{ISOLATED_CPU_CORES}
+            - rcu_nocb_poll
+            - nosoftlockup
+            - nowatchdog
+            - nohz=on
+            - nmi_watchdog=0
+            - skew_tick=1
+            - quiet
+        systemd:
+          units:
+          - name: rke2-preinstall.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-preinstall
+              Wants=network-online.target
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+              ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStartPost=/bin/sh -c "umount /mnt"
+              [Install]
+              WantedBy=multi-user.target
+          # rke2-traefik-deployment.service unit to be removed once "traefik" being the default ingress controller (starting with RKE2 v1.36)
+          - name: rke2-traefik-deployment.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-traefik-deployment
+              Wants=rke2-preinstall.service
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo \"ingress-controller: traefik\" >> /etc/rancher/rke2/config.yaml"
+              [Install]
+              WantedBy=multi-user.target
+          - name: cpu-partitioning.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=cpu-partitioning
+              Wants=network-online.target
+              After=network.target network-online.target
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "echo isolated_cores=$\{ISOLATED_CPU_CORES} > /etc/tuned/cpu-partitioning-variables.conf"
+              ExecStartPost=/bin/sh -c "tuned-adm profile cpu-partitioning"
+              ExecStartPost=/bin/sh -c "systemctl enable tuned.service"
+              [Install]
+              WantedBy=multi-user.target
+          - name: performance-settings.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=performance-settings
+              Wants=network-online.target
+              After=network.target network-online.target cpu-partitioning.service
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStart=/bin/sh -c "/opt/performance-settings/performance-settings.sh"
+              [Install]
+              WantedBy=multi-user.target
+          - name: sriov-custom-auto-vfs.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=SRIOV Custom Auto VF Creation
+              Wants=network-online.target  rke2-server.target
+              After=network.target network-online.target rke2-server.target
+              [Service]
+              User=root
+              Type=forking
+              TimeoutStartSec=1800
+              ExecStart=/bin/sh -c "while ! /var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml wait --for condition=ready nodes --timeout=30m --all ; do sleep 10 ; done"
+              ExecStartPost=/bin/sh -c "/opt/sriov/sriov-auto-filler.sh"
+              RemainAfterExit=yes
+              KillMode=process
+              [Install]
+              WantedBy=multi-user.target
+    kubelet:
+      extraArgs:
+      - provider-id=metal3://BAREMETALHOST_UUID
+    nodeName: "localhost.localdomain"
+----
+

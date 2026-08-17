@@ -1,0 +1,214 @@
+[#integrations-nats]
+= NATS
+:revdate: 2025-04-25
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+https://nats.io/[NATS] 是一种为日益超连接的世界而构建的连接技术。它是一种单一技术，使应用程序能够跨云供应商、本地、边缘、Web 和移动设备的任意组合进行安全通信。NATS 由一系列开源产品组成，这些产品集成紧密，但可以轻松且独立地部署。NATS 在全球范围内被数千家公司使用，涵盖微服务、边缘计算、移动和物联网等用例，并可用于增强或替代传统消息传递。
+
+== 体系结构
+
+NATS 是一种允许应用程序以消息形式交换数据的基础设施。
+
+=== NATS 客户端应用程序
+
+NATS 客户端库可用于允许应用程序在不同实例之间进行发布、订阅、请求和回复。
+这些应用程序通常被称为 `client applications`。
+
+=== NATS 服务基础设施
+
+NATS 服务由一个或多个 NATS 服务器进程提供，这些进程配置为相互连接并提供 NATS 服务基础设施。NATS 服务基础设施可以从运行在终端设备上的单个 NATS 服务器进程扩展到跨越所有主要云提供商和全球所有区域的公共全球超级集群。
+
+=== 简单的消息传递设计
+
+NATS 使应用程序能够通过发送和接收消息轻松进行通信。这些消息通过主题字符串进行寻址和标识，并且不依赖于网络位置。
+数据被编码并封装为消息，由发布者发送。消息由一个或多个订阅者接收、解码和处理。
+
+=== NATS JetStream
+
+NATS 有一个内置的分布式持久化系统，称为 JetStream。
+JetStream 的创建旨在解决当今技术中流处理所面临的问题——复杂性、脆弱性和缺乏可扩展性。JetStream 还解决了发布者和订阅者耦合的问题（订阅者需要在消息发布时处于运行状态才能接收消息）。
+有关 NATS JetStream 的更多信息，请参见 https://docs.nats.io/nats-concepts/jetstream[此处]。
+
+== 安装
+
+=== 在 K3s 上安装 NATS
+
+NATS 专为多种架构而构建，因此可以轻松安装在 <<components-k3s,K3s>> 上。
+
+让我们创建一个 values 文件来覆盖 NATS 的默认值。
+
+[,yaml]
+----
+cat > values.yaml <<EOF
+cluster:
+  # Enable the HA setup of the NATS
+  enabled: true
+  replicas: 3
+
+nats:
+  jetstream:
+    # Enable JetStream
+    enabled: true
+
+    memStorage:
+      enabled: true
+      size: 2Gi
+
+    fileStorage:
+      enabled: true
+      size: 1Gi
+      storageDirectory: /data/
+EOF
+----
+
+现在让我们通过 Helm 安装 NATS：
+
+[,bash]
+----
+helm repo add nats https://nats-io.github.io/k8s/helm/charts/
+helm install nats nats/nats --namespace nats --values values.yaml \
+ --create-namespace
+----
+
+使用上面的 `values.yaml` 文件，以下组件将位于 `nats` 名称空间中：
+
+. 包含三个容器的 NATS Statefulset 高可用版本：NATS 服务器 + 配置重载程序和指标边车容器。
+. NATS box 容器，它附带了一组可用于验证设置的 `NATS` 工具。
+. JetStream 还利用了其键值后端，该后端附带了绑定到 Pod 的 `PVCs`。
+
+==== 测试设置
+
+[,bash]
+----
+kubectl exec -n nats -it deployment/nats-box -- /bin/sh -l
+----
+
+. 为测试主题创建订阅：
++
+[,bash]
+----
+nats sub test &
+----
++
+. 向测试主题发送消息：
++
+[,bash]
+----
+nats pub test hi
+----
+
+==== 清理
+
+[,bash]
+----
+helm -n nats uninstall nats
+rm values.yaml
+----
+
+=== NATS 作为 K3s 的后端
+
+K3s 利用的一个组件是 https://github.com/k3s-io/kine[KINE]，它是一个垫片，支持将 etcd 替换为原本针对关系型数据库的其他存储后端。
+由于 JetStream 提供了键值 API，这使得 NATS 能够作为 K3s 集群的后端。
+
+有一个已经合并的 PR，使 K3s 的内置 NATS 功能变得易于使用，但该更改仍 https://github.com/k3s-io/k3s/issues/7410#issue-1692989394[未包含] 在 K3s 版本中。
+
+因此，需要手动构建 K3s 二进制文件。
+
+//In this tutorial, https://suse-edge.github.io/docs/quickstart/slemicro-utm-aarch64[SUSE Linux Micro on OSX on Apple Silicon (UTM)] VM is used.
+
+//[NOTE]
+//====
+//Run the commands below on the OSX PC.
+//====
+
+==== 构建 K3s
+
+[,bash]
+----
+git clone --depth 1 https://github.com/k3s-io/k3s.git && cd k3s
+----
+
+以下命令在构建标签中添加 `nats`，以启用 K3s 中的 NATS 内置功能：
+
+[,bash]
+----
+sed -i '' 's/TAGS="ctrd/TAGS="nats ctrd/g' scripts/build
+make local
+----
+
+将 <node-ip> 替换为将要启动 K3s 的节点的实际 IP：
+
+[,bash]
+----
+export NODE_IP=<node-ip>
+sudo scp dist/artifacts/k3s-arm64 ${NODE_IP}:/usr/local/bin/k3s
+----
+
+[NOTE]
+====
+本地构建 K3s 需要 buildx Docker CLI 插件。
+如果 `$ make local` 失败，可以 https://github.com/docker/buildx#manual-download[手动安装] 它。
+====
+
+==== 安装 NATS CLI
+
+[,bash]
+----
+TMPDIR=$(mktemp -d)
+nats_version="nats-0.0.35-linux-arm64"
+curl -o "${TMPDIR}/nats.zip" -sfL https://github.com/nats-io/natscli/releases/download/v0.0.35/${nats_version}.zip
+unzip "${TMPDIR}/nats.zip" -d "${TMPDIR}"
+
+sudo scp ${TMPDIR}/${nats_version}/nats ${NODE_IP}:/usr/local/bin/nats
+rm -rf ${TMPDIR}
+----
+
+==== 将 NATS 作为 K3s 的后端运行
+
+让我们在节点上 `ssh`，并使用指向 `nats` 的 `--datastore-endpoint` 标志运行 K3s。
+
+[NOTE]
+====
+下面的命令将 K3s 作为前台进程启动，因此可以轻松跟踪日志以查看是否存在任何问题。
+为了不阻塞当前终端，可以在命令前添加 `&` 标志，将其作为后台进程启动。
+====
+
+[,bash]
+----
+k3s server  --datastore-endpoint=nats://
+----
+
+[NOTE]
+====
+若要使带有 NATS 后端的 K3s 服务器在您的 `slemicro` 虚拟机上永久运行，可以运行下面的脚本，它会创建一个带有所需配置的 `systemd` 服务。
+====
+
+[,bash]
+----
+export INSTALL_K3S_SKIP_START=false
+export INSTALL_K3S_SKIP_DOWNLOAD=true
+
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server \
+ --datastore-endpoint=nats://"  sh -
+----
+
+==== 查错
+
+可以在节点上运行以下命令，以验证流的所有功能是否正常工作：
+
+[,bash]
+----
+nats str report -a
+nats str view -a
+----

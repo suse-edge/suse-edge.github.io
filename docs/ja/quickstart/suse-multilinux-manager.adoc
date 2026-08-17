@@ -1,0 +1,288 @@
+[#quickstart-suma]
+= SUSE Multi-Linux Manager
+:revdate: 2025-05-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+
+:experimental:
+
+[WARNING]
+====
+{product} {version} (5.0.6) に含まれているSUSE Multi-Linux Managerのバージョンは、SUSE Linux Micro 6.2をまだサポートしていません。これは将来の{product} {version}リリースで更新され、サポートされる予定です。
+====
+
+
+SUSE Multi-Linux Managerは{product}に含まれており、エッジデプロイメントのすべてのノードでSUSE Linux Microを基盤となるオペレーティングシステムとして一貫して最新の状態に保つための自動化と制御を提供します。また、エッジノード上のKubernetesおよびKubernetesにデプロイされたアプリケーションの管理にも使用できます。
+
+このクイックスタートガイドは、エッジノードにオペレーティングシステムの更新を提供することを目的として、SUSE Multi-Linux Managerをできるだけ早く使いこなせるようにすることを意図しています。このクイックスタートガイドでは、ストレージのサイジング、ステージング目的での追加ソフトウェアチャネルの作成と管理、または大規模なデプロイメントのためのユーザー、システムグループ、組織の管理といったトピックについては説明していません。本番環境で使用する場合は、包括的な https://documentation.suse.com/suma/5.0/en/suse-manager/index.html[SUSE Multi-Linux Manager Documentation]に目を通すことを強くお勧めします。
+
+//For an introduction into using SUSE Multi-Linux Manager to manage the lifecycle of Kubernetes and your applications, see (((SCALABLE_EDGE_GUIDE))).
+
+SUSE Multi-Linux Managerを効果的に使用するために{product}を準備するには、以下のステップが必要です。
+
+* SUSE Multi-Linux Manager Serverをデプロイおよび設定します。
+* SUSE Linux Microパッケージリポジトリを同期します。
+* システムグループを作成します。
+* 起動キーを作成します。
+* Edge Image Builderを使用して、SUSE Multi-Linux Manager登録用のインストールメディアを準備します。
+
+== SUSE Multi-Linux Manager Serverのデプロイ
+
+SUSE Multi-Linux Manager {version-mlm}のインスタンスが既に実行されている場合は、このステップをスキップできます。
+
+SUSE Multi-Linux Manager Serverは、専用の物理サーバー上、自身のハードウェア上の仮想マシンとして、またはクラウド内で実行できます。SUSE Multi-Linux Server用の事前設定済み仮想マシンイメージが、サポートされているパブリッククラウド向けに提供されています。
+
+このクイックスタートでは、 https://www.suse.com/download/suse-manager/またはSUSE Customer Centerで見つけることができる、{x86-64}用の「qcow2」イメージ`SUSE-Manager-Server.x86_64-5.0.4-Qcow-5.0-2025-04.qcow2`を使用します。このイメージは、KVMなどのハイパーバイザー上で仮想マシンとして機能します。常に最新バージョンのイメージを確認し、新規インストールにはそれを使用してください。
+
+SUSE Multi-Linux Manager Serverは、サポートされている他のハードウェアアーキテクチャにもインストールできます。その場合は、ハードウェアアーキテクチャに一致するイメージを選択してください。
+
+イメージをダウンロードしたら、少なくとも以下の最小ハードウェア仕様を満たす仮想マシンを作成します。
+
+* 16 GB RAM
+* 4つの物理コアまたは仮想コア
+* 少なくとも100GBの追加ブロックデバイス
+
+qcow2イメージを使用する場合、オペレーティングシステムをインストールする必要はありません。イメージをルートパーティションとして直接接続できます。
+
+エッジノードが後で完全修飾ドメイン名（「FQDN」）を含むホスト名でSUSE Multi-Linux Manager Serverにアクセスできるように、ネットワークを設定する必要があります。
+
+SUSE Multi-Linux Managerを初めて起動するときは、いくつかの初期設定を行う必要があります。
+
+* キーボードレイアウトを選択します。
+* ライセンス契約を承認します。
+* タイムゾーンを選択します。
+* オペレーティングシステムのrootパスワードを入力します。
+
+次の手順は、「root」ユーザーとして実行する必要があります。
+
+次のステップでは、SUSE Customer Centerで確認できるSUSE Multi-Linux Manager Extensionの登録コードが必要です。同じコードを、SUSE Linux MicroとSUSE Multi-Linux Managerの両方の登録に使用できます。
+
+SUSE Linux Microを登録します。
+[,shell]
+----
+transactional-update register -r <REGCODE> -e <your_email>
+----
+
+SUSE Multi-Linux Managerを登録します。
+[,shell]
+----
+transactional-update register -p SUSE-Manager-Server/5.0/x86_64 -r <REGCODE>
+----
+
+製品文字列は、ハードウェアアーキテクチャによって異なります。例えば、64ビットArmシステムでSUSE Multi-Linux Managerを使用している場合、文字列は「SUSE-Manager-Server/5.0/aarch64」となります。
+
+再起動
+
+システムを更新
+[,shell]
+----
+transactional-update
+----
+
+変更がなかった場合を除き、再起動して更新を適用します。
+
+SUSE Multi-Linux Managerは、Podmanによって管理されるコンテナを介して提供されます。`mgradm`コマンドがセットアップと設定を処理します。
+
+[WARNING]
+====
+SUSE Multi-Linux Manager Serverのホスト名が、管理対象のエッジノードがネットワーク内で適切に解決できる完全修飾ドメイン名（「FQDN」）で構成されていることが非常に重要です。
+====
+
+SUSE Multi-Linux Manager Serverコンテナをインストールおよび設定する前に、以前に追加した追加のブロックデバイスを準備する必要があります。そのためには、仮想マシンがそのデバイスに割り当てた名前を知る必要があります。例えば、ブロックデバイスが`/dev/vdb`である場合、次のコマンドを使用してSUSE Multi-Linux Managerで使用するように設定できます。
+
+[,shell]
+----
+mgr-storage-server /dev/vdb
+----
+
+SUSE Multi-Linux Managerをデプロイ
+[,shell]
+----
+mgradm install podman <FQDN>
+----
+
+CA証明書のパスワードを指定します。このパスワードは、ログインパスワードとは異なるものにする必要があります。通常、後で入力する必要はありませんが、書き留めておくことをお勧めします。
+
+「admin」ユーザのパスワードを指定します。これは、SUSE Multi-Linux Managerにログインするための初期ユーザです。後で、フル権限または制限付き権限を持つ追加ユーザを作成できます。
+
+== SUSE Multi-Linux Managerの設定
+
+デプロイが完了したら、先ほど指定したホスト名を使用してSUSE Multi-Linux ManagerのWeb UIにログインできます。初期ユーザは「admin」です。前の手順で指定したパスワードを使用してください。
+
+次の手順では、SUSE Customer Centerの組織の「Users」タブの2番目のサブタブにある組織認証情報が必要です。これらの認証情報を使用して、SUSE Multi-Linux Managerはサブスクリプションを持つすべての製品を同期できます。
+
+`Admin > Setup Wizard`を選択します。
+
+`Organization Credentials`タブで、SUSE Customer Centerで見つけた`Username`と`Password`を使用して新しい認証情報を作成します。
+
+次のタブ`SUSE Products`を開きます。SUSE Customer Centerとの最初のデータ同期が完了するまで待つ必要があります。
+
+リストにデータが表示されたら、フィルターを使用して「Micro {version-operatingsystem}」のみを表示します。
+エッジノードが動作するハードウェアアーキテクチャ（`x86_64`または`aarch64`）用のSUSE Linux Micro {version-operatingsystem}のチェックボックスにチェックを入れてください。
+
+`Add Products`をクリックします。これにより、SUSE Linux Microのメインパッケージリポジトリ（「チャネル」）が追加され、SUSE Managerクライアントツールのチャネルがサブチャネルとして自動的に追加されます。
+
+インターネット接続によっては、最初の同期に時間がかかります。次の手順を開始できます。
+
+`Systems > System Groups`の下で、システムがオンボードされたときに自動的に参加するグループを少なくとも1つ作成します。グループはシステムを分類する重要な方法であり、構成やアクションを一連のシステム全体に一度に適用できます。これらは概念的にKubernetesのラベルと似ています。
+
+ユーティリティメニューの`+ Create Group`をクリックし、
+
+短い名前（例：「Edge Nodes」）と長い説明を入力します。
+
+`Systems > Activation Keys`の下で、アクティベーションキーを少なくとも1つ作成します。アクティベーションキーは、システムがSUSE Multi-Linux Managerにオンボードされるときに自動的に適用される構成プロファイルと考えることができます。特定のエッジノードを別のグループに追加したり、異なる構成を使用したりする場合は、それらのために別個のアクティベーションキーを作成し、後でEdge Image Builderで使用してカスタマイズされたインストールメディアを作成できます。
+
+アクティベーションキーの一般的な高度な使用例としては、テストクラスターを最新のアップデートを含むソフトウェアチャネルに割り当て、本番クラスターをテストクラスターでテストした後にのみ最新のアップデートを取得するソフトウェアチャネルに割り当てることが挙げられます。
+
+ユーティリティメニューの`+ Create Key`をクリックし、
+
+短い説明（例：「Edge Nodes」）を選択します。
+キーを識別する一意の名前を入力してください（例：{x86-64}ハードウェアアーキテクチャ対応のエッジノード用「edge-x86_64」）。
+キーには番号のプレフィックスが自動的に追加されます。デフォルトの組織の場合、番号は常に「1」です。SUSE Multi-Linux Managerで追加の組織を作成し、それらの組織に対してキーを作成した場合、その番号は異なる可能性があります。
+
+クローンされたソフトウェアチャネルを作成していない場合は、ベースチャネルの設定を「SUSE Manager Default」のままにしておくことができます。これにより、エッジノードに対して正しいSUSE更新リポジトリが自動的に割り当てられます。
+
+「子チャネル」として、アクティベーションキーを使用するハードウェアアーキテクチャの「推奨を含める」スライダーを選択します。これにより、「SUSE-Manager-Tools-For-SL-Micro-{version-operatingsystem}」チャネルが追加されます。
+
+「グループ」タブで、以前に作成したグループを追加します。このアクティベーションキーを使用してオンボードされたすべてのノードは、自動的にそのグループに追加されます。
+
+== Edge Image Builderでカスタマイズされたインストールイメージを作成する
+
+Edge Image Builderを使用するには、podmanでLinuxベースのコンテナを起動できる環境さえあれば十分です。
+
+最小限のラボ環境であれば、SUSE Multi-Linux Manager Serverが実行されている仮想マシンをそのまま使用することも可能です。仮想マシンに十分なディスク容量があることを確認してください。これは本番環境での使用には推奨されない構成です。Edge Image Builderの動作確認済みホストオペレーティングシステムについては、<<id-prerequisites-2>>を参照してください。
+
+ルートユーザとしてSUSE Multi-Linux Manager Serverホストにログインします。
+
+Edge Image Builderコンテナをプルします。
+[,shell,subs="attributes"]
+----
+podman pull registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib}
+----
+
+ディレクトリ`/opt/eib`とサブディレクトリ`base-images`を作成します。
+[,shell]
+----
+mkdir -p /opt/eib/base-images
+----
+
+このクイックスタートでは、SUSE Linux Microイメージの「self-install」フレーバーを使用します。そのイメージは、後で物理的なUSBメモリに書き込み、物理サーバーへのインストールに使用できます。サーバーにBMC（ベースボード管理コントローラー）経由でインストールISOをリモート接続するオプションがある場合は、その方法を使用することもできます。最後に、そのイメージはほとんどの仮想化ツールでも使用できます。
+
+イメージを物理ノードに直接プリロードするか、VMから直接起動したい場合は、「raw」イメージフレーバーを使用することもできます。
+
+これらのイメージは、SUSEカスタマーセンターまたは https://www.suse.com/download/sle-micro/にあります。
+
+イメージ`{micro-default-image-iso}`をダウンロードまたはコピーして`base-images`ディレクトリに配置し、「slemicro.iso」という名前を付けます。
+
+Arm®ベースのビルドホスト上で{aarch64}イメージをビルドすることは、{product} {version-edge}におけるテクノロジープレビューです。ほとんどの場合動作しますが、まだサポートされていません。試してみたい場合は、64ビットArmマシン上でPodmanを実行している必要があり、すべての例とコードスニペットの「x86_64」を「aarch64」に置き換える必要があります。
+
+`/opt/eib`に`iso-definition.yaml`という名前のファイルを作成します。これがEdge Image Builderのビルド定義です。
+
+以下は、SL Micro {version-operatingsystem}をインストールし、ルートパスワード、追加ユーザ、キーマップを設定し、CockpitのグラフィカルUIを起動して、ノードをSUSE Multi-Linux Managerに登録する簡単な例です。
+
+[,yaml]
+----
+apiVersion: 1.3
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+  - username: root
+    createHomeDir: true
+    encryptedPassword: $6$aaBTHyqDRUMY1HAp$pmBY7.qLtoVlCGj32XR/Ogei4cngc3f4OX7fwBD/gw7HWyuNBOKYbBWnJ4pvrYwH2WUtJLKMbinVtBhMDHQIY0
+  - username: admin
+    createHomeDir: true
+    encryptedPassword: $6$8EGZXU1iFcLiHHxk$Hs3nVtzO.yZhApT.YBHaNvLRZvXG3Iv/km92BtiNiGXhSSUG0ZbNHxlm7c//ROFj3W9M5xIkB.RLQpPKOFxP91
+  keymap: de
+  systemd:
+    enable:
+      - cockpit.socket
+  packages:
+    noGPGCheck: true
+  suma:
+    host: ${fully qualified hostname of your SUSE Multi-Linux Manager Server}
+    activationKey: 1-edge-x86_64
+----
+
+Edge Image Builderは、ネットワークの設定、ノードへのKubernetesの自動インストール、さらにはHelmチャートを使用してアプリケーションをデプロイすることも可能です。より包括的な例については、<<quickstart-eib>>を参照してください。
+
+`baseImage`には、`base-images`ディレクトリ内で使用するISOの実際のファイル名を指定してください。
+
+この例では、ルートパスワードは「root」となります。使用する安全なパスワードのパスワードハッシュを作成する方法については、<<id-configuring-os-users>>を参照してください。
+
+Cockpitではルートユーザとしての接続が禁止されているため、追加のユーザーが必要です。この例では、そのユーザーは「admin」で、パスワードも「admin」です。
+
+キーマップは、インストール後にシステムで使用する実際のキーボードレイアウトに設定してください。
+
+[NOTE]
+====
+RPMパッケージを確認するためのGPGキーを提供しないため、`noGPGCheck: true`オプションを使用します。本番環境での使用を推奨する、より安全な設定を網羅したガイドは、{link-eib-installing-packages}[アップストリーム installing packages guide]で確認できます。
+====
+
+何度か言及したように、SUSE Multi-Linux Managerホストには、エッジノードが起動するネットワーク内で解決可能な完全修飾ホスト名が必要です。
+
+`activationKey`の値は、SUSE Multi-Linux Managerで作成したキーと一致している必要があります。
+
+インストール後にエッジノードをSUSE Multi-Linux Managerに自動的に登録するインストールイメージを構築するには、以下の2つのアーティファクトを準備する必要があります。
+
+* SUSE Multi-Linux Managerの管理エージェントをインストールするSalt minionパッケージ
+* SUSE Multi-Linux ManagerサーバーのCA証明書
+
+=== venv-salt-minionパッケージをダウンロードする
+
+`/opt/eib`に、サブディレクトリ`rpms`を作成します。
+
+`venv-salt-minion`パッケージをSUSE Multi-Linux Managerサーバーからそのディレクトリにダウンロードします。Web UIから取得する場合は、`Software > Channel List`でパッケージを見つけてSUSE-Manager-Tools ...チャネルからダウンロードするか、curlのようなツールを使用してSUSE Multi-Linux Managerの「起動リポジトリ」からダウンロードできます。
+
+[,shell]
+----
+curl -O http://${HOSTNAME_OF_SUSE_MANAGER}/pub/repositories/slmicro/6/1/bootstrap/x86_64/venv-salt-minion-3006.0-8.1.x86_64.rpm
+----
+より新しいリリースがすでに公開されている場合、実際のパッケージ名は異なる可能性があります。選択可能なパッケージが複数ある場合は、常に最新のものを選んでください。
+
+SUSE Multi-Linux Managerの https://www.suse.com/releasenotes/x86_64/multi-linux-manager/5.1/index.html#_bootstrapping_sl_micro_6_1_clients[リリースノート]に記載されている問題を回避するために、最新バージョンのビルドキーパッケージを`rpms`ディレクトリに配置する必要もあります（このドキュメント作成時点では`suse-build-key-12.0-slfo.1.1_3.1.noarch.rpm`）。これは、SL MicroのPoolチャネルの`Packages`タブから、SUSE Multi-Linux Managerの`Software`セクションで見つけることができます。`Details`ビューに`Download`ボタンがあります。
+
+== SUSE Multi-Linux ManagerのCA証明書をダウンロードする
+
+`/opt/eib`に、サブディレクトリ`certificates`を作成します。
+
+SUSE Multi-Linux ManagerからCA証明書をそのディレクトリにダウンロードします。
+
+[,shell]
+----
+curl -O http://${HOSTNAME_OF_SUSE_MANAGER}/pub/RHN-ORG-TRUSTED-SSL-CERT
+----
+
+[WARNING]
+====
+証明書の名前を`RHN-ORG-TRUSTED-SSL-CERT.crt`に変更する必要があります。Edge Image Builderは、インストール中にエッジノード上で証明書がインストールされ、有効化されることを確認します。
+====
+
+これで、Edge Image Builderを実行できます。
+
+[,bash,subs="attributes"]
+----
+cd /opt/eib
+podman run --rm -it --privileged -v /opt/eib:/eib \
+registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+build --definition-file iso-definition.yaml
+----
+
+YAML定義ファイルに別の名前を使用している場合や、別のバージョンのEdge Image Builderを使用したい場合は、それに応じてコマンドを調整する必要があります。
+
+ビルドが完了すると、インストールISOが`/opt/eib`ディレクトリに`eib-image.iso`として作成されます。
+
+そのイメージを使用して、SUSE Multi-Linux Managerへの登録を試みるノードをデプロイできるようになりました。
+
+ノードのインストールが完全に終了すると、そのキーがSUSE Multi-Linux Managerの`pending`セクションに`Salt/Keys`として表示されます。キーを承認すると、ノードは自動的にSUSE Multi-Linux Managerにオンボードされ、そのプロセスが完了した後に`Systems`リストに表示されます。アクティベーションキーで指定したシステムグループが割り当てられます。
+
+追加の設定を適用する前に、再起動をスケジュールすることをお勧めします。
+
+キーの受け入れは、 https://docs.saltproject.io/en/latest/topics/tutorials/autoaccept_grains.html[こちら]で説明されているホワイトリストを使用して完全に自動化できることにご留意ください。
+
+
+
+

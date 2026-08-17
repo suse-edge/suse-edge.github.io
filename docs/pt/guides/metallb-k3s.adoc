@@ -1,0 +1,382 @@
+[#guides-metallb-k3s]
+= MetalLB no K3s (usando o modo camada 2)
+:revdate: 2025-05-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+O MetalLB é uma implementação de balanceador de carga para clusters Kubernetes bare metal, usando protocolos de roteamento padrão.
+
+Neste guia, demonstramos como implantar o MetalLB no modo camada 2 (L2).
+
+== Por que usar o MetalLB
+
+O MetalLB é uma escolha atraente para balanceamento de carga em clusters Kubernetes bare metal por vários motivos:
+
+. Integração Nativa com o Kubernetes: O MetalLB integra-se perfeitamente ao Kubernetes, tornando fácil implantar e gerenciar usando ferramentas e práticas familiares do Kubernetes.
+. Compatibilidade bare metal: Ao contrário dos balanceadores de carga baseados em nuvem, o MetalLB foi projetado especificamente para implantações no local onde balanceadores de carga tradicionais podem não estar disponíveis ou ser viáveis.
+. Suporta Vários Protocolos: O MetalLB suporta os modos camada 2 e BGP (Border Gateway Protocol), proporcionando flexibilidade para diferentes arquiteturas e requisitos de rede.
+. Alta disponibilidade: Ao distribuir as responsabilidades de balanceamento de carga entre vários nós, o MetalLB garante alta disponibilidade e confiabilidade para seus serviços.
+. Escalabilidade: O MetalLB pode lidar com implantações em larga escala, escalando junto com seu cluster Kubernetes para atender à demanda crescente.
+
+No modo camada 2, um nó assume a responsabilidade de anunciar um serviço para a rede local. Da perspectiva da rede, parece simplesmente que aquela máquina tem vários endereços IP atribuídos à sua interface de rede.
+
+A principal vantagem do modo camada 2 é sua universalidade: ele funciona em qualquer rede Ethernet, sem necessidade de hardware especial, nem mesmo roteadores sofisticados.
+
+== MetalLB no K3s (usando o modo camada 2)
+
+Neste início rápido, o modo camada 2 (L2) será usado.
+Isso significa que não precisamos de nenhum equipamento de rede especial, apenas três IPs livres dentro do intervalo da rede.
+
+== Pré-requisitos
+
+* Um cluster K3s onde o MetalLB será implantado.
+
+[WARNING]
+====
+O K3s vem com seu próprio balanceador de carga de serviço chamado Klipper. Você https://metallb.universe.tf/configuration/k3s/[precisa desativá-lo para executar o MetalLB]. Para desativar o Klipper, o K3s precisa ser instalado usando a flag `--disable=servicelb`.
+====
+
+* Helm
+* Três endereços IP livres dentro do intervalo da rede. Neste exemplo `192.168.122.10-192.168.122.12`
+
+[IMPORTANT]
+====
+Você deve garantir que esses endereços IP não estejam atribuídos.
+Em um ambiente DHCP, esses endereços não devem fazer parte do pool DHCP para evitar atribuições duplas. 
+====
+
+== Implantação
+
+Usaremos o Helm chart do MetalLB publicado como parte da solução {product}:
+
+[,bash,subs="attributes"]
+----
+helm install \
+  metallb oci://registry.suse.com/edge/charts/metallb \
+  --namespace metallb-system \
+  --create-namespace
+
+while ! kubectl wait --for condition=ready -n metallb-system $(kubectl get\
+ pods -n metallb-system -l app.kubernetes.io/component=controller -o name)\
+ --timeout=10s; do
+ sleep 2
+done
+----
+
+== Configuração
+
+Neste ponto, a instalação está concluída. Agora é hora de https://metallb.universe.tf/configuration/[configurar] usando nossos valores de exemplo:
+
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: ip-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - 192.168.122.10/32
+  - 192.168.122.11/32
+  - 192.168.122.12/32
+EOF
+----
+
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: ip-pool-l2-adv
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - ip-pool
+EOF
+----
+
+Agora, está pronto para ser usado. Você pode personalizar muitas coisas para o modo camada 2 (L2), como:
+
+* https://metallb.universe.tf/usage/#ipv6-and-dual-stack-services[Serviços IPv6 e Dual Stack]
+* https://metallb.universe.tf/configuration/_advanced_ipaddresspool_configuration/#controlling-automatic-address-allocation[Controlar a alocação automática de endereços]
+* https://metallb.universe.tf/configuration/_advanced_ipaddresspool_configuration/#reduce-scope-of-address-allocation-to-specific-namespace-and-service[Reduzir o escopo da alocação de endereços para namespaces e serviços específicos]
+* https://metallb.universe.tf/configuration/_advanced_l2_configuration/#limiting-the-set-of-nodes-where-the-service-can-be-announced-from[Limitar o conjunto de nós a partir dos quais o serviço pode ser anunciado]
+* https://metallb.universe.tf/configuration/_advanced_l2_configuration/#specify-network-interfaces-that-lb-ip-can-be-announced-from[Especificar interfaces de rede a partir das quais o IP do LB pode ser anunciado]
+
+E muito mais para https://metallb.universe.tf/configuration/_advanced_bgp_configuration/[BGP].
+
+[#traefik-and-metallb]
+=== Traefik e MetalLB
+
+O Traefik é implantado por padrão com o K3s (https://docs.k3s.io/networking#traefik-ingress-controller[pode ser desativado] com `--disable=traefik`) e é exposto por padrão como `LoadBalancer` (para ser usado com o Klipper). No entanto, como o Klipper precisa ser desativado, o serviço do Traefik para ingress ainda é do tipo `LoadBalancer`. Portanto, no momento da implantação do MetalLB, o primeiro IP será atribuído automaticamente ao Traefik Ingress.
+
+[,console]
+----
+# Before deploying MetalLB
+kubectl get svc -n kube-system traefik
+NAME      TYPE           CLUSTER-IP     EXTERNAL-IP   PORT(S)                      AGE
+traefik   LoadBalancer   10.43.44.113   <pending>     80:31093/TCP,443:32095/TCP   28s
+# After deploying MetalLB
+kubectl get svc -n kube-system traefik
+NAME      TYPE           CLUSTER-IP     EXTERNAL-IP      PORT(S)                      AGE
+traefik   LoadBalancer   10.43.44.113   192.168.122.10   80:31093/TCP,443:32095/TCP   3m10s
+----
+
+Isso será aplicado <<ingress-with-metallb,mais tarde>> no processo.
+
+== Uso
+
+Vamos criar uma implantação de exemplo:
+
+[,bash]
+----
+cat <<- EOF | kubectl apply -f -
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hello-kubernetes
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hello-kubernetes
+  namespace: hello-kubernetes
+  labels:
+    app.kubernetes.io/name: hello-kubernetes
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-kubernetes
+  namespace: hello-kubernetes
+  labels:
+    app.kubernetes.io/name: hello-kubernetes
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hello-kubernetes
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hello-kubernetes
+    spec:
+      serviceAccountName: hello-kubernetes
+      containers:
+        - name: hello-kubernetes
+          image: "paulbouwer/hello-kubernetes:1.10"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          env:
+          - name: HANDLER_PATH_PREFIX
+            value: ""
+          - name: RENDER_PATH_PREFIX
+            value: ""
+          - name: KUBERNETES_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: KUBERNETES_POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: KUBERNETES_NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+          - name: CONTAINER_IMAGE
+            value: "paulbouwer/hello-kubernetes:1.10"
+EOF
+----
+
+E, finalmente, o serviço:
+
+[,bash]
+----
+cat <<- EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-kubernetes
+  namespace: hello-kubernetes
+  labels:
+    app.kubernetes.io/name: hello-kubernetes
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: hello-kubernetes
+EOF
+----
+
+Vamos vê-lo em ação:
+
+[,console]
+----
+kubectl get svc -n hello-kubernetes
+NAME               TYPE           CLUSTER-IP     EXTERNAL-IP      PORT(S)        AGE
+hello-kubernetes   LoadBalancer   10.43.127.75   192.168.122.11   80:31461/TCP   8s
+
+curl http://192.168.122.11
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hello Kubernetes!</title>
+    <link rel="stylesheet" type="text/css" href="/css/main.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Ubuntu:300" >
+</head>
+<body>
+
+  <div class="main">
+    <img src="/images/kubernetes.png"/>
+    <div class="content">
+      <div id="message">
+  Hello world!
+</div>
+<div id="info">
+  <table>
+    <tr>
+      <th>namespace:</th>
+      <td>hello-kubernetes</td>
+    </tr>
+    <tr>
+      <th>pod:</th>
+      <td>hello-kubernetes-7c8575c848-2c6ps</td>
+    </tr>
+    <tr>
+      <th>node:</th>
+      <td>allinone (Linux 5.14.21-150400.24.46-default)</td>
+    </tr>
+  </table>
+</div>
+<div id="footer">
+  paulbouwer/hello-kubernetes:1.10 (linux/amd64)
+</div>
+    </div>
+  </div>
+
+</body>
+</html>
+----
+
+[#ingress-with-metallb]
+=== Ingress com MetalLB
+
+Como o Traefik já está servindo como um controlador de ingress, podemos expor qualquer tráfego HTTP/HTTPS por meio de um objeto `Ingress` como:
+
+[,bash]
+----
+IP=$(kubectl get svc -n kube-system traefik -o jsonpath="{.status.loadBalancer.ingress[0].ip}")
+cat <<- EOF | kubectl apply -f -
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hello-kubernetes-ingress
+  namespace: hello-kubernetes
+spec:
+  rules:
+  - host: hellok3s.${IP}.sslip.io
+    http:
+      paths:
+        - path: "/"
+          pathType: Prefix
+          backend:
+            service:
+              name: hello-kubernetes
+              port:
+                name: http
+EOF
+----
+
+E então:
+
+[,console]
+----
+curl http://hellok3s.${IP}.sslip.io
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hello Kubernetes!</title>
+    <link rel="stylesheet" type="text/css" href="/css/main.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Ubuntu:300" >
+</head>
+<body>
+
+  <div class="main">
+    <img src="/images/kubernetes.png"/>
+    <div class="content">
+      <div id="message">
+  Hello world!
+</div>
+<div id="info">
+  <table>
+    <tr>
+      <th>namespace:</th>
+      <td>hello-kubernetes</td>
+    </tr>
+    <tr>
+      <th>pod:</th>
+      <td>hello-kubernetes-7c8575c848-fvqm2</td>
+    </tr>
+    <tr>
+      <th>node:</th>
+      <td>allinone (Linux 5.14.21-150400.24.46-default)</td>
+    </tr>
+  </table>
+</div>
+<div id="footer">
+  paulbouwer/hello-kubernetes:1.10 (linux/amd64)
+</div>
+    </div>
+  </div>
+
+</body>
+</html>
+----
+
+Verifique se o MetalLB funciona corretamente:
+
+[,bash]
+----
+% arping hellok3s.${IP}.sslip.io
+
+ARPING 192.168.64.210
+60 bytes from 92:12:36:00:d3:58 (192.168.64.210): index=0 time=1.169 msec
+60 bytes from 92:12:36:00:d3:58 (192.168.64.210): index=1 time=2.992 msec
+60 bytes from 92:12:36:00:d3:58 (192.168.64.210): index=2 time=2.884 msec
+----
+
+No exemplo acima, o tráfego flui da seguinte forma:
+
+. `hellok3s.${IP}.sslip.io` é resolvido para o IP real.
+. Em seguida, o tráfego é tratado pelo pod `metallb-speaker`.
+. `metallb-speaker` redireciona o tráfego para o controlador `traefik`.
+. Finalmente, o Traefik encaminha a solicitação para o serviço `hello-kubernetes`.

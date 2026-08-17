@@ -1,0 +1,95 @@
+[#atip-architecture]
+= Concepto y arquitectura
+:revdate: 27-05-2026
+:revnumber: 3,6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+SUSE Telco Cloud es una plataforma diseñada para alojar aplicaciones Telco modernas, nativas de nube, a escala, desde el kernel hasta el edge.
+
+Esta página explica la arquitectura y los componentes utilizados en SUSE Telco Cloud.
+
+
+== Arquitectura de SUSE Telco Cloud
+
+El siguiente diagrama muestra la arquitectura de alto nivel de SUSE Telco Cloud:
+
+image::product-atip-architecture1.png[scaledwidth=100%]
+
+
+== Componentes
+
+Existen dos bloques diferentes, la pila de gestión y la pila de tiempo de ejecución:
+
+* *Pila de gestión*: Esta es la parte de SUSE Telco Cloud que se utiliza para gestionar el aprovisionamiento y el ciclo de vida de las pilas de tiempo de ejecución. gracias a los siguientes componentes:
+  ** Gestión de clústeres múltiples en entornos de nube pública y privada con <<components-rancher,Rancher>>
+  ** Soporte para equipo sin sistema operativo con <<components-metal3,Metal^3^>>, <<components-metallb,MetalLB>> y proveedores de infraestructura `CAPI` (Cluster API)
+  ** Aislamiento integral de inquilinos e integraciones de `IDP` (proveedor de identidad)
+  ** Amplio mercado de integraciones y extensiones de terceros
+  ** API neutral respecto al proveedor y rico ecosistema de proveedores
+  ** Control de las actualizaciones transaccionales de SUSE Linux Micro
+  ** Motor GitOps para gestionar el ciclo de vida de los clústeres mediante repositorios Git con <<components-fleet,Fleet>>
+
+* *Pila de tiempo de ejecución*: Esta es la parte de SUSE Telco Cloud que se utiliza para ejecutar las cargas de trabajo.
+  ** <<components-rke2,RKE2>> sirve como la distribución de Kubernetes ligera y reforzada en seguridad, optimizada para entornos de telecomunicaciones edge y centrados en el cumplimiento.
+  ** (Opcional) <<components-suse-security,SUSE Security>> para habilitar funciones de seguridad como el escaneo de vulnerabilidades de imágenes, la inspección profunda de paquetes y el control automático del tráfico intraclúster.
+  ** (Opcional) Almacenamiento en bloques con <<components-suse-storage,SUSE Storage>> para habilitar una forma sencilla y fácil de utilizar una solución de almacenamiento nativo de nube.
+  ** Sistema operativo optimizado con <<components-slmicro,SUSE Linux Micro>> para habilitar un SO seguro, ligero e inmutable (sistema de archivos transaccional) para ejecutar contenedores. SUSE Linux Micro está disponible en arquitecturas {aarch64} y {x86-64}, y también es compatible con `Real-Time Kernel` para casos de uso de telecomunicaciones y edge.
+
+== Modelo de despliegue
+
+SUSE Telco Cloud sigue un modelo de despliegue de dos etapas: el clúster de gestión se despliega utilizando una imagen generada por <<components-eib,Edge Image Builder>>, y los clústeres en sentido descendente se aprovisionan mediante el aprovisionamiento de red dirigido. Este capítulo ofrece una visión general de este modelo de despliegue, ya que es el enfoque recomendado y compatible para los entornos de SUSE Telco Cloud.
+
+=== ¿Por qué este modelo de despliegue?
+
+El clúster de gestión es un despliegue único en una sola ubicación. El aprovisionamiento basado en imágenes agrupa todos los componentes en una única imagen arrancable. De este modo, el clúster de gestión se iniciará por sí mismo, lo que requiere una complejidad operativa mínima. Es la forma más sencilla y directa de ponerlo en marcha.
+
+Los clústeres descendentes, sin embargo, son otra historia. En entornos de telecomunicaciones, se despliegan a gran escala en muchos centros de datos y en sitios edge, a menudo sin disponer de experiencia técnica in situ. El aprovisionamiento de red dirigido está diseñado para esto: requiere que los servidores de destino admitan una interfaz de gestión fuera de banda como Redfish, a través de la cual el clúster de gestión enciende, inspecciona y aprovisiona de forma remota los nodos bare-metal sin ninguna intervención in situ.
+
+Integrar toda la configuración específica del clúster en una imagen de arranque, como requeriría el aprovisionamiento basado en imágenes, significa que cada variación del sitio exige una imagen diferente, y cualquier cambio de configuración requiere reconstruir y redistribuir las imágenes en todos los sitios. El aprovisionamiento de red dirigido resuelve esto manteniendo la imagen del SO genérica y gestionando toda la configuración específica del clúster, incluidos los perfiles de red, Kubernetes y Telco, desde el clúster de gestión en el momento del aprovisionamiento. Los operadores simplemente instalan en rack, encienden y conectan el hardware, y el clúster de gestión se encarga del resto.
+
+Esta separación también permite una integración completa de GitOps. Dado que toda la definición del clúster en sentido descendente se expresa como manifiestos de Cluster API, puede almacenarse en Git y ser reconciliada por Fleet en todos los sitios, lo que hace que las operaciones de aprovisionamiento, configuración y ciclo de vida sean totalmente auditables y repetibles sin intervención manual.
+
+=== Despliegue del clúster de gestión
+
+Uso de <<components-eib,Edge Image Builder>> para crear una nueva imagen `ISO` con la pila de gestión incluida. A continuación, puede utilizar esta imagen `ISO` para instalar un nuevo clúster de gestión en máquinas virtuales o en equipo sin sistema operativo.
+
+image::product-atip-architecture2.png[scaledwidth=100%]
+
+NOTE: Para obtener más información sobre cómo desplegar un nuevo clúster de gestión, consulte la <<atip-management-cluster,guía del clúster de gestión de SUSE Telco Cloud>>.
+
+NOTE: Para obtener más información sobre cómo utilizar Edge Image Builder, consulte la <<quickstart-eib,guía de Edge Image Builder>>.
+
+
+=== Despliegue de un clúster en sentido descendente de nodo único con perfiles de Telco
+
+Una vez que tengamos el clúster de gestión en funcionamiento, podemos utilizarlo para desplegar un clúster en sentido descendente de nodo único con todas las capacidades de Telco habilitadas y configuradas utilizando el flujo de trabajo de aprovisionamiento de red dirigido.
+
+El siguiente diagrama muestra el flujo de trabajo de alto nivel para desplegarlo:
+
+image::product-atip-architecture3.png[scaledwidth=100%]
+
+NOTE: Para obtener más información sobre cómo desplegar un clúster en sentido descendente, consulte la <<atip-automated-provisioning,guía de aprovisionamiento automatizado de SUSE Telco Cloud.>>
+
+NOTE: Para obtener más información sobre las funciones de Telco, consulte la <<atip-features,guía de funciones de Telco de SUSE Telco Cloud.>>
+
+=== Despliegue de un clúster de alta disponibilidad en sentido descendente
+
+Una vez que tengamos el clúster de gestión en funcionamiento, podemos utilizarlo para desplegar un clúster de alta disponibilidad en sentido descendente con `MetalLB` como equilibrador de carga utilizando el flujo de trabajo de aprovisionamiento de red dirigida.
+
+El siguiente diagrama muestra el flujo de trabajo de alto nivel para desplegarlo:
+
+image::product-atip-architecture4.png[scaledwidth=100%]
+
+NOTE: Para obtener más información sobre cómo desplegar un clúster en sentido descendente, consulte la <<atip-automated-provisioning,guía de aprovisionamiento automatizado de SUSE Telco Cloud.>>
+
+NOTE: Para obtener más información sobre `MetalLB`, consulte <<components-metallb,aquí:>>

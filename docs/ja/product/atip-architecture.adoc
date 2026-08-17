@@ -1,0 +1,95 @@
+[#atip-architecture]
+= コンセプトとアーキテクチャ
+:revdate: 2026-05-27
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+SUSE Telco Cloudは、コアからエッジまで、最新のクラウドネイティブな通信アプリケーションを大規模にホストするために設計されたプラットフォームです。
+
+このページでは、SUSE Telco Cloudで使用されるアーキテクチャとコンポーネントについて説明します。
+
+
+== SUSE Telco Cloudアーキテクチャ
+
+次の図は、SUSE Telco Cloudのハイレベルアーキテクチャを示しています。
+
+image::product-atip-architecture1.png[scaledwidth=100%]
+
+
+== コンポーネント
+
+管理スタックとランタイムスタックという2つの異なるブロックがあります。
+
+* *管理スタック*:これは、ランタイムスタックのプロビジョニングとライフサイクルを管理するために使用されるSUSE Telco Cloudの一部です。SUSE Linux Enterprise 10には、次のようなコンポーネントが含まれています。
+  ** <<components-rancher,Rancher>>を使用したパブリックおよびプライベートクラウド環境でのマルチクラスター管理
+  ** <<components-metal3,Metal^3^>>、<<components-metallb,MetalLB>>、および`CAPI` (Cluster API) インフラストラクチャプロバイダーによるベアメタルサポート
+  ** 包括的なテナント分離と`IDP` (Identity Provider) 統合
+  ** サードパーティ製統合および拡張機能の広範なマーケットプレイス
+  ** ベンダーニュートラルなAPIと豊富なプロバイダーエコシステム
+  ** SUSE Linux Microのトランザクション更新を管理
+  ** <<components-fleet,Fleet>>を使用したGitリポジトリによるクラスターのライフサイクル管理用GitOpsエンジン
+
+* *ランタイムスタック*:これは、ワークロードを実行するために使用されるSUSE Telco Cloudの一部です。
+  ** <<components-rke2,RKE2>>は、エッジ環境やコンプライアンス重視の通信環境向けに最適化された、セキュリティが強化された軽量なKubernetesディストリビューションとして機能します。
+  ** (オプション) イメージの脆弱性スキャン、ディープパケットインスペクション、クラスター内トラフィックの自動制御などのセキュリティ機能を有効にする<<components-suse-security,SUSE Security>>
+  ** （オプション）<<components-suse-storage,SUSE Storage>>を使用したブロックストレージにより、クラウドネイティブなストレージソリューションをシンプルかつ簡単に利用できるようになります。
+  ** <<components-slmicro,SUSE Linux Micro>>を使用した最適化されたオペレーティングシステムにより、コンテナを実行するための安全で軽量かつ不変（トランザクションファイルシステム）なOSを実現します。SUSE Linux Microは{aarch64}および{x86-64}アーキテクチャで利用可能であり、通信事業者やエッジのユースケース向けに`Real-Time Kernel`もサポートしています。
+
+== デプロイメントモデル
+
+SUSE Telco Cloudは、2段階のデプロイメントモデルに従います。管理クラスターは<<components-eib,Edge Image Builder>>によって生成されたイメージを使用してデプロイされ、ダウンストリームクラスターはダイレクトネットワークプロビジョニングを介してプロビジョニングされます。この章では、SUSE Telco Cloud環境で推奨され、サポートされているアプローチであるため、このデプロイメントモデルの概要を説明します。
+
+=== なぜこのデプロイメントモデルなのか？
+
+管理クラスターは、1回限りの単一サイトデプロイメントです。Image-based Provisioningは、すべてのコンポーネントを単一のブート可能なイメージにバンドルします。このように、管理クラスターは自ら起動するため、運用上の複雑さを最小限に抑えることができます。これが、セットアップして稼働させるための最もシンプルで直接的な方法です。
+
+しかし、ダウンストリームクラスターの場合は事情が異なります。通信事業者環境では、多くのデータセンターやエッジサイトにまたがって大規模に展開されることが多く、現場に技術専門家がいないことも珍しくありません。ダイレクトネットワークプロビジョニングは、このために設計されています。ターゲットサーバーがRedfishなどの帯域外管理インターフェースをサポートしている必要があり、管理クラスターはそれを通じて、現場での介入なしにベアメタルノードの電源投入、検査、プロビジョニングをリモートで実行します。
+
+Image-based Provisioningで必要となるように、クラスター固有のすべての構成をブートイメージに組み込むと、サイトのバリエーションごとに異なるイメージが必要になり、構成を変更するたびにすべてのサイトでイメージを再構築して再配布する必要が生じます。ダイレクトネットワークプロビジョニングは、OSイメージを汎用的なままにし、ネットワーキング、Kubernetes、Telcoプロファイルを含むすべてのクラスター固有の構成を、プロビジョニング時に管理クラスターから実行することで、この問題を解決します。オペレーターはハードウェアをラックに設置し、電源を入れ、接続するだけで、残りの作業は管理クラスターが処理します。
+
+この分離により、完全なGitOps統合も可能になります。ダウンストリームクラスターの定義全体がCluster APIマニフェストとして表現されるため、Gitに保存してすべてのサイトでFleetによって調整できます。これにより、手動介入なしで、プロビジョニング、構成、ライフサイクル操作を完全に監査可能かつ再現可能なものにできます。
+
+=== 管理クラスターのデプロイメント
+
+<<components-eib,Edge Image Builder>>を使用して、管理スタックを含む新しい`ISO`イメージを作成します。この`ISO`イメージを使用して、VMまたはベアメタル上に新しい管理クラスターをインストールできます。
+
+image::product-atip-architecture2.png[scaledwidth=100%]
+
+NOTE: 新しい管理クラスターをデプロイする方法の詳細については、<<atip-management-cluster,SUSE Telco Cloud Management Cluster guide>>を参照してください。
+
+NOTE: Edge Image Builderの使用方法の詳細については、<<quickstart-eib,Edge Image Builder guide>>を参照してください。
+
+
+=== Telcoプロファイルを使用したシングルノードダウンストリームクラスターのデプロイメント
+
+管理クラスターが稼働したら、それを使用して、ダイレクトネットワークプロビジョニングワークフローにより、すべてのTelco機能が有効化および構成されたシングルノードダウンストリームクラスターをデプロイできます。
+
+次の図は、それをデプロイするための高レベルのワークフローを示しています。
+
+image::product-atip-architecture3.png[scaledwidth=100%]
+
+NOTE: ダウンストリームクラスターをデプロイする方法の詳細については、<<atip-automated-provisioning,SUSE Telco Cloud Automated Provisioning guide.>>を参照してください。
+
+NOTE: Telco機能の詳細については、<<atip-features,SUSE Telco Cloud Telco Features guide.>>を参照してください。
+
+=== 高可用性ダウンストリームクラスターのデプロイメント
+
+管理クラスターが稼働したら、それを使用して、ダイレクトネットワークプロビジョニングワークフローにより、`MetalLB`をロードバランサーとして使用する高可用性ダウンストリームクラスターをデプロイできます。
+
+次の図は、それをデプロイするための高レベルのワークフローを示しています。
+
+image::product-atip-architecture4.png[scaledwidth=100%]
+
+NOTE: ダウンストリームクラスターをデプロイする方法の詳細については、<<atip-automated-provisioning,SUSE Telco Cloud Automated Provisioning guide.>>を参照してください。
+
+NOTE: `MetalLB`の詳細については、<<components-metallb,こちら>>を参照してください。

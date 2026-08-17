@@ -1,0 +1,435 @@
+[#quickstart-elemental]
+= Integração de host remoto com Elemental
+:revdate: 2025-06-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Esta seção documenta a solução de "provisionamento de rede phone home" como parte de {product}, onde usamos o Elemental para auxiliar na integração de nós. O Elemental é uma pilha de software que permite o registro remoto de hosts e o gerenciamento centralizado de SO nativo da nuvem com Kubernetes. Na pilha {product}, usamos o recurso de registro do Elemental para permitir a integração de hosts remotos no Rancher, para que os hosts possam ser integrados a uma plataforma de gerenciamento centralizada e, a partir daí, implantar e gerenciar clusters Kubernetes junto com componentes em camadas, aplicativos e seu ciclo de vida, tudo a partir de um local comum. 
+
+Essa abordagem pode ser útil em cenários onde os dispositivos que você deseja controlar não estão na mesma rede que o cluster de gerenciamento ou não possuem um controlador de gerenciamento fora de banda integrado para permitir um controle mais direto, e onde você está inicializando muitos sistemas "desconhecidos" diferentes na borda, e precisa integrá-los e gerenciá-los com segurança em escala. Este é um cenário comum para casos de uso em varejo, IoT industrial ou outros espaços onde você tem pouco controle sobre a rede em que seus dispositivos estão sendo instalados.
+
+== Arquitetura de alto nível
+
+image::quickstart-elemental-architecture.png[scaledwidth=100%]
+
+== Recursos necessários
+
+O seguinte descreve os requisitos mínimos de sistema e ambiente para realizar este guia de início rápido:
+
+* Um host para o cluster de gerenciamento centralizado (aquele que hospeda o Rancher e o Elemental):
+ ** Mínimo de 8 GB de RAM e 20 GB de espaço em disco para desenvolvimento ou teste (veja https://ranchermanager.docs.rancher.com/{rancher-docs-version}/getting-started/installation-and-upgrade/installation-requirements#hardware-requirements[aqui] para uso em produção)
+* Um nó de destino a ser provisionado, ou seja, o dispositivo de borda (uma máquina virtual pode ser usada para fins de demonstração ou teste)
+ ** Mínimo de 4 GB de RAM, 2 núcleos de CPU e 20 GB de disco
+* Um nome de host resolúvel para o cluster de gerenciamento ou um endereço IP estático para usar com um serviço como sslip.io
+* Um host para criar a mídia de instalação via Edge Image Builder
+ ** Executando SLES 15 SP6, openSUSE Leap 15.6 ou outro sistema operacional compatível que suporte Podman.
+ ** Com https://kubernetes.io/docs/reference/kubectl/kubectl/[Kubectl], https://podman.io[Podman] e https://helm.sh[Helm] instalados
+* Uma unidade flash USB para inicializar (se estiver usando hardware físico)
+* Uma cópia baixada da imagem ISO mais recente do SUSE Linux Micro {version-operatingsystem} SelfInstall encontrada https://www.suse.com/download/sle-micro/[aqui].
+
+NOTE: Os dados existentes encontrados nas máquinas de destino serão sobrescritos como parte do processo; certifique-se de fazer backup de quaisquer dados em quaisquer dispositivos de armazenamento USB e discos conectados aos nós de implantação de destino.
+
+Este guia foi criado usando um droplet da Digital Ocean para hospedar o cluster upstream e um Intel NUC como dispositivo downstream. Para criar a mídia de instalação, o SUSE Linux Enterprise Server é usado.
+
+== Criar cluster de inicialização [[build-bootstrap-cluster]]
+
+Comece criando um cluster capaz de hospedar o Rancher e o Elemental. Este cluster precisa ser roteável a partir da rede à qual os nós downstream estão conectados.
+
+=== Criar cluster Kubernetes
+
+Se você estiver usando um hiperescalador (como Azure, AWS ou Google Cloud), a maneira mais fácil de configurar um cluster é usando as ferramentas incorporadas deles. Para fins de concisão neste guia, não detalhamos o processo de cada uma dessas opções.
+
+Se você estiver instalando em bare metal ou em outro serviço de hospedagem onde também precise fornecer a própria distribuição do Kubernetes, recomendamos usar https://docs.rke2.io/install/quickstart[RKE2].
+
+=== Configurar DNS
+
+Antes de continuar, você precisa configurar o acesso ao seu cluster. Assim como na configuração do próprio cluster, a forma como você configura o DNS será diferente dependendo de onde ele está sendo hospedado.
+
+[TIP]
+====
+Se você não quiser lidar com a configuração de registros DNS (por exemplo, este é apenas um servidor de teste efêmero), você pode usar um serviço como https://sslip.io[sslip.io] em vez disso. Com este serviço, você pode resolver qualquer endereço IP com `<address>.sslip.io`.
+====
+
+== Instalar o Rancher [[install-rancher]]
+
+Para instalar o Rancher, você precisa obter acesso à API do Kubernetes do cluster que acabou de criar. Isso parece diferente dependendo de qual distribuição do Kubernetes está sendo usada.
+
+Para o RKE2, o arquivo kubeconfig terá sido gravado em `/etc/rancher/rke2/rke2.yaml`.
+Salve este arquivo como `~/.kube/config` em seu sistema local.
+Talvez você precise editar o arquivo para incluir o endereço IP ou nome de host roteável externamente correto.
+
+Instale o Rancher facilmente com os comandos da https://ranchermanager.docs.rancher.com/{rancher-docs-version}/getting-started/installation-and-upgrade/install-upgrade-on-a-kubernetes-cluster[Documentação do Rancher]:
+
+Instale o https://cert-manager.io[cert-manager]:
+[,bash]
+----
+helm repo add jetstack https://charts.jetstack.io
+helm repo update
+helm install cert-manager jetstack/cert-manager \
+ --namespace cert-manager \
+ --create-namespace \
+ --set crds.enabled=true
+----
+
+Em seguida, instale o próprio Rancher:
+
+[,bash,subs="attributes,specialchars"]
+----
+helm repo add rancher-prime https://charts.rancher.com/server-charts/prime
+helm repo update
+helm install rancher rancher-prime/rancher \
+  --namespace cattle-system \
+  --create-namespace \
+  --set hostname=<DNS or sslip from above> \
+  --set replicas=1 \
+  --set bootstrapPassword=<PASSWORD_FOR_RANCHER_ADMIN> \
+  --version {version-rancher-prime}
+----
+
+[NOTE]
+====
+Se este sistema for destinado à produção, use o cert-manager para configurar um certificado real (como um da Let's Encrypt).
+====
+
+Navegue até o nome de host que você configurou e faça login no Rancher com o `bootstrapPassword` que você usou. Você será guiado por um breve processo de configuração.
+
+== Instale o Elemental [[install-elemental]]
+
+Com o Rancher instalado, você agora pode instalar o operador Elemental e os CRDs necessários. O gráfico Helm para o Elemental é publicado como um artefato OCI, portanto a instalação é um pouco mais simples do que a de outros gráficos.
+Ele pode ser instalado a partir do mesmo shell que você usou para instalar o Rancher ou no navegador, dentro do shell do Rancher.
+
+[,bash,subs="attributes"]
+----
+helm install --create-namespace -n cattle-elemental-system \
+ elemental-operator-crds \
+ oci://registry.suse.com/rancher/elemental-operator-crds-chart \
+ --version {version-elemental-operator}
+ 
+helm install -n cattle-elemental-system \
+ elemental-operator \
+ oci://registry.suse.com/rancher/elemental-operator-chart \
+ --version {version-elemental-operator}
+----
+
+=== (Opcional) Instale a extensão da GUI do Elemental
+
+. Para usar a interface do usuário do Elemental, faça login na sua instância do Rancher e clique no menu de três linhas no canto superior esquerdo:
++
+image::installing-elemental-extension-1.png[Instalando a extensão Elemental 1,scaledwidth=85%]
++
+. Na guia "Disponível" nesta página, clique em "Instalar" no cartão do Elemental:
++
+image::installing-elemental-extension-2.png[Instalando a extensão Elemental 2,scaledwidth=85%]
++
+. Confirme que você deseja instalar a extensão:
++
+image::installing-elemental-extension-3.png[Instalando a extensão Elemental 3,scaledwidth=100%]
++
+. Após a instalação, você será solicitado a recarregar a página.
++
+image::installing-elemental-extension-4.png[Instalando a extensão Elemental 4,scaledwidth=100%]
++
+. Após recarregar, você pode acessar a extensão Elemental através do app global "Gerenciamento de SO".
++
+image::accessing-elemental-extension.png[Acessando a extensão Elemental,scaledwidth=100%]
+
+== Configurar Elemental [[configure-elemental]]
+
+Para simplificar, recomendamos definir a variável `$ELEM` para o caminho completo de onde você deseja o diretório de configuração:
+
+[,shell]
+----
+export ELEM=$HOME/elemental
+mkdir -p $ELEM
+----
+
+Para permitir que as máquinas se registrem no Elemental, precisamos criar um objeto `MachineRegistration` no namespace `fleet-default`.
+
+Vamos criar uma versão básica deste objeto:
+
+[,shell]
+----
+cat << EOF > $ELEM/registration.yaml
+apiVersion: elemental.cattle.io/v1beta1
+kind: MachineRegistration
+metadata:
+  name: ele-quickstart-nodes
+  namespace: fleet-default
+spec:
+  machineName: "\${System Information/Manufacturer}-\${System Information/UUID}"
+  machineInventoryLabels:
+    manufacturer: "\${System Information/Manufacturer}"
+    productName: "\${System Information/Product Name}"
+EOF
+
+kubectl apply -f $ELEM/registration.yaml
+----
+
+[NOTE]
+====
+O comando `cat` escapa cada `$` com uma barra invertida (`\`) para que o Bash não os processe como modelos. Remova as barras invertidas se estiver copiando manualmente.
+====
+
+Assim que o objeto for criado, encontre e anote o endpoint que foi atribuído:
+
+[,bash]
+----
+REGISURL=$(kubectl get machineregistration ele-quickstart-nodes -n fleet-default -o jsonpath='{.status.registrationURL}')
+----
+
+Alternativamente, isso também pode ser feito pela GUI.
+
+Extensão da GUI::
++
+. Na extensão de Gerenciamento de SO, clique em "Criar Endpoint de Registro":
++
+image::click-create-registration.png[Clique em Criar Registro,scaledwidth=100%]
++
+. Dê um nome a esta configuração.
++
+image::create-registration-name.png[Adicionar Nome,scaledwidth=100%]
++
+[NOTE]
+====
+Você pode ignorar o campo Configuração de Nuvem, pois os dados aqui são substituídos pelas etapas a seguir com o Edge Image Builder.
+====
+. Em seguida, role para baixo e clique em "Adicionar Rótulo" para cada rótulo que você deseja que esteja no recurso criado quando uma máquina for registrada. Isso é útil para distinguir máquinas.
++
+image::create-registration-labels.png[Adicionar rótulos,scaledwidth=100%]
++
+. Clique em "Criar" para salvar a configuração.
+
+. Assim que o registro for criado, você deverá ver a URL de Registro listada e poderá clicar em "Copiar" para copiar o endereço:
++
+image::get-registration-url.png[Copy URL,scaledwidth=100%]
++
+[TIP]
+====
+Se você saiu dessa tela, pode clicar em "Endpoints de Registro" no menu à esquerda e, em seguida, clicar no nome do endpoint que você acabou de criar.
+====
++
+Esta URL é usada na próxima etapa.
+
+== Crie a imagem [[build-installation-media]]
+
+Embora a versão atual do Elemental tenha uma maneira de criar sua própria mídia de instalação, no {product} {version-edge} fazemos isso com o Kiwi e o Edge Image Builder, para que o sistema resultante seja criado com o https://www.suse.com/products/micro/[SUSE Linux Micro] como o Sistema Operacional base.
+
+[TIP]
+====
+Para obter mais detalhes sobre o Kiwi, siga o <<guides-kiwi-builder-images,processo do Kiwi Image Builder>> para criar novas imagens primeiro e, para o Edge Image Builder, confira o <<quickstart-eib,Guia de Introdução ao Edge Image Builder>> e também a <<components-eib,Documentação de Componentes>>.
+====
+
+A partir de um sistema Linux com Podman instalado, crie os diretórios e coloque a imagem base sendo criada pelo Kiwi:
+
+[,bash]
+----
+mkdir -p $ELEM/eib_quickstart/base-images
+cp /path/to/{micro-base-image-iso} $ELEM/eib_quickstart/base-images/
+mkdir -p $ELEM/eib_quickstart/elemental
+----
+
+[,bash]
+----
+curl $REGISURL -o $ELEM/eib_quickstart/elemental/elemental_config.yaml
+----
+
+[,bash,subs="attributes,specialchars"]
+----
+cat << EOF > $ELEM/eib_quickstart/eib-config.yaml
+apiVersion: {version-eib-api-latest}
+image:
+    imageType: iso
+    arch: x86_64
+    baseImage: {micro-base-image-iso}
+    outputImageName: elemental-image.iso
+operatingSystem:
+  time:
+    timezone: Europe/London
+    ntp:
+      forceWait: true
+      pools:
+        - 2.suse.pool.ntp.org
+      servers:
+        - 10.0.0.1
+        - 10.0.0.2
+  isoConfiguration:
+    installDevice: /dev/vda
+  users:
+    - username: root
+      encryptedPassword: \$6\$jHugJNNd3HElGsUZ\$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+  packages:
+    sccRegistrationCode: XXX
+EOF
+----
+
+[NOTE]
+====
+* A seção `time` é opcional, mas é altamente recomendável que seja configurada para evitar possíveis problemas com certificados e defasagem de relógio. Os valores fornecidos neste exemplo são apenas para fins ilustrativos. Por favor, ajuste-os para atender aos seus requisitos específicos.
+* A senha não codificada é `eib`.
+* O `sccRegistrationCode` é necessário para baixar e instalar os RPMs necessários das fontes oficiais (alternativamente, os RPMs `elemental-register` e `elemental-system-agent` podem ser carregados manualmente)
+* O comando `cat` escapa cada `$` com uma barra invertida (`\`) para que o Bash não os processe como modelos. Remova as barras invertidas se estiver copiando manualmente.
+* O dispositivo de instalação será apagado durante a instalação.
+====
+
+[,bash,subs="attributes"]
+----
+podman run --privileged --rm -it -v $ELEM/eib_quickstart/:/eib \
+ registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+ build --definition-file eib-config.yaml
+----
+
+Se você estiver inicializando um dispositivo físico, precisamos gravar a imagem em uma unidade flash USB. Isso pode ser feito com:
+
+[,bash]
+----
+sudo dd if=/eib_quickstart/elemental-image.iso of=/dev/<PATH_TO_DISK_DEVICE> status=progress
+----
+
+== Inicialize os nós downstream [[boot-downstream-nodes]]
+
+Agora que criamos o meio de instalação, podemos inicializar nossos nós downstream com ele.
+
+Para cada um dos sistemas que você deseja controlar com o Elemental, adicione o meio de instalação e inicialize o dispositivo. Após a instalação, ele será reiniciado e se registrará automaticamente.
+
+Se você estiver usando a extensão da UI, deverá ver seu nó aparecer no "Inventário de Máquinas".
+
+NOTE: Não remova o meio de instalação até ver o prompt de login; durante a primeira inicialização, os arquivos ainda são acessados na unidade flash.
+
+== Crie clusters downstream [[create-downstream-clusters]]
+
+Existem dois objetos que precisamos criar ao provisionar um novo cluster usando o Elemental.
+
+[.tabs]
+O teste do Linux::
+O primeiro é o `MachineInventorySelectorTemplate`. Este objeto nos permite especificar um mapeamento entre clusters e as máquinas no inventário.
++
+. Crie um seletor que corresponderá a qualquer máquina no inventário com um rótulo:
++
+[,yaml]
+----
+cat << EOF > $ELEM/selector.yaml
+apiVersion: elemental.cattle.io/v1beta1
+kind: MachineInventorySelectorTemplate
+metadata:
+  name: location-123-selector
+  namespace: fleet-default
+spec:
+  template:
+    spec:
+      selector:
+        matchLabels:
+          locationID: '123'
+EOF
+----
++
+. Aplique o recurso ao cluster:
++
+[,bash]
+----
+kubectl apply -f $ELEM/selector.yaml
+----
++
+. Obtenha o nome da máquina e adicione o rótulo correspondente:
++
+[,bash]
+----
+MACHINENAME=$(kubectl get MachineInventory -n fleet-default | awk 'NR>1 {print $1}')
+
+kubectl label MachineInventory -n fleet-default \
+ $MACHINENAME locationID=123
+----
++
+. Crie um recurso de cluster K3s de nó único simples e aplique-o ao cluster:
++
+[,bash,subs="attributes,specialchars"]
+----
+cat << EOF > $ELEM/cluster.yaml
+apiVersion: provisioning.cattle.io/v1
+kind: Cluster
+metadata:
+  name: location-123
+  namespace: fleet-default
+spec:
+  kubernetesVersion: {version-kubernetes-k3s}
+  rkeConfig:
+    machinePools:
+      - name: pool1
+        quantity: 1
+        etcdRole: true
+        controlPlaneRole: true
+        workerRole: true
+        machineConfigRef:
+          kind: MachineInventorySelectorTemplate
+          name: location-123-selector
+          apiVersion: elemental.cattle.io/v1beta1
+EOF
+
+kubectl apply -f $ELEM/cluster.yaml
+----
++
+Extensão da UI::
+A extensão da UI permite que alguns atalhos sejam tomados. Observe que gerenciar vários locais pode envolver muito trabalho manual.
++
+. Como antes, abra o menu de três linhas à esquerda e selecione "Gerenciamento de SO". Isso leva você de volta à tela principal para gerenciar seus sistemas Elemental.
+. Na barra lateral esquerda, clique em "Inventário de Máquinas". Isso abre o inventário de máquinas que foram registradas.
+. Para criar um cluster a partir dessas máquinas, selecione os sistemas que você deseja, clique na lista suspensa "Ações" e, em seguida, em "Criar Cluster Elemental". Isso abre a caixa de diálogo de Criação de Cluster enquanto também cria um MachineSelectorTemplate para usar em segundo plano.
+. Nesta tela, configure o cluster que você deseja que seja criado. Para este início rápido, o K3s v1.30.5+k3s1 é selecionado e o restante das opções é mantido como está.
++
+[TIP]
+====
+Você pode precisar rolar para baixo para ver mais opções.
+====
+
+Após criar esses objetos, você deve ver um novo cluster Kubernetes iniciar usando o novo nó com o qual você acabou de instalar.
+
+== Redefinição de Nó (Opcional)
+
+O SUSE Rancher Elemental suporta a capacidade de realizar uma "redefinição de nó", que pode ser acionada opcionalmente quando um cluster inteiro é excluído do Rancher, um único nó é excluído de um cluster ou um nó é excluído manualmente do inventário de máquinas. Isso é útil quando você deseja redefinir e limpar quaisquer recursos órfãos e deseja trazer automaticamente o nó limpo de volta para o inventário de máquinas para que ele possa ser reutilizado. Isso não está habilitado por padrão e, portanto, qualquer sistema que for removido não será limpo (ou seja, os dados não serão removidos e quaisquer recursos de cluster do Kubernetes continuarão a operar nos clusters downstream) e exigirá intervenção manual para apagar os dados e registrar novamente a máquina no Rancher via Elemental.
+
+Se você deseja que esta funcionalidade seja habilitada por padrão, você precisa garantir que seu `MachineRegistration` habilite isso explicitamente adicionando `config.elemental.reset.enabled: true`, por exemplo:
+
+[,yaml]
+----
+config:
+  elemental:
+    registration:
+      auth: tpm
+    reset:
+      enabled: true
+----
+
+Então, todos os sistemas registrados com este `MachineRegistration` receberão automaticamente a anotação `elemental.cattle.io/resettable: 'true'` em sua configuração. Se você deseja fazer isso manualmente em nós individuais, por exemplo, porque você tem um `MachineInventory` existente que não possui esta anotação, ou você já implantou nós, você pode modificar o `MachineInventory` e adicionar a configuração `resettable`, por exemplo:
+
+[,yaml]
+----
+apiVersion: elemental.cattle.io/v1beta1
+kind: MachineInventory
+metadata:
+  annotations:
+    elemental.cattle.io/os.unmanaged: 'true'
+    elemental.cattle.io/resettable: 'true'
+----
+
+No {product} 3.1, o Operador Elemental coloca um marcador no sistema operacional que acionará o processo de limpeza automaticamente; ele interromperá todos os serviços do Kubernetes, removerá todos os dados persistentes, desinstalará todos os serviços do Kubernetes, limpará quaisquer diretórios restantes do Kubernetes/Rancher e forçará um novo registro no Rancher via configuração original do `MachineRegistration` Elemental. Isso acontece automaticamente, não há necessidade de qualquer intervenção manual. O script que é chamado pode ser encontrado em `/opt/edge/elemental_node_cleanup.sh` e é acionado via `systemd.path` após a colocação do marcador, portanto sua execução é imediata.
+
+[WARNING]
+====
+O uso da funcionalidade `resettable` pressupõe que o comportamento desejado ao remover um nó/cluster do Rancher é limpar os dados e forçar um novo registro. A perda de dados é garantida nesta situação, portanto, use isso apenas se você tiver certeza de que deseja que a redefinição automática seja realizada.
+====
+
+== Próximas etapas
+
+Aqui estão alguns recursos recomendados para pesquisar após usar este guia:
+
+* Automação de ponta a ponta no <<components-fleet>>
+* Opções adicionais de configuração de rede no <<components-nmc>>

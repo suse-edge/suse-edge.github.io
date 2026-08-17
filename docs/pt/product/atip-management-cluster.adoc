@@ -1,0 +1,1628 @@
+[#atip-management-cluster]
+= Configurando o cluster de gerenciamento
+:revdate: 2025-12-01
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+== Introdução
+O cluster de gerenciamento é a parte do SUSE Telco Cloud que é usada para gerenciar o provisionamento e o ciclo de vida das pilhas de tempo de execução.
+Do ponto de vista técnico, o cluster de gerenciamento contém os seguintes componentes:
+
+* `SUSE Linux Micro` como o SO. Dependendo do caso de uso, algumas configurações como rede, armazenamento, usuários e argumentos de kernel podem ser personalizadas.
+* `RKE2` como o cluster Kubernetes. Dependendo do caso de uso, ele pode ser configurado para usar plugins CNI específicos, como `Multus`, `Cilium`, `Calico`, etc.
+* `Rancher` como a plataforma de gerenciamento para gerenciar o ciclo de vida dos clusters.
+* `Metal^3^` como o componente para gerenciar o ciclo de vida dos nós bare-metal.
+* `CAPI` como o componente para gerenciar o ciclo de vida dos clusters Kubernetes (clusters downstream). O `RKE2 CAPI Provider` é usado para gerenciar o ciclo de vida dos clusters RKE2.
+
+Com todos os componentes mencionados acima, o cluster de gerenciamento pode gerenciar o ciclo de vida de clusters downstream, usando uma abordagem declarativa para gerenciar a infraestrutura e os aplicativos.
+
+[NOTE]
+====
+Para obter mais informações sobre o `SUSE Linux Micro`, consulte: <<components-slmicro,SUSE Linux Micro>>
+
+Para obter mais informações sobre o `RKE2`, consulte: <<components-rke2,RKE2>>
+
+Para obter mais informações sobre o `Rancher`, consulte: <<components-rancher,Rancher>>
+
+Para obter mais informações sobre o `Metal^3^`, consulte: <<components-metal3,Metal^3^>>
+====
+
+== Etapas para configurar o cluster de gerenciamento
+
+As seguintes etapas são necessárias para configurar o cluster de gerenciamento (usando um único nó):
+
+image::product-atip-mgmtcluster1.png[scaledwidth=100%]
+
+A seguir estão as principais etapas para configurar o cluster de gerenciamento usando uma abordagem declarativa:
+
+. **xref:mgmt-cluster-image-preparation-connected[Preparação de imagem para ambientes conectados]**: O primeiro passo é preparar os manifestos e arquivos com todas as configurações necessárias para serem usados em ambientes conectados.
+
+  - xref:mgmt-cluster-directory-structure[Estrutura de diretório para ambientes conectados]: Este passo cria uma estrutura de diretório a ser usada pelo Edge Image Builder para armazenar os arquivos de configuração e a própria imagem.
+  - xref:mgmt-cluster-image-definition-file[Arquivo de definição do cluster de gerenciamento]: O arquivo `mgmt-cluster.yaml` é o principal arquivo de definição para o cluster de gerenciamento. Ele contém as seguintes informações sobre a imagem a ser criada:
+        ** Informações da Imagem: As informações relacionadas à imagem a ser criada usando a imagem base.
+        ** Sistema operacional: As configurações do sistema operacional a serem usadas na imagem.
+        ** Kubernetes: Charts Helm e repositórios, versão do Kubernetes, configuração de rede e os nós a serem usados no cluster.
+  - xref:mgmt-cluster-custom-folder[Pasta Personalizada]: A pasta `custom` contém os arquivos de configuração e scripts a serem usados pelo Edge Image Builder para implantar um cluster de gerenciamento totalmente funcional.
+        ** Arquivos: Contém os arquivos de configuração a serem usados pelo cluster de gerenciamento.
+        ** Scripts: Contém os scripts a serem usados pelo cluster de gerenciamento.
+  - xref:mgmt-cluster-kubernetes-folder[Kubernetes folder]: A pasta `kubernetes` contém os arquivos de configuração a serem usados pelo cluster de gerenciamento.
+        ** Manifestos: Contém os manifestos a serem usados pelo cluster de gerenciamento.
+        ** Helm: Contém os arquivos de valores do Helm a serem usados pelo cluster de gerenciamento.
+        ** Configuração: Contém os arquivos de configuração a serem usados pelo cluster de gerenciamento.
+  - xref:mgmt-cluster-network-folder[Pasta de rede]: A pasta `network` contém os arquivos de configuração de rede a serem usados pelos nós do cluster de gerenciamento.
+
+. **xref:mgmt-cluster-image-preparation-airgap[Preparação de imagem para ambientes air-gap]**: A etapa consiste em mostrar as diferenças para preparar os manifestos e arquivos a serem usados em um cenário air-gap.
+  - xref:mgmt-cluster-image-definition-file-airgap[Modificações no arquivo de definição]: O arquivo `mgmt-cluster.yaml` deve ser modificado para incluir a seção `embeddedArtifactRegistry` com o campo `images` definido para todas as imagens de contêiner a serem incluídas na imagem de saída do EIB.
+  - xref:mgmt-cluster-custom-folder-airgap[Modificações na pasta personalizada]: A pasta `custom` deve ser modificada para incluir os recursos necessários para executar o cluster de gerenciamento em um ambiente air-gap.
+        ** Script de registro: O script `custom/scripts/99-register.sh` deve ser removido ao usar um ambiente air-gap.
+
+. **xref:mgmt-cluster-image-creation[Criação de imagem]**: Esta etapa abrange a criação da imagem usando a ferramenta Edge Image Builder (para ambos os cenários, conectado e air-gap). Verifique os <<components-eib,pré-requisitos>> para executar a ferramenta Edge Image Builder em seu sistema.
+
+. **xref:mgmt-cluster-provision[Provisionamento do cluster de gerenciamento]**: Esta etapa abrange o provisionamento do cluster de gerenciamento usando a imagem criada na etapa anterior (para ambos os cenários, conectado e air-gap). Esta etapa pode ser feita usando um laptop, servidor, VM ou qualquer outro sistema {x86-64} com uma porta USB.
+
+[NOTE]
+====
+Para obter mais informações sobre o Edge Image Builder, consulte <<components-eib,Edge Image Builder>> e <<quickstart-eib,Início Rápido do Edge Image Builder>>.
+====
+
+[#mgmt-cluster-image-preparation-connected]
+== Preparação de imagem para ambientes conectados
+
+O Edge Image Builder é usado para criar a imagem para o cluster de gerenciamento; neste documento, abordamos a configuração mínima necessária para configurar o cluster de gerenciamento.
+
+O Edge Image Builder é executado dentro de um contêiner, portanto, é necessário um tempo de execução do contêiner, como https://podman.io[Podman] ou https://rancherdesktop.io[Rancher Desktop]. Para este guia, assumimos que o podman está disponível.
+
+Além disso, como pré-requisito para implantar um cluster de gerenciamento de alta disponibilidade, você precisa reservar três IPs em sua rede:
+
+- `apiVIP` para o endereço VIP da API (usado para acessar o servidor de API do Kubernetes).
+- `ingressVIP` para o endereço VIP de Ingress (consumido, por exemplo, pela interface do usuário do Rancher).
+- `metal3VIP` para o endereço VIP do Metal3.
+
+[#mgmt-cluster-directory-structure]
+=== Estrutura de diretórios
+
+Ao executar o EIB, um diretório é montado a partir do host, portanto, a primeira coisa a fazer é criar uma estrutura de diretórios a ser usada pelo EIB para armazenar os arquivos de configuração e a própria imagem.
+Este diretório tem a seguinte estrutura:
+
+[,console]
+----
+eib
+├── mgmt-cluster.yaml
+├── network
+│ └── mgmt-cluster-node1.yaml
+├── os-files
+│ └── var
+│   └── lib
+│     └── rancher
+│       └── rke2
+│         └── server
+│           └── manifests
+│             └── rke2-ingress-config.yaml
+├── kubernetes
+│ ├── manifests
+│ │ ├── neuvector-namespace.yaml
+│ │ ├── ingress-l2-adv.yaml
+│ │ └── ingress-ippool.yaml
+│ ├── helm
+│ │ └── values
+│ │     ├── rancher.yaml
+│ │     ├── neuvector.yaml
+│ │     ├── longhorn.yaml
+│ │     ├── metal3.yaml
+│ │     └── certmanager.yaml
+│ └── config
+│     └── server.yaml
+├── custom
+│ ├── scripts
+│ │ ├── 99-register.sh
+│ │ ├── 99-mgmt-setup.sh
+│ │ └── 99-alias.sh
+│ └── files
+│     ├── rancher.sh
+│     ├── mgmt-stack-setup.service
+│     ├── metal3.sh
+│     └── basic-setup.sh
+└── base-images
+
+----
+
+[NOTE]
+====
+A imagem `{micro-base-image-iso}` deve ser baixada do https://scc.suse.com/[SUSE Customer Center] ou da https://www.suse.com/download/sle-micro/[página de download da SUSE], e deve estar localizada na pasta `base-images`.
+
+Você deve verificar a soma de verificação SHA256 da imagem para garantir que ela não tenha sido adulterada. A soma de verificação pode ser encontrada no mesmo local onde a imagem foi baixada.
+
+Um exemplo da estrutura de diretórios pode ser encontrado no https://github.com/suse-edge/telco-cloud-examples[{product} repositório do GitHub na pasta "telco-examples"].
+====
+
+[#mgmt-cluster-image-definition-file]
+=== Arquivo de definição do cluster de gerenciamento
+
+O arquivo `mgmt-cluster.yaml` é o principal arquivo de definição para o cluster de gerenciamento. Ele contém as seguintes informações:
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: {micro-base-image-iso}
+  outputImageName: eib-mgmt-cluster-image.iso
+operatingSystem:
+  isoConfiguration:
+    installDevice: /dev/sda
+  users:
+  - username: root
+    encryptedPassword: $ROOT_PASSWORD
+  packages:
+    packageList:
+    - jq
+    - open-iscsi
+    sccRegistrationCode: $SCC_REGISTRATION_CODE
+kubernetes:
+  version: {version-kubernetes-rke2}
+  helm:
+    charts:
+      - name: cert-manager
+        repositoryName: jetstack
+        version: {version-cert-manager}
+        targetNamespace: cert-manager
+        valuesFile: certmanager.yaml
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: suse-storage
+        releaseName: longhorn
+        version: {version-longhorn-chart}
+        repositoryName: rancher-application-collection
+        targetNamespace: longhorn-system
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: longhorn.yaml
+      - name: metallb
+        version: {version-metallb-chart}
+        targetNamespace: metallb-system
+        createNamespace: true
+        repositoryName: suse-edge-charts
+        installationNamespace: kube-system
+      - name: metal3
+        version: {version-metal3-chart}
+        repositoryName: suse-edge-charts
+        targetNamespace: metal3-system
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: metal3.yaml
+      - name: rancher-turtles-providers
+        version: {version-rancher-turtles-providers-chart}
+        repositoryName: suse-edge-charts
+        targetNamespace: cattle-turtles-system
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: neuvector-crd
+        version: {version-neuvector-crd-chart}
+        repositoryName: rancher-charts
+        targetNamespace: neuvector
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: neuvector.yaml
+      - name: neuvector
+        version: {version-neuvector-chart}
+        repositoryName: rancher-charts
+        targetNamespace: neuvector
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: neuvector.yaml
+      - name: rancher
+        version: {version-rancher-prime}
+        repositoryName: rancher-prime
+        targetNamespace: cattle-system
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: rancher.yaml
+    repositories:
+      - name: jetstack
+        url: https://charts.jetstack.io
+      - name: rancher-charts
+        url: https://charts.rancher.io/
+      - name: suse-edge-charts
+        url: oci://registry.suse.com/edge/charts
+      - name: rancher-prime
+        url: https://charts.rancher.com/server-charts/prime
+      - name: rancher-application-collection
+        url: oci://dp.apps.rancher.io/charts
+        authentication:
+          username: $\{APPS.RANCHER.IO_USERNAME\}
+          password: $\{APPS.RANCHER.IO_ACCESS_TOKEN\}
+  network:
+    apiHost: $API_HOST
+    apiVIP: $API_VIP
+  nodes:
+    - hostname: mgmt-cluster-node1
+      initializer: true
+      type: server
+#   - hostname: mgmt-cluster-node2
+#     type: server
+#   - hostname: mgmt-cluster-node3
+#     type: server
+----
+
+Para explicar os campos e valores no arquivo de definição `mgmt-cluster.yaml`, nós o dividimos nas seguintes seções.
+
+- Seção de imagem (arquivo de definição):
+
+[,yaml,subs="attributes"]
+----
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: {micro-base-image-iso}
+  outputImageName: eib-mgmt-cluster-image.iso
+----
+
+onde `baseImage` é a imagem original que você baixou do SUSE Customer Center ou da página de download da SUSE. `outputImageName` é o nome da nova imagem que será usada para provisionar o cluster de gerenciamento.
+
+- Seção do sistema operacional (arquivo de definição):
+
+[,yaml]
+----
+operatingSystem:
+  isoConfiguration:
+    installDevice: /dev/sda
+  users:
+  - username: root
+    encryptedPassword: $ROOT_PASSWORD
+  packages:
+    packageList:
+    - jq
+    sccRegistrationCode: $SCC_REGISTRATION_CODE
+----
+
+onde `installDevice` é o dispositivo a ser usado para instalar o sistema operacional, `username` e `encryptedPassword` são as credenciais a serem usadas para acessar o sistema, `packageList` é a lista de pacotes a serem instalados (`jq` é necessário internamente durante o processo de instalação) e `sccRegistrationCode` é o código de registro usado para obter os pacotes e dependências durante o build e pode ser obtido do SUSE Customer Center.
+A senha criptografada pode ser gerada usando o comando `openssl` da seguinte forma:
+
+[,shell]
+----
+openssl passwd -6 MyPassword!123
+----
+
+Isso gera algo semelhante a:
+
+[,console]
+----
+$6$UrXB1sAGs46DOiSq$HSwi9GFJLCorm0J53nF2Sq8YEoyINhHcObHzX2R8h13mswUIsMwzx4eUzn/rRx0QPV4JIb0eWCoNrxGiKH4R31
+----
+
+- Seção Kubernetes (arquivo de definição):
+
+[,yaml,subs="attributes"]
+----
+kubernetes:
+  version: {version-kubernetes-rke2}
+  helm:
+    charts:
+      - name: cert-manager
+        repositoryName: jetstack
+        version: {version-cert-manager}
+        targetNamespace: cert-manager
+        valuesFile: certmanager.yaml
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: suse-storage
+        releaseName: longhorn
+        version: {version-longhorn-chart}
+        repositoryName: rancher-application-collection
+        targetNamespace: longhorn-system
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: longhorn.yaml
+      - name: metal3
+        version: {version-metal3-chart}
+        repositoryName: suse-edge-charts
+        targetNamespace: metal3-system
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: metal3.yaml
+      - name: metallb
+        version: {version-metallb-chart}
+        targetNamespace: metallb-system
+        createNamespace: true
+        repositoryName: suse-edge-charts
+        installationNamespace: kube-system
+      - name: rancher-turtles-providers
+        version: {version-rancher-turtles-providers-chart}
+        repositoryName: suse-edge-charts
+        targetNamespace: cattle-turtles-system
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: neuvector-crd
+        version: {version-neuvector-crd-chart}
+        repositoryName: rancher-charts
+        targetNamespace: neuvector
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: neuvector.yaml
+      - name: neuvector
+        version: {version-neuvector-chart}
+        repositoryName: rancher-charts
+        targetNamespace: neuvector
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: neuvector.yaml
+      - name: rancher
+        version: {version-rancher-prime}
+        repositoryName: rancher-prime
+        targetNamespace: cattle-system
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: rancher.yaml
+    repositories:
+      - name: jetstack
+        url: https://charts.jetstack.io
+      - name: rancher-charts
+        url: https://charts.rancher.io/
+      - name: suse-edge-charts
+        url: oci://registry.suse.com/edge/charts
+      - name: rancher-prime
+        url: https://charts.rancher.com/server-charts/prime
+      - name: rancher-application-collection
+        url: oci://dp.apps.rancher.io/charts
+        authentication:
+          username: $\{APPS.RANCHER.IO_USERNAME\}
+          password: $\{APPS.RANCHER.IO_ACCESS_TOKEN\}
+    network:
+      apiHost: $API_HOST
+      apiVIP: $API_VIP
+    nodes:
+    - hostname: mgmt-cluster-node1
+      initializer: true
+      type: server
+#   - hostname: mgmt-cluster-node2
+#     type: server
+#   - hostname: mgmt-cluster-node3
+#     type: server
+----
+
+A seção `helm` contém a lista de charts Helm a serem instalados, os repositórios a serem usados, e a configuração de versão para todos eles.
+
+A seção `network` contém a configuração para a rede, como o `apiHost` e o `apiVIP` a serem usados pelo componente `RKE2`.
+O `apiVIP` deve ser um endereço IP que não seja usado na rede e não deve fazer parte do pool DHCP (caso usemos DHCP). Além disso, quando usamos o `apiVIP` em um cluster de vários nós, ele é usado para acessar o servidor de API do Kubernetes.
+O `apiHost` é a resolução de nomes para o `apiVIP` a ser usado pelo componente `RKE2`.
+
+A seção `nodes` contém a lista de nós a serem usados no cluster. Neste exemplo, um cluster de nó único está sendo usado, mas ele pode ser estendido para um cluster de vários nós adicionando mais nós à lista (removendo o comentário das linhas).
+
+[NOTE]
+====
+* Os nomes dos nós devem ser exclusivos no cluster.
+* Opcionalmente, use o campo `initializer` para especificar o host de inicialização; caso contrário, será o primeiro nó da lista.
+* Os nomes dos nós devem ser os mesmos que os nomes de host definidos na <<mgmt-cluster-network-folder,Pasta de rede>> quando a configuração de rede for necessária.
+====
+
+[#mgmt-cluster-custom-folder]
+=== Pasta Personalizada
+
+A pasta `custom` contém as seguintes subpastas:
+
+[,console]
+----
+...
+├── custom
+│ ├── scripts
+│ │ ├── 99-register.sh
+│ │ ├── 99-mgmt-setup.sh
+│ │ └── 99-alias.sh
+│ └── files
+│     ├── rancher.sh
+│     ├── mgmt-stack-setup.service
+│     ├── metal3.sh
+│     └── basic-setup.sh
+...
+----
+
+- A pasta `custom/files` contém os arquivos de configuração a serem usados pelo cluster de gerenciamento.
+- A pasta `custom/scripts` contém os scripts a serem usados pelo cluster de gerenciamento.
+
+
+A pasta `custom/files` contém os seguintes arquivos:
+
+* `basic-setup.sh`: contém parâmetros de configuração para `Metal^3^`, `Rancher` e `MetalLB`. Modifique este arquivo apenas se desejar alterar os namespaces a serem usados.
++
+[,shell]
+----
+#!/bin/bash
+# Pre-requisites. Cluster already running
+export KUBECTL="/var/lib/rancher/rke2/bin/kubectl"
+export KUBECONFIG="/etc/rancher/rke2/rke2.yaml"
+
+##################
+# METAL3 DETAILS #
+##################
+export METAL3_CHART_TARGETNAMESPACE="metal3-system"
+
+###########
+# METALLB #
+###########
+export METALLBNAMESPACE="metallb-system"
+
+###########
+# RANCHER #
+###########
+export RANCHER_CHART_TARGETNAMESPACE="cattle-system"
+export RANCHER_FINALPASSWORD="adminadminadmin"
+
+die(){
+  echo ${1} 1>&2
+  exit ${2}
+}
+----
+
+* `metal3.sh`: contém a configuração para o componente `Metal^3^` a ser usado (nenhuma modificação necessária). Em versões futuras, este script será substituído, utilizando `Rancher Turtles` em vez disso, para facilitar.
++
+[,shell]
+----
+#!/bin/bash
+set -euo pipefail
+
+BASEDIR="$(dirname "$0")"
+source ${BASEDIR}/basic-setup.sh
+
+METAL3LOCKNAMESPACE="default"
+METAL3LOCKCMNAME="metal3-lock"
+
+trap 'catch $? $LINENO' EXIT
+
+catch() {
+  if [ "$1" != "0" ]; then
+    echo "Error $1 occurred on $2"
+    ${KUBECTL} delete configmap ${METAL3LOCKCMNAME} -n ${METAL3LOCKNAMESPACE}
+  fi
+}
+
+# Get or create the lock to run all those steps just in a single node
+# As the first node is created WAY before the others, this should be enough
+# TODO: Investigate if leases is better
+if [ $(${KUBECTL} get cm -n ${METAL3LOCKNAMESPACE} ${METAL3LOCKCMNAME} -o name | wc -l) -lt 1 ]; then
+  ${KUBECTL} create configmap ${METAL3LOCKCMNAME} -n ${METAL3LOCKNAMESPACE} --from-literal foo=bar
+else
+  exit 0
+fi
+
+# Wait for metal3
+while ! ${KUBECTL} wait --for condition=ready -n ${METAL3_CHART_TARGETNAMESPACE} $(${KUBECTL} get pods -n ${METAL3_CHART_TARGETNAMESPACE} -l app.kubernetes.io/name=metal3-ironic -o name) --timeout=10s; do sleep 2 ; done
+
+# Get the ironic IP
+IRONICIP=$(${KUBECTL} get cm -n ${METAL3_CHART_TARGETNAMESPACE} ironic -o jsonpath='{.data.IRONIC_IP}')
+
+# If LoadBalancer, use metallb, else it is NodePort
+if [ $(${KUBECTL} get svc -n ${METAL3_CHART_TARGETNAMESPACE} metal3-metal3-ironic -o jsonpath='{.spec.type}') == "LoadBalancer" ]; then
+  # Wait for metallb
+  while ! ${KUBECTL} wait --for condition=ready -n ${METALLBNAMESPACE} $(${KUBECTL} get pods -n ${METALLBNAMESPACE} -l app.kubernetes.io/component=controller -o name) --timeout=10s; do sleep 2 ; done
+
+  # Do not create the ippool if already created
+  ${KUBECTL} get ipaddresspool -n ${METALLBNAMESPACE} ironic-ip-pool -o name || cat <<-EOF | ${KUBECTL} apply -f -
+  apiVersion: metallb.io/v1beta1
+  kind: IPAddressPool
+  metadata:
+    name: ironic-ip-pool
+    namespace: ${METALLBNAMESPACE}
+  spec:
+    addresses:
+    - ${IRONICIP}/32
+    serviceAllocation:
+      priority: 100
+      serviceSelectors:
+      - matchExpressions:
+        - {key: app.kubernetes.io/name, operator: In, values: [metal3-ironic]}
+    EOF
+
+  # Same for L2 Advs
+  ${KUBECTL} get L2Advertisement -n ${METALLBNAMESPACE} ironic-ip-pool-l2-adv -o name || cat <<-EOF | ${KUBECTL} apply -f -
+  apiVersion: metallb.io/v1beta1
+  kind: L2Advertisement
+  metadata:
+    name: ironic-ip-pool-l2-adv
+    namespace: ${METALLBNAMESPACE}
+  spec:
+    ipAddressPools:
+    - ironic-ip-pool
+    EOF
+fi
+
+# Clean up the lock cm
+
+${KUBECTL} delete configmap ${METAL3LOCKCMNAME} -n ${METAL3LOCKNAMESPACE}
+----
+
+- `rancher.sh`: contém a configuração para o componente `Rancher` a ser usado (nenhuma modificação necessária).
++
+[,shell]
+----
+#!/bin/bash
+set -euo pipefail
+
+BASEDIR="$(dirname "$0")"
+source ${BASEDIR}/basic-setup.sh
+
+RANCHERLOCKNAMESPACE="default"
+RANCHERLOCKCMNAME="rancher-lock"
+
+if [ -z "${RANCHER_FINALPASSWORD}" ]; then
+  # If there is no final password, then finish the setup right away
+  exit 0
+fi
+
+trap 'catch $? $LINENO' EXIT
+
+catch() {
+  if [ "$1" != "0" ]; then
+    echo "Error $1 occurred on $2"
+    ${KUBECTL} delete configmap ${RANCHERLOCKCMNAME} -n ${RANCHERLOCKNAMESPACE}
+  fi
+}
+
+# Get or create the lock to run all those steps just in a single node
+# As the first node is created WAY before the others, this should be enough
+# TODO: Investigate if leases is better
+if [ $(${KUBECTL} get cm -n ${RANCHERLOCKNAMESPACE} ${RANCHERLOCKCMNAME} -o name | wc -l) -lt 1 ]; then
+  ${KUBECTL} create configmap ${RANCHERLOCKCMNAME} -n ${RANCHERLOCKNAMESPACE} --from-literal foo=bar
+else
+  exit 0
+fi
+
+# Wait for rancher to be deployed
+while ! ${KUBECTL} wait --for condition=ready -n ${RANCHER_CHART_TARGETNAMESPACE} $(${KUBECTL} get pods -n ${RANCHER_CHART_TARGETNAMESPACE} -l app=rancher -o name) --timeout=10s; do sleep 2 ; done
+until ${KUBECTL} get ingress -n ${RANCHER_CHART_TARGETNAMESPACE} rancher > /dev/null 2>&1; do sleep 10; done
+
+RANCHERBOOTSTRAPPASSWORD=$(${KUBECTL} get secret -n ${RANCHER_CHART_TARGETNAMESPACE} bootstrap-secret -o jsonpath='{.data.bootstrapPassword}' | base64 -d)
+RANCHERHOSTNAME=$(${KUBECTL} get ingress -n ${RANCHER_CHART_TARGETNAMESPACE} rancher -o jsonpath='{.spec.rules[0].host}')
+
+# Skip the whole process if things have been set already
+if [ -z $(${KUBECTL} get settings.management.cattle.io first-login -ojsonpath='{.value}') ]; then
+  # Add the protocol
+  RANCHERHOSTNAME="https://${RANCHERHOSTNAME}"
+  TOKEN=""
+  while [ -z "${TOKEN}" ]; do
+    # Get token
+    sleep 2
+    TOKEN=$(curl -sk -X POST ${RANCHERHOSTNAME}/v3-public/localProviders/local?action=login -H 'content-type: application/json' -d "{\"username\":\"admin\",\"password\":\"${RANCHERBOOTSTRAPPASSWORD}\"}" | jq -r .token)
+  done
+
+  # Set password
+  curl -sk ${RANCHERHOSTNAME}/v3/users?action=changepassword -H 'content-type: application/json' -H "Authorization: Bearer $TOKEN" -d "{\"currentPassword\":\"${RANCHERBOOTSTRAPPASSWORD}\",\"newPassword\":\"${RANCHER_FINALPASSWORD}\"}"
+
+  # Create a temporary API token (ttl=60 minutes)
+  APITOKEN=$(curl -sk ${RANCHERHOSTNAME}/v3/token -H 'content-type: application/json' -H "Authorization: Bearer ${TOKEN}" -d '{"type":"token","description":"automation","ttl":3600000}' | jq -r .token)
+
+  curl -sk ${RANCHERHOSTNAME}/v3/settings/server-url -H 'content-type: application/json' -H "Authorization: Bearer ${APITOKEN}" -X PUT -d "{\"name\":\"server-url\",\"value\":\"${RANCHERHOSTNAME}\"}"
+  curl -sk ${RANCHERHOSTNAME}/v3/settings/telemetry-opt -X PUT -H 'content-type: application/json' -H 'accept: application/json' -H "Authorization: Bearer ${APITOKEN}" -d '{"value":"out"}'
+fi
+
+# Clean up the lock cm
+${KUBECTL} delete configmap ${RANCHERLOCKCMNAME} -n ${RANCHERLOCKNAMESPACE}
+----
+
+- `mgmt-stack-setup.service`: contém a configuração para criar o serviço systemd para executar os scripts durante a primeira inicialização (nenhuma modificação necessária).
++
+[,shell]
+----
+[Unit]
+Description=Setup Management stack components
+Wants=network-online.target
+# It requires rke2 or k3s running, but it will not fail if those services are not present
+After=network.target network-online.target rke2-server.service k3s.service
+# At least, the basic-setup.sh one needs to be present
+ConditionPathExists=/opt/mgmt/bin/basic-setup.sh
+
+[Service]
+User=root
+Type=forking
+# Metal3 can take A LOT to download the IPA image
+TimeoutStartSec=1800
+
+ExecStartPre=/bin/sh -c "echo 'Setting up Management components...'"
+# Scripts are executed in StartPre because Start can only run a single one
+ExecStartPre=/opt/mgmt/bin/rancher.sh
+ExecStartPre=/opt/mgmt/bin/metal3.sh
+ExecStart=/bin/sh -c "echo 'Finished setting up Management components'"
+RemainAfterExit=yes
+KillMode=process
+# Disable & delete everything
+ExecStartPost=rm -f /opt/mgmt/bin/rancher.sh
+ExecStartPost=rm -f /opt/mgmt/bin/metal3.sh
+ExecStartPost=rm -f /opt/mgmt/bin/basic-setup.sh
+ExecStartPost=/bin/sh -c "systemctl disable mgmt-stack-setup.service"
+ExecStartPost=rm -f /etc/systemd/system/mgmt-stack-setup.service
+
+[Install]
+WantedBy=multi-user.target
+----
+
+A pasta `custom/scripts` contém os seguintes arquivos:
+
+- Script `99-alias.sh`: contém o álias a ser usado pelo cluster de gerenciamento para carregar o arquivo kubeconfig na primeira inicialização (nenhuma modificação necessária).
++
+[,shell]
+----
+#!/bin/bash
+echo "alias k=kubectl" >> /etc/profile.local
+echo "alias kubectl=/var/lib/rancher/rke2/bin/kubectl" >> /etc/profile.local
+echo "export KUBECONFIG=/etc/rancher/rke2/rke2.yaml" >> /etc/profile.local
+----
+
+- Script `99-mgmt-setup.sh`: contém a configuração para copiar os scripts durante a primeira inicialização (nenhuma modificação necessária).
++
+[,shell]
+----
+#!/bin/bash
+
+# Copy the scripts from combustion to the final location
+mkdir -p /opt/mgmt/bin/
+for script in basic-setup.sh rancher.sh metal3.sh; do
+    cp ${script} /opt/mgmt/bin/
+done
+
+# Copy the systemd unit file and enable it at boot
+cp mgmt-stack-setup.service /etc/systemd/system/mgmt-stack-setup.service
+systemctl enable mgmt-stack-setup.service
+----
+
+- Script `99-register.sh`: contém a configuração para registrar o sistema usando o código de registro SCC. O `$\{SCC_ACCOUNT_EMAIL\}` e o `$\{SCC_REGISTRATION_CODE\}` devem ser definidos corretamente para registrar o sistema com sua conta.
++
+[,shell]
+----
+#!/bin/bash
+set -euo pipefail
+
+# Registration https://www.suse.com/support/kb/doc/?id=000018564
+if ! which SUSEConnect > /dev/null 2>&1; then
+    zypper --non-interactive install suseconnect-ng
+fi
+SUSEConnect --email "${SCC_ACCOUNT_EMAIL}" --url "https://scc.suse.com" --regcode "${SCC_REGISTRATION_CODE}"
+----
+
+
+[#mgmt-cluster-kubernetes-folder]
+=== Kubernetes folder
+
+A pasta `kubernetes` contém as seguintes subpastas:
+
+[,console]
+----
+...
+├── kubernetes
+│ ├── manifests
+│ │ ├── rke2-ingress-config.yaml
+│ │ ├── neuvector-namespace.yaml
+│ │ ├── ingress-l2-adv.yaml
+│ │ └── ingress-ippool.yaml
+│ ├── helm
+│ │ └── values
+│ │     ├── rancher.yaml
+│ │     ├── neuvector.yaml
+│ │     ├── metal3.yaml
+│ │     └── certmanager.yaml
+│ └── config
+│     └── server.yaml
+...
+----
+
+A pasta `kubernetes/config` contém os seguintes arquivos:
+
+- `server.yaml`: O plug-in `CNI` instalado por padrão é o `Cilium`, portanto, você não precisa criar esta pasta e arquivo para definir isso. Caso você precise personalizar o plug-in `CNI`, você pode usar o arquivo `server.yaml` na pasta `kubernetes/config`. Ele contém as seguintes informações:
++
+[,yaml]
+----
+cni:
+- multus
+- cilium
+ingress-controller: traefik
+write-kubeconfig-mode: '0644'
+selinux: true
+system-default-registry: registry.rancher.com
+----
+
+[NOTE]
+====
+Este é um arquivo opcional para definir certas personalizações do Kubernetes, como os plug-ins CNI a serem usados ou muitas opções que você pode verificar na https://docs.rke2.io/install/configuration[documentação oficial].
+====
+
+[WARNING]
+====
+O provedor de ingress `Traefik` integrado ao RKE2/K3s é o único controlador de ingress suportado na versão `{product} {version}`, sendo ainda possível executar temporariamente o `Ingress-NGINX` junto com o `Traefik` para suportar cenários complexos de migração de ingress, mas apenas após os clusters de Gerenciamento e/ou Downstream `{product}` terem sido atualizados para a versão `{version}` e pelo tempo necessário para realizar essa migração. Como o `Traefik` ainda não é o controlador de ingress padrão no RKE2 (ele será a partir do RKE2 v1.36 em diante), ele deve ser explicitamente "solicitado" no arquivo de configuração do servidor RKE2, resultando na necessidade de incluir o arquivo `kubernetes/config/server.yaml` em todas as imagens ISO de auto-instalação do EIB geradas para provisionar os nós dos clusters de Gerenciamento `{product} {version}`.
+
+O guia https://docs.rke2.io/reference/ingress_migration[Migração de Ingress NGINX para Traefik] do RKE2 fornece detalhes sobre os caminhos de migração de ingress disponíveis assim que o controlador de ingress `Traefik` substituir o `Ingress-NGINX` descontinuado.
+====
+
+A pasta `os-files/var/lib/rancher/rke2/server/manifests` contém o seguinte arquivo:
+
+- `rke2-ingress-config.yaml`: contém a configuração para criar o serviço `Ingress` para o cluster de gerenciamento (nenhuma modificação necessária).
++
+[,yaml]
+----
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    ingressClass:
+      isDefaultClass: true
+    ports:
+      web:
+        hostPort: null    # disallow hostPort
+        exposedPort: 80
+      websecure:
+        hostPort: null    # disallow hostPort
+        exposedPort: 443
+    service:
+      enabled: true
+      type: LoadBalancer
+      spec:
+        externalTrafficPolicy: Local
+        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+    providers:
+      kubernetesIngressNginx:  # this provider allows traefik to "understand" most of the ingress-nginx annotations
+        enabled: true
+        ingressClass: "rke2-ingress-nginx-migration"
+        controllerClass: "rke2.​cattle.​io/ingress-nginx-migration"
+----
+
+[NOTE]
+====
+O `HelmChartConfig` deve ser incluído via `os-files` no diretório `/var/lib/rancher/rke2/server/manifests`, não via `kubernetes/manifests` como descrito em versões anteriores.
+====
+
+A pasta `kubernetes/manifests` contém os seguintes arquivos:
+
+- `neuvector-namespace.yaml`: contém a configuração para criar o namespace `NeuVector` (nenhuma modificação necessária).
++
+[,yaml]
+----
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+  name: neuvector
+----
+
+- `ingress-l2-adv.yaml`: contém a configuração para criar o `L2Advertisement` para o componente `MetalLB` (nenhuma modificação necessária).
++
+[,yaml]
+----
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: ingress-l2-adv
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - ingress-ippool
+----
+
+- `ingress-ippool.yaml`: contém a configuração para criar o objeto `IPAddressPool` do MetalLB para o componente `rke2-traefik`. O `$\{INGRESS_VIP\}` deve ser definido corretamente para definir o endereço IP exposto reservado para ser usado para alcançar o serviço `rke2-traefik` (interno).
++
+[,yaml]
+----
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: ingress-ippool
+  namespace: metallb-system
+spec:
+  addresses:
+    - ${INGRESS_VIP}/32
+  serviceAllocation:
+    priority: 100
+    serviceSelectors:
+      - matchExpressions:
+          - {key: app.kubernetes.io/name, operator: In, values: [rke2-traefik]}
+----
+
+A pasta `kubernetes/helm/values` contém os seguintes arquivos:
+
+- `rancher.yaml`: contém a configuração para criar o componente `Rancher`. O `$\{INGRESS_VIP\}` deve ser definido corretamente para definir o endereço IP a ser consumido pelo componente `Rancher`. A URL para acessar o componente `Rancher` será `\https://rancher-$\{INGRESS_VIP\}.sslip.io`.
++
+[,yaml]
+----
+hostname: rancher-${INGRESS_VIP}.sslip.io
+bootstrapPassword: "foobar"
+replicas: 1
+global:
+  cattle:
+    systemDefaultRegistry: "registry.rancher.com"
+----
+
+- `neuvector.yaml`: contém a configuração para criar o componente `NeuVector` (nenhuma modificação necessária).
++
+[,yaml]
+----
+controller:
+  replicas: 1
+  ranchersso:
+    enabled: true
+manager:
+  enabled: false
+cve:
+  scanner:
+    enabled: false
+    replicas: 1
+k3s:
+  enabled: true
+crdwebhook:
+  enabled: false
+registry: "registry.rancher.com"
+global:
+  cattle:
+    systemDefaultRegistry: "registry.rancher.com"
+----
+
+- `longhorn.yaml`: contém a configuração para criar o componente `Longhorn`. Para garantir que as imagens de contêiner necessárias sejam baixadas no momento da inicialização, adicione suas credenciais da Rancher Application Collection.
++
+[,yaml]
+----
+privateRegistry:
+  createSecret: true
+  registryUrl: dp.apps.rancher.io
+  registryUser: $\{APPS.RANCHER.IO_USERNAME\}
+  registryPasswd: $\{APPS.RANCHER.IO_ACCESS_TOKEN\}
+  registrySecret: rancher-app-collection
+----
+
+- `metal3.yaml`: contém a configuração para criar o componente `Metal^3^`. O `$\{METAL3_VIP\}` deve ser definido corretamente para definir o endereço IP a ser consumido pelo componente `Metal^3^`.
++
+[,yaml]
+----
+global:
+  ironicIP: ${METAL3_VIP}
+  enable_vmedia_tls: false
+  predictableNicNames: "true"
+  # trustedCAs: tls-ca-bundle  # Optional: Uncomment and set to ConfigMap name for additional trusted CAs
+metal3-ironic:
+  ipa:
+    useHauler: false
+  persistence:
+    ironic:
+      size: "5Gi"
+
+----
++
+[IMPORTANT]
+====
+O parâmetro do Helm chart `metal3-ironic.ipa.useHauler` **deve** ser definido como `true` (valor booleano) em ambientes air-gapped; isso instrui o Metal^3^ a recuperar a imagem de contêiner `ironic-python-agent` (IPA) do registro de artefatos incorporado em vez de tentar baixá-la da internet. Esta imagem de contêiner IPA deve ser adicionalmente incluída na lista `embeddedArtifactRegistry.images` no xref:mgmt-cluster-image-definition-file-airgap[arquivo de definição de imagem EIB para ambientes air-gap].
+====
+
+[#metal3-media-server]
+[NOTE]
+====
+O Servidor de Mídia é um recurso opcional incluído no Metal^3^ (por padrão, está desabilitado). Para usar o recurso Metal3, você precisa configurá-lo no manifesto anterior.
+Para usar o servidor de mídia Metal^3^, especifique a seguinte variável:
+
+- adicione `enable_metal3_media_server` a `true` para habilitar o recurso de servidor de mídia na seção global.
+- Inclua a seguinte configuração sobre o servidor de mídia, onde $\{MEDIA_VOLUME_PATH\} é o caminho para o volume de mídia (por exemplo, `/home/metal3/bmh-image-cache`).
++
+[,yaml]
+----
+metal3-media:
+  mediaVolume:
+    hostPath: ${MEDIA_VOLUME_PATH}
+----
+
+Um servidor de mídia externo pode ser usado para armazenar as imagens e, caso você queira usá-lo com TLS, precisará fornecer o pacote de CA confiável para o Metal^3^.
+
+*Prepare o pacote de CA:*
+
+Primeiro, prepare seu arquivo de pacote de CA contendo todos os certificados necessários pelo Metal^3^. Isso inclui o(s) certificado(s) de CA do seu servidor de mídia externo.
++
+*Opcional – Pacote de CA do sistema:* Se o Metal^3^ também precisar confiar em CAs públicas (por exemplo, ao acessar recursos HTTPS externos), você pode incluir o pacote de CA do sistema. Extraia-o de uma imagem de contêiner e concatene-o com seus certificados personalizados:
++
+[,shell]
+----
+# Extract system CAs from a container image
+podman run --rm registry.suse.com/bci/bci-base:latest cat /etc/ssl/certs/ca-certificates.crt > system-cas.pem
+
+# Concatenate system CAs with your custom CA
+cat system-cas.pem your-custom-ca.crt > ca-bundle.pem
+----
++
+Ou, se você precisar apenas da sua CA personalizada:
++
+[,shell]
+----
+cp your-custom-ca.crt ca-bundle.pem
+----
++
+[IMPORTANT]
+====
+Se você incluir o pacote de CA do sistema, você se torna responsável por mantê-lo atualizado. As CAs do sistema em imagens de contêiner podem ficar desatualizadas à medida que os certificados expiram ou são revogados. Atualize periodicamente o pacote extraindo-o novamente de uma imagem de contêiner atualizada.
+====
+
+*Crie o ConfigMap:*
+
+Você pode criar o ConfigMap de duas maneiras:
+
+. *Usando um arquivo de manifesto (recomendado para EIB):* Crie o arquivo `kubernetes/manifests/metal3-cacert-configmap.yaml` e inclua o conteúdo do pacote de CA em linha. Você precisa recuar corretamente cada linha do certificado com 4 espaços:
++
+[,yaml]
+----
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: metal3-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tls-ca-bundle
+  namespace: metal3-system
+data:
+  ca-bundle.pem: |
+    -----BEGIN CERTIFICATE-----
+    MIIDXTCCAkWgAwIBAgIJAKJ... (your certificate content here)
+    ...
+    -----END CERTIFICATE-----
+    -----BEGIN CERTIFICATE-----
+    MIIEkjCCA3qgAwIBAgIQCgF... (additional certificates if any)
+    ...
+    -----END CERTIFICATE-----
+----
++
+Para preencher este arquivo automaticamente a partir do seu `ca-bundle.pem`, você pode usar:
++
+[,shell]
+----
+cat > kubernetes/manifests/metal3-cacert-configmap.yaml <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: metal3-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tls-ca-bundle
+  namespace: metal3-system
+data:
+  ca-bundle.pem: |
+$(sed 's/^/    /' ca-bundle.pem)
+EOF
+----
+
+. *Usando o kubectl diretamente (para implantação manual):* Se você não estiver usando o EIB e quiser criar o ConfigMap diretamente no cluster:
++
+[,shell]
+----
+kubectl -n metal3-system create configmap tls-ca-bundle --from-file=ca-bundle.pem=./ca-bundle.pem
+----
+
+- Defina o valor de `global.trustedCAs` no arquivo `metal3.yaml` para referenciar o nome do ConfigMap:
++
+[,yaml]
+----
+global:
+  trustedCAs: tls-ca-bundle
+----
+====
+
+- `certmanager.yaml`: contém a configuração para criar o componente `Cert-Manager` (nenhuma modificação necessária).
++
+[,yaml]
+----
+installCRDs: true
+----
+
+
+[#mgmt-cluster-network-folder]
+=== Pasta de rede
+
+A pasta `network` contém tantos arquivos quanto nós no cluster de gerenciamento. No nosso caso, temos apenas um nó, portanto, temos apenas um arquivo chamado `mgmt-cluster-node1.yaml`.
+O nome do arquivo deve corresponder ao nome do host definido no arquivo de definição `mgmt-cluster.yaml` na seção network/node descrita acima.
+
+Se você precisar personalizar a configuração de rede, por exemplo, para usar um endereço IP estático específico (cenário sem DHCP), você pode usar o arquivo `mgmt-cluster-node1.yaml` na pasta `network`. Ele contém as seguintes informações:
+
+* `$\{MGMT_GATEWAY\}`: O endereço IP do gateway.
+* `$\{MGMT_DNS\}`: O endereço IP do servidor DNS.
+* `$\{MGMT_MAC\}`: O endereço MAC da interface de rede.
+* `$\{MGMT_NODE_IP\}`: O endereço IP do cluster de gerenciamento.
+
+[,yaml]
+----
+routes:
+  config:
+  - destination: 0.0.0.0/0
+    metric: 100
+    next-hop-address: ${MGMT_GATEWAY}
+    next-hop-interface: eth0
+    table-id: 254
+dns-resolver:
+  config:
+    server:
+    - ${MGMT_DNS}
+    - 8.8.8.8
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mac-address: ${MGMT_MAC}
+  ipv4:
+    address:
+    - ip: ${MGMT_NODE_IP}
+      prefix-length: 24
+    dhcp: false
+    enabled: true
+  ipv6:
+    enabled: false
+
+----
+
+Se você quiser usar DHCP para obter o endereço IP, você pode usar a seguinte configuração (o endereço `MAC` deve ser definido corretamente usando a variável `$\{MGMT_MAC\}`):
+
+[,yaml]
+----
+
+## This is an example of a dhcp network configuration for a management cluster
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mac-address: ${MGMT_MAC}
+  ipv4:
+    dhcp: true
+    enabled: true
+  ipv6:
+    enabled: false
+----
+
+[NOTE]
+====
+- Dependendo do número de nós no cluster de gerenciamento, você pode criar mais arquivos como `mgmt-cluster-node2.yaml`, `mgmt-cluster-node3.yaml`, etc. para configurar o restante dos nós.
+- A seção `routes` é usada para definir a tabela de roteamento para o cluster de gerenciamento.
+====
+
+
+[#mgmt-cluster-image-preparation-airgap]
+== Preparação de imagem para ambientes air-gap
+
+Esta seção descreve como preparar a imagem para ambientes air-gap, mostrando apenas as diferenças em relação às seções anteriores. As seguintes alterações na seção anterior (xref:mgmt-cluster-image-preparation-connected[Preparação de imagem para ambientes conectados]) são necessárias para preparar a imagem para ambientes air-gap:
+
+- O arquivo `mgmt-cluster.yaml` deve ser modificado para incluir a seção `embeddedArtifactRegistry` com o campo `images` definido para todas as imagens de contêiner a serem incluídas na imagem de saída do EIB.
+- O script `custom/scripts/99-register.sh` deve ser removido ao usar um ambiente air-gap.
+
+Para incluir o SUSE Private Registry no cluster de gerenciamento para futuras implantações downstream, as seguintes alterações também são necessárias:
+
+- O arquivo `mgmt-cluster.yaml` deve ser modificado para incluir a seção de helm chart, bem como os artefatos incorporados com as novas imagens para incluí-los na imagem de saída do EIB.
+- As pastas `kubernetes/values` e `kubernetes/manifests` devem incluir arquivos de manifesto adicionais para configurar corretamente o SUSE Private Registry no cluster de gerenciamento. 
+
+[NOTE] 
+====
+Você precisará de certas credenciais, que podem ser obtidas seguindo a https://documentation.suse.com/cloudnative/suse-private-registry/html/private-registry/pr-deployment.html#pr-deployment-kube-secrets[documentação oficial do SUSE Private Registry].
+====
+
+[#mgmt-cluster-image-definition-file-airgap]
+=== Modificações no arquivo de definição
+
+O arquivo `mgmt-cluster.yaml` deve ser modificado para incluir a seção `embeddedArtifactRegistry`.
+Nesta seção, o campo `images` deve conter a lista de todas as imagens de contêiner a serem incluídas na imagem de saída.
+
+[NOTE]
+====
+O seguinte exemplo de arquivo `mgmt-cluster.yaml` inclui tanto a seção `embeddedArtifactRegistry` quanto o recurso SUSE Private Registry.
+Certifique-se de que as imagens listadas contenham as versões dos componentes de que você precisa.
+====
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: {micro-base-image-iso}
+  outputImageName: eib-mgmt-cluster-image.iso
+operatingSystem:
+  isoConfiguration:
+    installDevice: /dev/sda
+  users:
+  - username: root
+    encryptedPassword: $ROOT_PASSWORD
+  packages:
+    packageList:
+    - jq
+    sccRegistrationCode: $SCC_REGISTRATION_CODE
+kubernetes:
+  version: {version-kubernetes-rke2}
+  helm:
+    charts:
+      - name: private-registry-helm
+        createNamespace: true
+        installationNamespace: kube-system
+        repositoryName: privateregistry
+        targetNamespace: suse-private-registry
+        valuesFile: privateregistry.yaml
+        version: {version-private-registry}
+      - name: cert-manager
+        repositoryName: jetstack
+        version: {version-cert-manager}
+        targetNamespace: cert-manager
+        valuesFile: certmanager.yaml
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: longhorn
+        version: {version-longhorn-chart}
+        repositoryName: rancher-application-collection
+        targetNamespace: longhorn-system
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: longhorn.yaml
+      - name: metallb
+        version: {version-metallb-chart}
+        targetNamespace: metallb-system
+        createNamespace: true
+        repositoryName: suse-edge-charts
+        installationNamespace: kube-system
+      - name: metal3
+        version: {version-metal3-chart}
+        repositoryName: suse-edge-charts
+        targetNamespace: metal3-system
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: metal3.yaml
+      - name: rancher-turtles-providers
+        version: {version-rancher-turtles-providers-chart}
+        repositoryName: suse-edge-charts
+        targetNamespace: cattle-turtles-system
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: neuvector-crd
+        version: {version-neuvector-crd-chart}
+        repositoryName: rancher-charts
+        targetNamespace: neuvector
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: neuvector.yaml
+      - name: neuvector
+        version: {version-neuvector-chart}
+        repositoryName: rancher-charts
+        targetNamespace: neuvector
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: neuvector.yaml
+      - name: rancher
+        version: {version-rancher-prime}
+        repositoryName: rancher-prime
+        targetNamespace: cattle-system
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: rancher.yaml
+    repositories:
+      - name: jetstack
+        url: https://charts.jetstack.io
+      - name: rancher-charts
+        url: https://charts.rancher.io/
+      - name: suse-edge-charts
+        url: oci://registry.suse.com/edge/charts
+      - name: rancher-prime
+        url: https://charts.rancher.com/server-charts/prime
+      - name: rancher-application-collection
+        url: oci://dp.apps.rancher.io/charts
+        authentication:
+          username: $\{APPS.RANCHER.IO_USERNAME\}
+          password: $\{APPS.RANCHER.IO_ACCESS_TOKEN\}
+      - name: privateregistry
+        authentication:
+          username: $\{PRIVATE_REGISTRY_USERNAME\}
+          password: $\{PRIVATE_REGISTRY_PASSWORD\}
+        plainHTTP: false
+        skipTLSVerify: false
+        url: oci://registry.suse.com/private-registry
+    network:
+      apiHost: $API_HOST
+      apiVIP: $API_VIP
+    nodes:
+    - hostname: mgmt-cluster-node1
+      initializer: true
+      type: server
+#   - hostname: mgmt-cluster-node2
+#     type: server
+#   - hostname: mgmt-cluster-node3
+#     type: server
+embeddedArtifactRegistry:
+  registries:
+    - uri: dp.apps.rancher.io
+      authentication:
+        username: $\{APPS.RANCHER.IO_USERNAME\}
+        password: $\{APPS.RANCHER.IO_ACCESS_TOKEN\}
+    - uri: registry.suse.com
+      authentication:
+        username: $\{PRIVATE_REGISTRY_USERNAME\}
+        password: $\{PRIVATE_REGISTRY_PASSWORD\}
+  images:
+    - name: registry.suse.com/private-registry/harbor-core:1.1.1-1.19
+    - name: registry.suse.com/private-registry/harbor-jobservice:1.1.1-1.19
+    - name: registry.suse.com/private-registry/harbor-portal:1.1.1-1.20
+    - name: registry.suse.com/private-registry/harbor-registry:1.1.1-1.19
+    - name: registry.suse.com/private-registry/harbor-registryctl:1.1.1-1.19
+    - name: registry.suse.com/private-registry/harbor-trivy-adapter:1.1.1-1.24
+    - name: registry.rancher.com/rancher/hardened-cluster-autoscaler:v1.10.3-build20260414
+    - name: registry.rancher.com/rancher/hardened-cni-plugins:v1.9.1-build20260415
+    - name: registry.rancher.com/rancher/hardened-coredns:v1.14.2-build20260416
+    - name: registry.rancher.com/rancher/hardened-k8s-metrics-server:v0.8.1-build20260413
+    - name: registry.rancher.com/rancher/hardened-multus-cni:v4.2.4-build20260310
+    - name: registry.rancher.com/rancher/hardened-traefik:v3.6.13-build20260416
+    - name: registry.rancher.com/rancher/klipper-helm:v0.9.17-build20260422
+    - name: registry.rancher.com/rancher/mirrored-cilium-cilium:v1.19.3
+    - name: registry.rancher.com/rancher/mirrored-cilium-operator-generic:v1.19.3
+    - name: dp.apps.rancher.io/containers/kubernetes-csi-external-attacher:4.11.0-13.2
+    - name: dp.apps.rancher.io/containers/kubernetes-csi-external-provisioner:5.3.0-14.1
+    - name: dp.apps.rancher.io/containers/kubernetes-csi-external-resizer:2.1.0-6.2
+    - name: dp.apps.rancher.io/containers/kubernetes-csi-external-snapshotter:8.5.0-13.2
+    - name: dp.apps.rancher.io/containers/kubernetes-csi-livenessprobe:2.18.0-13.2
+    - name: dp.apps.rancher.io/containers/kubernetes-csi-node-driver-registrar:2.16.0-13.2
+    - name: dp.apps.rancher.io/containers/longhorn-backing-image-manager:1.11.2-4.1
+    - name: dp.apps.rancher.io/containers/longhorn-engine:1.11.2-4.2
+    - name: dp.apps.rancher.io/containers/longhorn-instance-manager:1.11.2-4.3
+    - name: dp.apps.rancher.io/containers/longhorn-manager:1.11.2-4.2
+    - name: dp.apps.rancher.io/containers/longhorn-share-manager:1.11.2-4.1
+    - name: dp.apps.rancher.io/containers/longhorn-ui:1.11.2-4.1
+    - name: dp.apps.rancher.io/containers/rancher-support-bundle-kit:0.0.84-9.4
+    - name: registry.rancher.com/rancher/mirrored-sig-storage-snapshot-controller:v8.2.0
+    - name: registry.rancher.com/rancher/neuvector-compliance-config:1.0.12
+    - name: registry.rancher.com/rancher/neuvector-controller:5.5.2
+    - name: registry.rancher.com/rancher/neuvector-enforcer:5.5.2
+    - name: registry.rancher.com/rancher/nginx-ingress-controller:v1.14.5-hardened2
+    - name: registry.rancher.com/rancher/cluster-api-addon-provider-fleet:v0.14.1
+    - name: registry.rancher.com/rancher/fleet-agent:v0.15.2
+    - name: registry.rancher.com/rancher/fleet:v0.15.2
+    - name: registry.rancher.com/rancher/rancher-webhook:v0.10.6
+    - name: registry.rancher.com/rancher/turtles:v0.26.2
+    - name: registry.rancher.com/rancher/rancher:v2.14.2
+    - name: registry.rancher.com/rancher/shell:v0.1.24
+    - name: registry.rancher.com/rancher/system-upgrade-controller:v0.19.1
+    - name: registry.rancher.com/rancher/cluster-api-controller:v1.12.7
+    - name: registry.suse.com/rancher/cluster-api-provider-metal3:v1.12.3
+    - name: registry.rancher.com/rancher/cluster-api-provider-rke2-bootstrap:v0.24.4
+    - name: registry.rancher.com/rancher/cluster-api-provider-rke2-controlplane:v0.24.4
+    - name: registry.rancher.com/rancher/ip-address-manager:v1.12.3
+    - name: registry.rancher.com/rancher/kubectl:v1.35.2
+    - name: registry.rancher.com/rancher/scc-operator:v0.4.1
+    - name: registry.rancher.com/rancher/kubectl:v1.33.1
+    - name: registry.suse.com/edge/{version-edge-registry}/ironic-python-agent:{version-ipa}
+----
+
+[#mgmt-cluster-custom-folder-airgap]
+=== Modificações na pasta personalizada
+
+- O script `custom/scripts/99-register.sh` deve ser removido ao usar um ambiente air-gap. Como você pode ver na estrutura de diretórios, o script `99-register.sh` não está incluído na pasta `custom/scripts`.
+
+[#mgmt-cluster-kubernetes-folder-airgap]
+=== Modificações na pasta kubernetes
+
+- Atualize o arquivo `kubernetes/helm/values/metal3.yaml` para definir o parâmetro do Helm chart `metal3-ironic.ipa.useHauler` como `true` (valor booleano).
+
++
+[,yaml]
+----
+global:
+  ironicIP: ${METAL3_VIP}
+  enable_vmedia_tls: false
+  predictableNicNames: "true"
+  # trustedCAs: tls-ca-bundle  # Optional: Uncomment and set to ConfigMap name for additional trusted CAs
+metal3-ironic:
+  ipa:
+    useHauler: true
+  persistence:
+    ironic:
+      size: "5Gi"
+
+----
+
+- Atualize o arquivo `kubernetes/helm/values/rancher.yaml` para modificar o parâmetro `hostname`. Em ambientes air-gapped, serviços externos de resolução de DNS como o `sslip.io` não estão acessíveis. Há duas opções:
+
+.. *Opção 1: Usar DNS interno* (Recomendado): Configure seu servidor DNS interno para resolver o nome de host do Rancher e atualize o arquivo de acordo:
++
+[,yaml,subs="attributes"]
+----
+hostname: rancher.yourdomain.internal
+bootstrapPassword: "foobar"
+replicas: 1
+global:
+  cattle:
+    systemDefaultRegistry: "registry.rancher.com"
+----
+
+.. *Opção 2: Usar injeção em /etc/hosts*: Se você não tiver um servidor DNS interno, poderá injetar uma entrada estática `/etc/hosts` via EIB. Crie um arquivo em `eib/os-files/etc/hosts` na sua estrutura de diretórios EIB com um conteúdo como:
++
+[,shell,subs="attributes"]
+----
+# Static DNS resolution for Rancher in air-gapped environment
+$\{INGRESS_VIP} rancher-$\{INGRESS_VIP}.sslip.io
+----
++
+Em seguida, atualize o arquivo `rancher.yaml` para usar este nome de host:
++
+[,yaml,subs="attributes"]
+----
+hostname: rancher-$\{INGRESS_VIP}.sslip.io
+bootstrapPassword: "foobar"
+replicas: 1
+global:
+  cattle:
+    systemDefaultRegistry: "registry.rancher.com"
+----
++
+[IMPORTANT]
+====
+Ao usar a Opção 2, lembre-se de que o arquivo `/etc/hosts` precisará estar presente em qualquer sistema que precise acessar a interface do Rancher, não apenas nos nós do cluster de gerenciamento.
+====
+
+- Você precisa modificar o `$\{MGMT_CLUSTER_REGISTRY_IP\}` com um IP estático reservado para o SUSE Private Registry nos seguintes arquivos:
+
+. `kubernetes/manifests/metallb-registry.yaml`
++
+[,yaml,subs="attributes"]
+----
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: private-registry
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - private-registry-pool
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: private-registry-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - $\{MGMT_CLUSTER_REGISTRY_IP\}/32
+  serviceAllocation:
+    namespaces:
+    - suse-private-registry
+----
+
+. `kubernetes/helm/values/privateregistry.yaml`
++
+[,yaml,subs="attributes"]
+----
+core:
+  secretName: suse-registry-tls
+expose:
+  tls:
+    certSource: secret
+    enabled: true
+    secret:
+      secretName: suse-registry-tls
+  type: loadBalancer
+externalURL: https://$\{MGMT_CLUSTER_REGISTRY_IP\}
+persistence:
+  persistentVolumeClaim:
+    registry:
+      size: 20Gi
+----
+
+- O `kubernetes/manifests/suse-private-registry-creds.yaml` deve ser criado com o seguinte conteúdo:
+
+[,yaml,subs="attributes"]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: suse-registry
+  namespace: suse-private-registry
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: $\{DOCKER_CONFIG_JSON_BASE64\}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+    name: suse-registry-tls
+    namespace: suse-private-registry
+type: kubernetes.io/tls
+data:
+    tls.crt: $\{TLS_CRT_BASE64\}
+    tls.key: $\{TLS_KEY_BASE64\}
+----
+
+Você precisa modificar o `$\{DOCKER_CONFIG_JSON_BASE64\}`, `$\{TLS_CRT_BASE64\}` e `$\{TLS_KEY_BASE64\}`. Para configurar corretamente o docker config json (base64), você pode fazer o seguinte:
+
+[,shell,subs="attributes"]
+----
+# $\{DOCKER_CONFIG_JSON_BASE64\} CONTENT
+echo -n '{"auths":{"&lt;MGMT_CLUSTER_REGISTRY_IP&gt;":{"username":"&lt;USERNAME&gt;","password":"&lt;PASSWORD&gt;","auth":"&lt;AUTH&gt;"}}}' | base64 -w 0
+----
+
+onde o IP é o mesmo que o `$\{MGMT_CLUSTER_REGISTRY_IP\}` configurado anteriormente, e os valores `&lt;USERNAME&gt;` e `&lt;PASSWORD&gt;` podem ser recuperados da https://documentation.suse.com/cloudnative/suse-private-registry/html/private-registry/pr-deployment.html#pr-deployment-kube-secrets[documentação oficial do SUSE Private Registry]; o valor `&lt;AUTH&gt;` definido no campo `auth` é a codificação base64 da concatenação `&lt;USERNAME&gt;:&lt;PASSWORD&gt;`.
+
+
+Para definir o conteúdo dos campos `tls.crt` e `tls.key` no manifesto do Secret `suse-registry-tls` acima, você pode gerar seu próprio certificado autoassinado TLS e a chave privada relacionada executando os seguintes comandos:
+
+[,shell,subs="attributes"]
+----
+# Generate a self-signed certificate and key
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -sha256 -days 365 -nodes
+
+# Convert them to base64 for the suse-private-registry-creds.yaml file
+cat cert.pem | base64 -w 0
+cat key.pem | base64 -w 0
+----
+
+[#mgmt-cluster-image-creation]
+== Criação de imagem
+
+Uma vez que a estrutura de diretórios esteja preparada de acordo com as seções anteriores (para os cenários conectados e air-gap), execute o seguinte comando para criar a imagem:
+
+[,shell,subs="attributes"]
+----
+podman run --rm --privileged -it -v $PWD:/eib \
+ registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+ build --definition-file mgmt-cluster.yaml
+----
+
+Isso cria o arquivo de imagem de saída ISO que, em nosso caso, com base na definição de imagem descrita acima, é `eib-mgmt-cluster-image.iso`.
+
+[#mgmt-cluster-provision]
+== Provisionar o cluster de gerenciamento
+
+A imagem anterior contém todos os componentes explicados acima e pode ser usada para provisionar o cluster de gerenciamento usando uma máquina virtual ou um servidor bare metal (usando o recurso de virtual-media).
+
+[#mgmt-cluster-dualstack]
+== Considerações e configuração de pilha dupla
+
+Os exemplos mostrados nas seções anteriores fornecem orientação e exemplos sobre como configurar um cluster de gerenciamento IPv4 de pilha única. Tal cluster de gerenciamento é independente do status operacional dos clusters downstream, que podem ser configurados individualmente para operar em configuração de pilha única IPv4/IPv6 ou pilha dupla, uma vez implantados. No entanto, a maneira como o cluster de gerenciamento é configurado tem um impacto direto nos protocolos de comunicação que podem ser usados durante a fase de provisionamento, onde as comunicações in-band e out-of-band devem ocorrer de acordo com os protocolos suportados pelo cluster de gerenciamento e pelo host downstream. Caso se espere que alguns ou todos os BMCs e/ou nós do cluster downstream usem IPv6, uma configuração de pilha dupla para o cluster de gerenciamento é necessária.
+
+[NOTE]
+====
+Clusters de gerenciamento IPv6 de pilha única ainda não são suportados.
+====
+
+Para obter a funcionalidade de pilha dupla, o Kubernetes deve receber CIDRs IPv4 e IPv6 para PODs e Serviços. No entanto, outros componentes também exigem ajustes específicos antes de criar a imagem do cluster de gerenciamento com o EIB. Os serviços de provisionamento Metal^3^ (Ironic) podem ser configurados de diferentes maneiras, dependendo da sua infraestrutura ou requisitos:
+
+- Os serviços Ironic podem ser configurados para escutar em todas as interfaces do sistema em vez de um único endereço IP, portanto, desde que o(s) host(s) do cluster de gerenciamento tenha(m) endereços IPv4 e IPv6 atribuídos à interface relevante, qualquer um deles pode potencialmente ser usado durante o provisionamento. Observe que, neste momento, apenas um desses endereços pode ser selecionado para a geração da URL (para consumo por outros serviços, por exemplo, o Baremetal Operator, BMCs, etc.); como consequência, para habilitar comunicações IPv6 com os BMCs, o Baremetal Operator pode ser instruído a expor e transmitir uma URL IPv6 ao lidar com definições BMH que incluam um endereço IPv6. Em outras palavras, quando um BMC é identificado como compatível com IPv6, o provisionamento será realizado apenas via IPv6, e via IPv4 em todos os outros casos.
+
+- Um único nome de host, resolvendo para IPv4 e IPv6, pode ser usado pelo Metal^3^ para permitir que o Ironic use esses endereços para vinculação e criação de URL. Essa abordagem permite uma configuração fácil e comportamento flexível (tanto IPv4 quanto IPv6 permanecem viáveis em cada etapa de provisionamento), mas requer uma infraestrutura com servidores DNS, alocações de IP e registros preexistentes já em vigor.
+
+Em ambos os casos, o Kubernetes precisará saber quais CIDRs usar para IPv4 e IPv6, portanto, você pode adicionar as seguintes linhas ao seu `kubernetes/config/server.yaml` no diretório EIB, certificando-se de listar o IPv4 primeiro:
+
+[,yaml]
+----
+service-cidr: 10.96.0.0/12,fd12:4567:789c::/112
+cluster-cidr: 193.168.0.0/18,fd12:4567:789b::/48
+----
+
+Alguns contêineres aproveitam a rede do host, portanto, modifique a configuração de rede para o(s) host(s), no diretório `network`, para habilitar a conectividade IPv6:
+
+[,yaml]
+----
+routes:
+  config:
+  - destination: 0.0.0.0/0
+    next-hop-address: ${MGMT_GATEWAY_V4}
+    next-hop-interface: eth0
+  - destination: ::/0
+    next-hop-address: ${MGMT_GATEWAY_V6}
+    next-hop-interface: eth0 
+dns-resolver:
+  config:
+    server:
+    - ${MGMT_DNS}
+    - 8.8.8.8
+    - 2001:4860:4860::8888
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mac-address: ${MGMT_MAC}
+  ipv4:
+    address:
+    - ip: ${MGMT_CLUSTER_IP_V4}
+      prefix-length: 24
+    dhcp: false
+    enabled: true
+  ipv6:
+    address:
+    - ip: ${MGMT_CLUSTER_IP_V6}
+      prefix-length: 128
+    dhcp: false
+    autoconf: false
+    enabled: true
+----
+
+Substitua os espaços reservados pelos endereços IP do gateway, servidor DNS adicional (se necessário), o endereço MAC da interface de rede e o endereço IP do cluster de gerenciamento. Se a autoconfiguração de endereço for preferida, consulte o trecho a seguir e apenas defina a variável `$\{MGMT_MAC\}`:
+
+[,yaml]
+----
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mac-address: ${MGMT_MAC}
+  ipv4:
+    enabled: true
+    dhcp: true
+  ipv6:
+    enabled: false
+    dhcp: true
+    autoconf: true
+----
+
+Agora podemos definir os arquivos restantes para uma configuração de nó único, começando pela primeira opção, criando `kubernetes/helm/values/metal3.yaml` como:
+
+[,yaml]
+----
+global:
+  ironicIP: ${MGMT_CLUSTER_IP_V4}
+  enable_vmedia_tls: false
+  # trustedCAs: tls-ca-bundle  # Optional: Uncomment and set to ConfigMap name for trusted CA bundle
+metal3-ironic:
+  global:
+    predictableNicNames: true
+  listenOnAll: true
+  persistence:
+    ironic:
+      size: "5Gi"
+  service:
+    type: NodePort
+metal3-baremetal-operator:
+  baremetaloperator:
+    externalHttpIPv6: ${MGMT_CLUSTER_IP_V6}
+----
+
+e `kubernetes/helm/values/rancher.yaml` como:
+
+[,yaml]
+----
+hostname: rancher-${MGMT_CLUSTER_IP_V4}.sslip.io
+bootstrapPassword: "foobar"
+replicas: 1
+global:
+  cattle:
+    systemDefaultRegistry: "registry.rancher.com"
+----
+
+onde `$\{MGMT_CLUSTER_IP_V4\}` e `$\{MGMT_CLUSTER_IP_V6\}` são os endereços IP atribuídos anteriormente ao host.
+
+Alternativamente, para usar o nome do host em vez dos endereços IP, modifique `kubernetes/helm/values/metal3.yaml` para:
+
+[,yaml]
+----
+global:
+  provisioningHostname: `${MGMT_CLUSTER_HOSTNAME}`
+  enable_vmedia_tls: false
+  # trustedCAs: tls-ca-bundle  # Optional: Uncomment and set to ConfigMap name for trusted CA bundle
+metal3-ironic:
+  global:
+    predictableNicNames: true
+  persistence:
+    ironic:
+      size: "5Gi"
+  service:
+    type: NodePort
+----
+
+e `kubernetes/helm/values/rancher.yaml` para:
+
+[,yaml]
+----
+hostname: rancher-${MGMT_CLUSTER_HOSTNAME}.sslip.io
+bootstrapPassword: "foobar"
+replicas: 1
+global:
+  cattle:
+    systemDefaultRegistry: "registry.rancher.com"
+----
+
+onde `$\{MGMT_CLUSTER_HOSTNAME\}` deve ser um Nome de Domínio Completo e Qualificado que resolva para os endereços IP do seu host.
+
+Para mais informações, visite https://github.com/suse-edge/telco-cloud-examples/tree/main/telco-examples/mgmt-cluster/dual-stack[{product} o repositório do GitHub na pasta \"dual-stack\"], onde uma estrutura de diretório de exemplo pode ser encontrada.

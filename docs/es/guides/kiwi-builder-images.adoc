@@ -1,0 +1,165 @@
+[#guides-kiwi-builder-images]
+= Creación de imágenes actualizadas de SUSE Linux Micro con Kiwi
+:revdate: 2025-10-09
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Esta sección explica cómo generar imágenes actualizadas de SUSE Linux Micro para ser utilizadas con Edge Image Builder, con Cluster API (CAPI) + Metal^3^, o para escribir la imagen de disco directamente en un dispositivo de bloque. Este proceso es útil en situaciones en las que se requiere incluir los últimos parches en las imágenes de arranque inicial del sistema (para minimizar la transferencia de parches tras la instalación), o para escenarios en los que se utiliza CAPI, donde se prefiere reinstalar el sistema operativo con una nueva imagen en lugar de actualizar los hosts in situ.
+
+Este proceso utiliza https://osinside.github.io/kiwi/[Kiwi] para ejecutar la creación de la imagen. {product} incluye una versión en contenedores que simplifica el proceso general con una utilidad auxiliar integrada, lo que permite especificar el *perfil* de destino requerido. El perfil define el tipo de imagen de salida requerida, con las más comunes enumeradas a continuación:
+
+* "*Base*" - Una imagen de disco de SUSE Linux Micro con un conjunto de paquetes reducido (incluye podman).
+* "*Base-SelfInstall*" - Una imagen SelfInstall basada en la "Base" anterior.
+* "*Base-RT*" - Igual que "Base" anterior, pero utilizando un kernel en tiempo real (rt) en su lugar.
+* "*Base-RT-SelfInstall*" - Una imagen SelfInstall basada en la "Base-RT" anterior
+* "*Default*" - Una imagen de disco de SUSE Linux Micro basada en la "Base" anterior, pero con algunas herramientas más, incluyendo la pila de virtualización, Cockpit y salt-minion.
+* "*Default-SelfInstall*" - Una imagen SelfInstall basada en la "Default" anterior
+
+Consulte la documentación de https://documentation.suse.com/sle-micro/{version-operatingsystem}/html/Micro-deployment-images/index.html#alp-images-installer-type[SUSE Linux Micro {version-operatingsystem}] para obtener más detalles.
+
+NOTE: Este proceso funciona tanto para arquitecturas {x86-64} como {aarch64}, pero es necesario utilizar un host de compilación con la misma arquitectura que las imágenes que se están creando. En otras palabras, para crear una imagen {aarch64}, es necesario utilizar un host de compilación {aarch64}, y viceversa para {x86-64}; las compilaciones cruzadas no son compatibles en este momento.
+
+== Requisitos previos
+
+El generador de imágenes Kiwi requiere lo siguiente:
+
+* Un host de SUSE Linux Micro {version-operatingsystem} (\"sistema de compilación\") con la misma arquitectura que la imagen que se está compilando.
+* El sistema de compilación debe estar ya registrado a través de `SUSEConnect` (el registro se utiliza para extraer los paquetes más recientes de los repositorios de SUSE)
+* Una conexión a internet que se pueda utilizar para obtener los paquetes necesarios. Si se conecta a través de un proxy, el host de compilación debe estar preconfigurado.
+* SELinux debe estar desactivado en el host de compilación (ya que el etiquetado de SELinux tiene lugar en el contenedor y puede entrar en conflicto con la directiva del host)
+* Al menos 10 GB de espacio libre en disco para alojar la imagen del contenedor, la raíz de compilación y la(s) imagen(es) de salida resultante(s)
+
+== Inicio
+
+Debido a ciertas limitaciones, actualmente es necesario desactivar SELinux. Conéctese al host de compilación de imágenes de SUSE Linux Micro {version-operatingsystem} y asegúrese de que SELinux esté desactivado:
+
+[,console]
+----
+# setenforce 0
+----
+
+Cree un directorio de salida para compartirlo con el contenedor de compilación de Kiwi y guardar las imágenes resultantes:
+
+[,console]
+----
+# mkdir ~/output
+----
+
+Descargue la última imagen del generador Kiwi desde el repositorio de SUSE:
+
+[,console,subs="attributes"]
+----
+# podman pull registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder}
+(...)
+----
+
+== Compilación de la imagen predeterminada
+
+Este es el comportamiento predeterminado del contenedor de imágenes Kiwi si no se proporcionan argumentos durante la ejecución de la imagen del contenedor. El siguiente comando ejecuta `podman` con dos directorios asignados al contenedor:
+
+* El directorio del repositorio de paquetes de SUSE Linux Micro `/etc/zypp/repos.d` del host subyacente.
+* El directorio de salida `~/output` creado anteriormente.
+
+El contenedor de imágenes Kiwi requiere ejecutar el script auxiliar `build-image` de la siguiente manera:
+
+[,console,subs="attributes"]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image
+(...)
+----
+
+NOTE: Se espera que, si ejecuta este script por primera vez, *falle* poco después de iniciarse con \"*ERROR: La prueba inicial del dispositivo de bucle falló, vuelva a intentar la ejecución del contenedor.*\", esto es un síntoma de que los dispositivos de bucle creados en el sistema host subyacente no son visibles inmediatamente dentro de la imagen del contenedor. Simplemente vuelva a ejecutar el comando y debería proceder sin problemas.
+
+Tras unos minutos, las imágenes se pueden encontrar en el directorio de salida local:
+
+[,console,subs="attributes"]
+----
+(...)
+INFO: Image build successful, generated images are available in the 'output' directory.
+
+# ls -1 output/
+SLE-Micro.x86_64-{version-operatingsystem}.changes
+SLE-Micro.x86_64-{version-operatingsystem}.packages
+SLE-Micro.x86_64-{version-operatingsystem}.raw
+SLE-Micro.x86_64-{version-operatingsystem}.verified
+build
+kiwi.result
+kiwi.result.json
+----
+
+== Creación de imágenes con otros perfiles
+
+Para crear diferentes perfiles de imagen, se utiliza la opción de comando \"*-p*\" en el script auxiliar de imagen de contenedor Kiwi. Por ejemplo, para crear la imagen ISO \"*Default-SelfInstall*\":
+
+[,console,subs="attributes"]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image -p Default-SelfInstall
+(...)
+----
+
+NOTE: Para evitar la pérdida de datos, Kiwi se negará a ejecutarse si hay imágenes en el directorio `output`. Es necesario eliminar el contenido del directorio de salida antes de continuar con `rm -f output/*`. 
+
+Alternativamente, para crear una imagen ISO SelfInstall con el kernel RealTime (\"*kernel-rt*\"):
+
+[,console,subs="attributes"]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image -p Base-RT-SelfInstall
+(...)
+----
+
+== Creación de imágenes con tamaños de sector grandes
+
+Algunos hardware requieren una imagen con un tamaño de sector grande, es decir, *4096 bytes* en lugar de los 512 bytes estándar. El generador Kiwi en contenedores admite la capacidad de generar imágenes con un tamaño de bloque grande especificando el parámetro "*-b*". Por ejemplo, para crear una imagen \"*Default-SelfInstall*\" con un tamaño de sector grande:
+
+[,console,subs="attributes"]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image -p Default-SelfInstall -b
+(...)
+----
+
+== Uso de un archivo de definición de imagen Kiwi personalizado
+
+Para casos de uso avanzados, se puede utilizar un archivo de definición de imagen Kiwi personalizado (`SL-Micro.kiwi`) junto con los scripts posteriores a la compilación necesarios. Esto requiere anular las definiciones predeterminadas preempaquetadas por el equipo de {product}.
+
+Cree un nuevo directorio y asígnelo a la imagen del contenedor donde el guion auxiliar está buscando (`/micro-sdk/defs`):
+
+[,console,subs="attributes"]
+----
+# mkdir ~/mydefs/
+# cp /path/to/SL-Micro.kiwi ~/mydefs/
+# cp /path/to/config.sh ~/mydefs/
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output -v ~/mydefs/:/micro-sdk/defs/ \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image
+(...)
+----
+
+[WARNING]
+====
+Esto solo es necesario para casos de uso avanzados y puede causar problemas de soporte. Póngase en contacto con su representante de SUSE para obtener más consejos y orientación.
+====
+
+Para obtener los archivos de definición de imagen Kiwi predeterminados incluidos en el contenedor, se pueden utilizar los siguientes comandos:
+
+[,console,subs="attributes"]
+----
+$ podman create --name kiwi-builder registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder}
+$ podman cp kiwi-builder:/micro-sdk/defs/SL-Micro.kiwi .
+$ podman cp kiwi-builder:/micro-sdk/defs/SL-Micro.kiwi.4096 .
+$ podman rm kiwi-builder
+$ ls ./SL-Micro.*
+(...)
+----
