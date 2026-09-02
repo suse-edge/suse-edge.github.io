@@ -1,0 +1,1 @@
+../../en/edge-book/key.sh
