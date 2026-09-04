@@ -3056,7 +3056,10 @@ CONFIG_FILES_AICS=(/etc/ptp4l-aic1.conf /etc/ptp4l-aic2.conf)
 # Check the system is synchronized to a GM
 GM_PRESENT=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET TIME_STATUS_NP' | awk '/gmPresent/ {print $2}')
 
-if [ "${GM_PRESENT}" != "true" ]; then
+if [ -z "$GM_PRESENT" ]; then
+    echo "Failed to get GM value from ptp4l instance for NAC, exiting..."
+    exit 1
+elif [ "${GM_PRESENT}" != "true" ]; then
     echo "No GM present, exiting..."
     exit 1
 fi
@@ -3066,10 +3069,10 @@ PDS_GM_VALUES=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET PARENT_DATA_SET' | awk 'B
 TPDS_GM_VALUES=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET TIME_PROPERTIES_DATA_SET' | awk 'BEGIN {ORS=" "} NR>2 {print $2}')
 
 if [ -z "$PDS_GM_VALUES" ]; then
-    echo "No PARENT_DATA_SET values retrieved"
+    echo "No PARENT_DATA_SET values retrieved, exiting ..."
     exit 2
 elif [ -z "$TPDS_GM_VALUES" ]; then
-    echo "No TIME_PROPERTIES_DATA_SET values retrieved"
+    echo "No TIME_PROPERTIES_DATA_SET values retrieved, exiting ..."
     exit 2
 fi
 
@@ -3107,7 +3110,8 @@ for FILE in "${CONFIG_FILES_AICS[@]}"; do
        timeSource              '${T_SOURCE}'' &> /dev/null
 
     if [ $? -ne 0 ]; then
-        echo "Failed to update ${FILE}"
+        echo "Failed to update ptp4l instance using config file \"${FILE}\", exiting ..."
+        exit 1
     fi
 done
 ----
@@ -3121,10 +3125,12 @@ are refreshed periodically and after any instance restart:
 # /etc/systemd/system/ptp-forward-gm.service
 [Unit]
 Description=Forward Grandmaster parameters to the add-in ptp4l instances
+Wants=ptp4l@nac.service ptp4l@aic1.service ptp4l@aic2.service
 After=ptp4l@nac.service ptp4l@aic1.service ptp4l@aic2.service
 
 [Service]
 Type=oneshot
+SELinuxContext=system_u:system_r:unconfined_t:s0
 ExecStart=/usr/local/bin/04-ptp-forward-GM.sh
 ----
 +
