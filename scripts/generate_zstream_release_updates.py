@@ -448,6 +448,7 @@ def build_release_data(manifest_dir: Path) -> ReleaseData:
     suc_tag = image_tag_by_basename(images, "system-upgrade-controller")
     fleet_tag = image_tag_by_basename(images, "fleet")
     ipa_tag = image_tag_by_basename(images, "ironic-python-agent")
+    capi_metal3_tag = image_tag_by_basename(images, "cluster-api-provider-metal3")
 
     eib_version = str(tooling_manifest.get("eib", {}).get("version", ""))
     kiwi_version = str(tooling_manifest.get("kiwi", {}).get("version", ""))
@@ -491,6 +492,7 @@ def build_release_data(manifest_dir: Path) -> ReleaseData:
     add_attribute(attributes, "version-fleet", fleet_tag)
     add_attribute(attributes, "version-private-registry", private_registry)
     add_attribute(attributes, "version-ipa", semantic_version_from_tag(ipa_tag))
+    add_attribute(attributes, "version-capi-provider-metal3", f"v1beta1@{capi_metal3_tag}" if capi_metal3_tag else None,)
     add_attribute(attributes, "version-sriov-upstream", sriov)
 
     chart_attributes = {
