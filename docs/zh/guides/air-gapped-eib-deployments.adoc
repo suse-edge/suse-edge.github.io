@@ -1,0 +1,1139 @@
+[#guides-airgap-eib-deployment]
+= 使用 Edge Image Builder 进行隔离的部署
+:revdate: 2025-07-08
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+== 简介
+
+本指南将展示如何利用 <<components-eib,Edge Image Builder(EIB)>> 在 SUSE Linux Micro {version-operatingsystem} 上完全隔离地部署 {product} 的多个组件。通过此操作，您将能够引导至由 EIB 创建的定制化、可启动 (CRB) 镜像，并在没有互联网连接且无需任何手动操作的情况下，在 RKE2 或 K3s 集群上部署指定的组件。对于希望将部署所需的所有工件预先构建到其操作系统镜像中，以便在引导时立即可用的客户，此配置非常理想。
+
+我们将涵盖以下内容的隔离安装：
+
+* <<components-rancher>>
+* <<components-suse-security>>
+* <<components-suse-storage>>
+* <<components-kubevirt>>
+* SUSE Private Registry
+
+[WARNING]
+====
+EIB 将解析并预先下载所提供的 Helm chart 和 Kubernetes 清单中引用的所有镜像。然而，其中一些可能试图在运行时拉取容器镜像并基于这些镜像创建 Kubernetes 资源。在这些情况下，如果我们想要建立一个完全隔离的环境，就必须在定义文件中手动指定必要的镜像。
+====
+
+== 先决条件
+
+如果您正在阅读本指南，则假定您已经熟悉 <<components-eib,EIB>>。如果不是，请遵循 <<quickstart-eib,快速入门指南>> 以更好地理解下面实践中展示的概念。
+
+== Libvirt 网络配置
+
+[NOTE] 
+====
+为了演示隔离的部署，本指南将使用模拟的隔离 `libvirt` 网络完成，以下配置将针对该网络进行调整。对于您自己的部署，您可能需要修改下一步中将介绍的 `host1.local.yaml` 配置。
+====
+
+如果您想使用相同的 `libvirt` 网络配置，请跟随操作。如果不想，请跳至<<config-dir-creation>>。
+
+让我们创建一个具有 DHCP IP 地址范围 `192.168.100.2/24` 的隔离网络配置：
+
+[,shell]
+----
+cat << EOF > isolatednetwork.xml
+<network>
+  <name>isolatednetwork</name>
+  <bridge name='virbr1' stp='on' delay='0'/>
+  <ip address='192.168.100.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.100.2' end='192.168.100.254'/>
+    </dhcp>
+  </ip>
+</network>
+EOF
+----
+
+现在，剩下的唯一事情就是创建网络并启动它：
+
+[,shell]
+----
+virsh net-define isolatednetwork.xml
+virsh net-start isolatednetwork
+----
+
+== 基础目录配置 [[config-dir-creation]]
+
+基础目录配置在所有不同组件中都是相同的，因此我们将在此处进行设置。
+
+我们将首先创建必要的子目录：
+
+[,shell]
+----
+export CONFIG_DIR=$HOME/config
+mkdir -p $CONFIG_DIR/base-images
+mkdir -p $CONFIG_DIR/network
+mkdir -p $CONFIG_DIR/kubernetes/helm/values
+----
+
+请务必将您计划使用的任何基础镜像添加到 `base-images` 目录中。本指南将重点介绍 https://www.suse.com/download/sle-micro/[此处] 提供的自安装 ISO。
+
+让我们复制下载的镜像：
+
+[,shell,subs="attributes"]
+----
+cp {micro-base-image-iso} $CONFIG_DIR/base-images/slemicro.iso
+----
+
+[NOTE]
+=====
+EIB 绝不会修改基础镜像输入。
+=====
+
+让我们创建一个包含所需网络配置的文件：
+
+[,shell]
+----
+cat << EOF > $CONFIG_DIR/network/host1.local.yaml
+routes:
+  config:
+  - destination: 0.0.0.0/0
+    metric: 100
+    next-hop-address: 192.168.100.1
+    next-hop-interface: eth0
+    table-id: 254
+  - destination: 192.168.100.0/24
+    metric: 100
+    next-hop-address: 192.168.122.1
+    next-hop-interface: eth0
+    table-id: 254
+dns-resolver:
+  config:
+    server:
+    - 192.168.100.1
+    - 8.8.8.8
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mac-address: 34:8A:B1:4B:16:E7
+  ipv4:
+    address:
+    - ip: 192.168.100.50
+      prefix-length: 24
+    dhcp: false
+    enabled: true
+  ipv6:
+    enabled: false
+EOF
+----
+
+此配置确保在置备的系统上存在以下内容（使用指定的 MAC 地址）：
+
+* 具有静态 IP 地址的以太网接口
+* 路由选择
+* DNS
+* 主机名 (`host1.local`)
+
+生成的文件结构现在应如下所示：
+[,console]
+----
+├── kubernetes/
+│   └── helm/
+│       └── values/
+├── base-images/
+│   └── slemicro.iso
+└── network/
+    └── host1.local.yaml
+----
+
+== 基础定义文件
+
+Edge Image Builder 使用 _定义文件_ 来修改 SUSE Linux Micro 镜像。这些文件包含了大部分可配置选项。
+其中许多选项会在不同的组件部分中重复出现，因此我们将在此处列出并解释它们。
+
+[TIP]
+====
+定义文件中自定义选项的完整列表可以在 https://github.com/suse-edge/edge-image-builder/blob/release-1.1/docs/building-images.md#image-definition-file[上游文档] 中找到。
+====
+
+我们将查看所有定义文件中都会出现的以下字段：
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+kubernetes:
+  version: {version-kubernetes-rke2}
+embeddedArtifactRegistry:
+  images:
+    - ...
+----
+
+`image` 部分是必需的，它指定了输入镜像、其架构和类型，以及输出镜像的名称。
+
+`operatingSystem` 部分是可选的，包含用于通过 `root/eib` 用户名/密码在置备系统上启用登录的配置。
+
+`kubernetes` 部分是可选的，它定义了 Kubernetes 的类型和版本。我们将使用 RKE2 发行版。如果需要 K3s，请使用 `kubernetes.version: {version-kubernetes-k3s}`。除非通过 `kubernetes.nodes` 字段明确配置，否则我们在本指南中引导的所有集群都将是单节点集群。
+
+`embeddedArtifactRegistry` 部分将包含所有仅在运行时为特定组件引用和拉取的镜像。
+
+== Rancher 安装 [[rancher-install]]
+
+[NOTE]
+====
+将要演示的 <<components-rancher,Rancher>> 部署为了演示目的将被大幅精简。对于您的实际部署，根据您的配置，可能需要额外的工件。
+====
+
+{link-rancher-upstream-release}[Rancher {version-rancher-prime}] 发布资产包含一个 `rancher-images.txt` 文件，其中列出了隔离的安装所需的所有镜像。
+
+总共有超过 600 个容器镜像，这意味着生成的 CRB 镜像大约为 30GB。对于我们的 Rancher 安装，我们将把该列表精简为最小的工作配置。在此基础上，您可以添加部署可能需要的任何镜像。
+
+我们将创建定义文件并包含精简后的镜像列表：
+
+[,console,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+kubernetes:
+  version: {version-kubernetes-rke2}
+  manifests:
+    urls:
+    - https://github.com/cert-manager/cert-manager/releases/download/v1.15.3/cert-manager.crds.yaml
+  helm:
+    charts:
+      - name: rancher
+        version: {version-rancher-prime}
+        repositoryName: rancher-prime
+        valuesFile: rancher-values.yaml
+        targetNamespace: cattle-system
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: cert-manager
+        installationNamespace: kube-system
+        createNamespace: true
+        repositoryName: jetstack
+        targetNamespace: cert-manager
+        version: {version-cert-manager}
+    repositories:
+      - name: jetstack
+        url: https://charts.jetstack.io
+      - name: rancher-prime
+        url: https://charts.rancher.com/server-charts/prime
+embeddedArtifactRegistry:
+  images:
+    - name: registry.rancher.com/rancher/backup-restore-operator:v10.0.2
+    - name: registry.rancher.com/rancher/compliance-operator:v1.4.1
+    - name: registry.rancher.com/rancher/fleet-agent:v0.15.2
+    - name: registry.rancher.com/rancher/fleet:v0.15.2
+    - name: registry.rancher.com/rancher/hardened-addon-resizer:1.8.23-build20260413
+    - name: registry.rancher.com/rancher/hardened-calico:v3.31.5-build20260415
+    - name: registry.rancher.com/rancher/hardened-cluster-autoscaler:v1.10.3-build20260414
+    - name: registry.rancher.com/rancher/hardened-cni-plugins:v1.9.1-build20260415
+    - name: registry.rancher.com/rancher/hardened-coredns:v1.14.2-build20260416
+    - name: registry.rancher.com/rancher/hardened-dns-node-cache:1.26.8-build20260416
+    - name: registry.rancher.com/rancher/hardened-etcd:v3.6.7-k3s1-build20260415
+    - name: registry.rancher.com/rancher/hardened-flannel:v0.28.4-build20260415
+    - name: registry.rancher.com/rancher/hardened-k8s-metrics-server:v0.8.1-build20260413
+    - name: registry.rancher.com/rancher/hardened-kubernetes:v1.35.4-rke2r1-build20260416
+    - name: registry.rancher.com/rancher/hardened-multus-cni:v4.2.4-build20260310
+    - name: registry.rancher.com/rancher/hardened-multus-dynamic-networks-controller:v0.3.7-build20260310
+    - name: registry.rancher.com/rancher/hardened-multus-thick:v4.2.4-build20260310
+    - name: registry.rancher.com/rancher/hardened-traefik:v3.6.13-build20260416
+    - name: registry.rancher.com/rancher/hardened-whereabouts:v0.9.3-build20260408
+    - name: registry.rancher.com/rancher/k3s-upgrade:v1.35.4-k3s1
+    - name: registry.rancher.com/rancher/klipper-helm:v0.9.17-build20260422
+    - name: registry.rancher.com/rancher/klipper-lb:v0.4.16
+    - name: registry.rancher.com/rancher/kubectl:v1.35.2
+    - name: registry.rancher.com/rancher/kuberlr-kubectl:v7.0.3
+    - name: registry.rancher.com/rancher/local-path-provisioner:v0.0.35
+    - name: registry.rancher.com/rancher/machine:v0.15.0-rancher142
+    - name: registry.rancher.com/rancher/nginx-ingress-controller:v1.14.5-hardened2
+    - name: registry.rancher.com/rancher/prom-prometheus:v3.8.1
+    - name: registry.rancher.com/rancher/prometheus-federator:v6.0.0
+    - name: registry.rancher.com/rancher/pushprox:v0.1.10
+    - name: registry.rancher.com/rancher/rancher-agent:v2.14.2
+    - name: registry.rancher.com/rancher/rancher-csp-adapter:v9.0.0
+    - name: registry.rancher.com/rancher/rancher-webhook:v0.10.6
+    - name: registry.rancher.com/rancher/rancher:v2.14.2
+    - name: registry.rancher.com/rancher/remotedialer-proxy:v0.7.2
+    - name: registry.rancher.com/rancher/rke2-cloud-provider:v1.35.4-0.20260415195656-e51c0636351d-build20260415
+    - name: registry.rancher.com/rancher/rke2-runtime:v1.35.4-rke2r1
+    - name: registry.rancher.com/rancher/rke2-upgrade:v1.35.4-rke2r1
+    - name: registry.rancher.com/rancher/scc-operator:v0.4.1
+    - name: registry.rancher.com/rancher/security-scan:v0.9.1
+    - name: registry.rancher.com/rancher/shell:v0.1.24
+    - name: registry.rancher.com/rancher/supportability-review-app-frontend:v0.19.0
+    - name: registry.rancher.com/rancher/supportability-review-internal:latest
+    - name: registry.rancher.com/rancher/supportability-review-operator:v0.19.0
+    - name: registry.rancher.com/rancher/supportability-review:latest
+    - name: registry.rancher.com/rancher/system-agent-installer-k3s:v1.35.4-k3s1
+    - name: registry.rancher.com/rancher/system-agent-installer-rke2:v1.35.4-rke2r1
+    - name: registry.rancher.com/rancher/system-agent:v0.3.16-suc
+    - name: registry.rancher.com/rancher/system-upgrade-controller:v0.19.1
+    - name: registry.rancher.com/rancher/turtles:v0.26.2
+    - name: registry.rancher.com/rancher/ui-plugin-catalog:4.15.0
+    - name: registry.rancher.com/rancher/kubectl:v1.20.2
+    - name: registry.rancher.com/rancher/mirrored-ingress-nginx-kube-webhook-certgen:v1.6.7
+----
+
+与包含 600 多个容器镜像的完整列表相比，此精简版本仅包含约 60 个镜像，这使得新的 CRB 镜像仅约 7GB。
+
+我们还需要为 Rancher 创建一个 Helm values 文件：
+[,shell]
+----
+cat << EOF > $CONFIG_DIR/kubernetes/helm/values/rancher-values.yaml
+hostname: 192.168.100.50.sslip.io
+replicas: 1
+bootstrapPassword: "adminadminadmin"
+systemDefaultRegistry: registry.rancher.com
+useBundledSystemChart: true
+EOF
+----
+
+[WARNING]
+====
+将 `systemDefaultRegistry` 设置为 `registry.rancher.com` 允许 Rancher 在启动时自动在 CRB 镜像内启动的嵌入式工件仓库中查找镜像。省略此字段可能会导致无法在节点上找到容器镜像。
+====
+
+让我们构建镜像：
+[,shell,subs="attributes"]
+----
+podman run --rm -it --privileged -v $CONFIG_DIR:/eib \
+registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+build --definition-file eib-iso-definition.yaml
+----
+
+输出应该与以下内容相似：
+[,console]
+----
+Downloading file: dl-manifest-1.yaml 100% |██████████████████████████████████████████████████████████████████████████████| (583/583 kB, 12 MB/s)
+Pulling selected Helm charts... 100% |███████████████████████████████████████████████████████████████████████████████████████████| (2/2, 3 it/s)
+Generating image customization components...
+Identifier ................... [SUCCESS]
+Custom Files ................. [SKIPPED]
+Time ......................... [SKIPPED]
+Network ...................... [SUCCESS]
+Groups ....................... [SKIPPED]
+Users ........................ [SUCCESS]
+Proxy ........................ [SKIPPED]
+Rpm .......................... [SKIPPED]
+Os Files ..................... [SKIPPED]
+Systemd ...................... [SKIPPED]
+Fips ......................... [SKIPPED]
+Elemental .................... [SKIPPED]
+Suma ......................... [SKIPPED]
+Populating Embedded Artifact Registry... 100% |███████████████████████████████████████████████████████████████████████████| (56/56, 8 it/min)
+Embedded Artifact Registry ... [SUCCESS]
+Keymap ....................... [SUCCESS]
+Configuring Kubernetes component...
+The Kubernetes CNI is not explicitly set, defaulting to 'cilium'.
+Downloading file: rke2_installer.sh
+Downloading file: rke2-images-core.linux-amd64.tar.zst 100% |███████████████████████████████████████████████████████████| (644/644 MB, 29 MB/s)
+Downloading file: rke2-images-cilium.linux-amd64.tar.zst 100% |█████████████████████████████████████████████████████████| (400/400 MB, 29 MB/s)
+Downloading file: rke2.linux-amd64.tar.gz 100% |███████████████████████████████████████████████████████████████████████████| (36/36 MB, 30 MB/s)
+Downloading file: sha256sum-amd64.txt 100% |█████████████████████████████████████████████████████████████████████████████| (4.3/4.3 kB, 29 MB/s)
+Kubernetes ................... [SUCCESS]
+Certificates ................. [SKIPPED]
+Cleanup ...................... [SKIPPED]
+Building ISO image...
+Kernel Params ................ [SKIPPED]
+Build complete, the image can be found at: eib-image.iso
+----
+
+一旦配置了使用所构建镜像的节点，我们就可以验证 Rancher 的安装：
+
+[,shell]
+----
+/var/lib/rancher/rke2/bin/kubectl get all -n cattle-system --kubeconfig /etc/rancher/rke2/rke2.yaml
+----
+
+输出应该与以下内容相似，显示所有内容已成功部署：
+[,console]
+----
+NAME                                            READY   STATUS      RESTARTS   AGE
+pod/helm-operation-6l6ld                        0/2     Completed   0          107s
+pod/helm-operation-8tk2v                        0/2     Completed   0          2m2s
+pod/helm-operation-blnrr                        0/2     Completed   0          2m49s
+pod/helm-operation-hdcmt                        0/2     Completed   0          3m19s
+pod/helm-operation-m74c7                        0/2     Completed   0          97s
+pod/helm-operation-qzzr4                        0/2     Completed   0          2m30s
+pod/helm-operation-s9jh5                        0/2     Completed   0          3m
+pod/helm-operation-tq7ts                        0/2     Completed   0          2m41s
+pod/rancher-99d599967-ftjkk                     1/1     Running     0          4m15s
+pod/rancher-webhook-79798674c5-6w28t            1/1     Running     0          2m27s
+pod/system-upgrade-controller-56696956b-trq5c   1/1     Running     0          104s
+
+NAME                      TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)          AGE
+service/rancher           ClusterIP   10.43.255.80   <none>        80/TCP,443/TCP   4m15s
+service/rancher-webhook   ClusterIP   10.43.7.238    <none>        443/TCP          2m27s
+
+NAME                                        READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/rancher                     1/1     1            1           4m15s
+deployment.apps/rancher-webhook             1/1     1            1           2m27s
+deployment.apps/system-upgrade-controller   1/1     1            1           104s
+
+NAME                                                  DESIRED   CURRENT   READY   AGE
+replicaset.apps/rancher-99d599967                     1         1         1       4m15s
+replicaset.apps/rancher-webhook-79798674c5            1         1         1       2m27s
+replicaset.apps/system-upgrade-controller-56696956b   1         1         1       104s
+----
+
+当我们转到 `\https://192.168.100.50.sslip.io` 并使用我们之前设置的 `adminadminadmin` 密码登录时，我们会看到 Rancher 仪表板：
+
+image::air-gapped-rancher.png[scaledwidth=100%]
+
+== SUSE Security 安装 [[suse-security-install]]
+
+与 Rancher 安装不同，SUSE Security 安装在 EIB 中不需要任何特殊处理。EIB 将自动为底层组件 NeuVector 所需的每个镜像进行隔离处理。
+
+我们将创建定义文件：
+[,console,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+kubernetes:
+  version: {version-kubernetes-rke2}
+  helm:
+    charts:
+      - name: neuvector-crd
+        version: {version-neuvector-crd-chart}
+        repositoryName: rancher-charts
+        targetNamespace: neuvector
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: neuvector-values.yaml
+      - name: neuvector
+        version: {version-neuvector-chart}
+        repositoryName: rancher-charts
+        targetNamespace: neuvector
+        createNamespace: true
+        installationNamespace: kube-system
+        valuesFile: neuvector-values.yaml
+    repositories:
+      - name: rancher-charts
+        url: https://charts.rancher.io/
+----
+
+我们还将为 NeuVector 创建一个 Helm values 文件：
+[,shell]
+----
+cat << EOF > $CONFIG_DIR/kubernetes/helm/values/neuvector-values.yaml
+controller:
+  replicas: 1
+manager:
+  enabled: false
+cve:
+  scanner:
+    enabled: false
+    replicas: 1
+k3s:
+  enabled: true
+crdwebhook:
+  enabled: false
+EOF
+----
+
+让我们构建镜像：
+[,shell,subs="attributes"]
+----
+podman run --rm -it --privileged -v $CONFIG_DIR:/eib \
+registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+build --definition-file eib-iso-definition.yaml
+----
+
+输出应该与以下内容相似：
+[,console]
+----
+Pulling selected Helm charts... 100% |███████████████████████████████████████████████████████████████████████████████████████████| (2/2, 4 it/s)
+Generating image customization components...
+Identifier ................... [SUCCESS]
+Custom Files ................. [SKIPPED]
+Time ......................... [SKIPPED]
+Network ...................... [SUCCESS]
+Groups ....................... [SKIPPED]
+Users ........................ [SUCCESS]
+Proxy ........................ [SKIPPED]
+Rpm .......................... [SKIPPED]
+Os Files ..................... [SKIPPED]
+Systemd ...................... [SKIPPED]
+Fips ......................... [SKIPPED]
+Elemental .................... [SKIPPED]
+Suma ......................... [SKIPPED]
+Populating Embedded Artifact Registry... 100% |██████████████████████████████████████████████████████████████████████████████| (5/5, 13 it/min)
+Embedded Artifact Registry ... [SUCCESS]
+Keymap ....................... [SUCCESS]
+Configuring Kubernetes component...
+The Kubernetes CNI is not explicitly set, defaulting to 'cilium'.
+Downloading file: rke2_installer.sh
+Kubernetes ................... [SUCCESS]
+Certificates ................. [SKIPPED]
+Cleanup ...................... [SKIPPED]
+Building ISO image...
+Kernel Params ................ [SKIPPED]
+Build complete, the image can be found at: eib-image.iso
+----
+
+一旦配置了使用构建镜像的节点，我们就可以验证 SUSE Security 安装：
+
+[,shell]
+----
+/var/lib/rancher/rke2/bin/kubectl get all -n neuvector --kubeconfig /etc/rancher/rke2/rke2.yaml
+----
+
+输出应该与以下内容相似，显示所有内容已成功部署：
+[,console]
+----
+NAME                                            READY   STATUS      RESTARTS   AGE
+pod/neuvector-cert-upgrader-job-bxbnz           0/1     Completed   0          3m39s
+pod/neuvector-controller-pod-7d854bfdc7-nhxjf   1/1     Running     0          3m44s
+pod/neuvector-enforcer-pod-ct8jm                1/1     Running     0          3m44s
+
+NAME                                      TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)                         AGE
+service/neuvector-svc-admission-webhook   ClusterIP   10.43.234.241   <none>        443/TCP                         3m44s
+service/neuvector-svc-controller          ClusterIP   None            <none>        18300/TCP,18301/TCP,18301/UDP   3m44s
+service/neuvector-svc-crd-webhook         ClusterIP   10.43.50.190    <none>        443/TCP                         3m44s
+
+NAME                                    DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+daemonset.apps/neuvector-enforcer-pod   1         1         1       1            1           <none>          3m44s
+
+NAME                                       READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/neuvector-controller-pod   1/1     1            1           3m44s
+
+NAME                                                  DESIRED   CURRENT   READY   AGE
+replicaset.apps/neuvector-controller-pod-7d854bfdc7   1         1         1       3m44s
+
+NAME                                        SCHEDULE    TIMEZONE   SUSPEND   ACTIVE   LAST SCHEDULE   AGE
+cronjob.batch/neuvector-cert-upgrader-pod   0 0 1 1 *   <none>     True      0        <none>          3m44s
+cronjob.batch/neuvector-updater-pod         0 0 * * *   <none>     False     0        <none>          3m44s
+
+NAME                                    STATUS     COMPLETIONS   DURATION   AGE
+job.batch/neuvector-cert-upgrader-job   Complete   1/1           7s         3m39s
+----
+
+== SUSE Storage 安装 [[suse-storage-install]]
+
+Longhorn 的 https://longhorn.io/docs/{version-longhorn-docs}/deploy/install/airgap/[官方文档] 包含一个 `longhorn-images.txt` 文件，其中列出了隔离安装所需的所有镜像。
+我们将在定义文件中包含来自 Rancher 容器镜像仓库的镜像对应项。
+让我们创建它：
+
+[,console,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+  packages:
+    sccRegistrationCode: [reg-code]
+    packageList:
+      - open-iscsi
+kubernetes:
+  version: {version-kubernetes-rke2}
+  helm:
+    charts:
+      - name: suse-storage
+        releaseName: longhorn
+        repositoryName: rancher-application-collection
+        targetNamespace: longhorn-system
+        createNamespace: true
+        version: {version-longhorn-chart}
+    repositories:
+      - name: rancher-application-collection
+        url: oci://dp.apps.rancher.io/charts
+        authentication:
+          username: $APPS.RANCHER.IO_USERNAME
+          password: $APPS.RANCHER.IO_ACCESS_TOKEN
+embeddedArtifactRegistry:
+    registries:
+      - uri: dp.apps.rancher.io
+        authentication:
+          username: $APPS.RANCHER.IO_USERNAME
+          password: $APPS.RANCHER.IO_ACCESS_TOKEN
+    - name: dp.apps.rancher.io/containers/kubernetes-csi-external-attacher:4.11.0-13.2
+    - name: dp.apps.rancher.io/containers/kubernetes-csi-external-provisioner:5.3.0-14.1
+    - name: dp.apps.rancher.io/containers/kubernetes-csi-external-resizer:2.1.0-6.2
+    - name: dp.apps.rancher.io/containers/kubernetes-csi-external-snapshotter:8.5.0-13.2
+    - name: dp.apps.rancher.io/containers/kubernetes-csi-livenessprobe:2.18.0-13.2
+    - name: dp.apps.rancher.io/containers/kubernetes-csi-node-driver-registrar:2.16.0-13.2
+    - name: dp.apps.rancher.io/containers/longhorn-backing-image-manager:1.11.2-4.1
+    - name: dp.apps.rancher.io/containers/longhorn-engine:1.11.2-4.2
+    - name: dp.apps.rancher.io/containers/longhorn-instance-manager:1.11.2-4.3
+    - name: dp.apps.rancher.io/containers/longhorn-manager:1.11.2-4.2
+    - name: dp.apps.rancher.io/containers/longhorn-share-manager:1.11.2-4.1
+    - name: dp.apps.rancher.io/containers/longhorn-ui:1.11.2-4.1
+    - name: dp.apps.rancher.io/containers/rancher-support-bundle-kit:0.0.84-9.4
+----
+
+[NOTE]
+====
+您会注意到定义文件列出了 `open-iscsi` 软件包。这是必要的，因为 Longhorn 依赖于在不同节点上运行的 `iscsiadm` 守护程序，以便为 Kubernetes 提供持久卷。
+====
+
+让我们构建镜像：
+
+[,shell,subs="attributes"]
+----
+podman run --rm -it --privileged -v $CONFIG_DIR:/eib \
+registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+build --definition-file eib-iso-definition.yaml
+----
+
+输出应该与以下内容相似：
+[,console]
+----
+Setting up Podman API listener...
+Pulling selected Helm charts... 100% |██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| (2/2, 3 it/s)
+Generating image customization components...
+Identifier ................... [SUCCESS]
+Custom Files ................. [SKIPPED]
+Time ......................... [SKIPPED]
+Network ...................... [SUCCESS]
+Groups ....................... [SKIPPED]
+Users ........................ [SUCCESS]
+Proxy ........................ [SKIPPED]
+Resolving package dependencies...
+Rpm .......................... [SUCCESS]
+Os Files ..................... [SKIPPED]
+Systemd ...................... [SKIPPED]
+Fips ......................... [SKIPPED]
+Elemental .................... [SKIPPED]
+Suma ......................... [SKIPPED]
+Populating Embedded Artifact Registry... 100% |███████████████████████████████████████████████████████████████████████████████████████████████████████████| (15/15, 20956 it/s)
+Embedded Artifact Registry ... [SUCCESS]
+Keymap ....................... [SUCCESS]
+Configuring Kubernetes component...
+The Kubernetes CNI is not explicitly set, defaulting to 'cilium'.
+Downloading file: rke2_installer.sh
+Downloading file: rke2-images-core.linux-amd64.tar.zst 100% (782/782 MB, 108 MB/s)
+Downloading file: rke2-images-cilium.linux-amd64.tar.zst 100% (367/367 MB, 104 MB/s)
+Downloading file: rke2.linux-amd64.tar.gz 100% (34/34 MB, 108 MB/s)
+Downloading file: sha256sum-amd64.txt 100% (3.9/3.9 kB, 7.5 MB/s)
+Kubernetes ................... [SUCCESS]
+Certificates ................. [SKIPPED]
+Cleanup ...................... [SKIPPED]
+Building ISO image...
+Kernel Params ................ [SKIPPED]
+Build complete, the image can be found at: eib-image.iso
+----
+
+一旦配置了使用构建镜像的节点，我们就可以验证 Longhorn 安装：
+
+[,shell]
+----
+/var/lib/rancher/rke2/bin/kubectl get all -n longhorn-system --kubeconfig /etc/rancher/rke2/rke2.yaml
+----
+
+输出应该与以下内容相似，显示所有内容已成功部署：
+[,console]
+----
+NAME                                                    READY   STATUS    RESTARTS   AGE
+pod/csi-attacher-787fd9c6c8-sf42d                       1/1     Running   0          2m28s
+pod/csi-attacher-787fd9c6c8-tb82p                       1/1     Running   0          2m28s
+pod/csi-attacher-787fd9c6c8-zhc6s                       1/1     Running   0          2m28s
+pod/csi-provisioner-74486b95c6-b2v9s                    1/1     Running   0          2m28s
+pod/csi-provisioner-74486b95c6-hwllt                    1/1     Running   0          2m28s
+pod/csi-provisioner-74486b95c6-mlrpk                    1/1     Running   0          2m28s
+pod/csi-resizer-859d4557fd-t54zk                        1/1     Running   0          2m28s
+pod/csi-resizer-859d4557fd-vdt5d                        1/1     Running   0          2m28s
+pod/csi-resizer-859d4557fd-x9kh4                        1/1     Running   0          2m28s
+pod/csi-snapshotter-6f69c6c8cc-r62gr                    1/1     Running   0          2m28s
+pod/csi-snapshotter-6f69c6c8cc-vrwjn                    1/1     Running   0          2m28s
+pod/csi-snapshotter-6f69c6c8cc-z65nb                    1/1     Running   0          2m28s
+pod/engine-image-ei-4623b511-9vhkb                      1/1     Running   0          3m13s
+pod/instance-manager-6f95fd57d4a4cd0459e469d75a300552   1/1     Running   0          2m43s
+pod/longhorn-csi-plugin-gx98x                           3/3     Running   0          2m28s
+pod/longhorn-driver-deployer-55f9c88499-fbm6q           1/1     Running   0          3m28s
+pod/longhorn-manager-dpdp7                              2/2     Running   0          3m28s
+pod/longhorn-ui-59c85fcf94-gg5hq                        1/1     Running   0          3m28s
+pod/longhorn-ui-59c85fcf94-s49jc                        1/1     Running   0          3m28s
+
+NAME                                  TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)    AGE
+service/longhorn-admission-webhook    ClusterIP   10.43.77.89    <none>        9502/TCP   3m28s
+service/longhorn-backend              ClusterIP   10.43.56.17    <none>        9500/TCP   3m28s
+service/longhorn-conversion-webhook   ClusterIP   10.43.54.73    <none>        9501/TCP   3m28s
+service/longhorn-frontend             ClusterIP   10.43.22.82    <none>        80/TCP     3m28s
+service/longhorn-recovery-backend     ClusterIP   10.43.45.143   <none>        9503/TCP   3m28s
+
+NAME                                      DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+daemonset.apps/engine-image-ei-4623b511   1         1         1       1            1           <none>          3m13s
+daemonset.apps/longhorn-csi-plugin        1         1         1       1            1           <none>          2m28s
+daemonset.apps/longhorn-manager           1         1         1       1            1           <none>          3m28s
+
+NAME                                       READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/csi-attacher               3/3     3            3           2m28s
+deployment.apps/csi-provisioner            3/3     3            3           2m28s
+deployment.apps/csi-resizer                3/3     3            3           2m28s
+deployment.apps/csi-snapshotter            3/3     3            3           2m28s
+deployment.apps/longhorn-driver-deployer   1/1     1            1           3m28s
+deployment.apps/longhorn-ui                2/2     2            2           3m28s
+
+NAME                                                  DESIRED   CURRENT   READY   AGE
+replicaset.apps/csi-attacher-787fd9c6c8               3         3         3       2m28s
+replicaset.apps/csi-provisioner-74486b95c6            3         3         3       2m28s
+replicaset.apps/csi-resizer-859d4557fd                3         3         3       2m28s
+replicaset.apps/csi-snapshotter-6f69c6c8cc            3         3         3       2m28s
+replicaset.apps/longhorn-driver-deployer-55f9c88499   1         1         1       3m28s
+replicaset.apps/longhorn-ui-59c85fcf94                2         2         2       3m28s
+----
+
+== KubeVirt 和 CDI 安装 [[kubevirt-install]]
+
+KubeVirt 和 CDI 的 Helm chart 仅安装它们各自的 operator。
+部署其余系统取决于 operator，这意味着我们必须在定义文件中包含所有必要的容器镜像。让我们创建它：
+
+[,console,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+kubernetes:
+  version: {version-kubernetes-rke2}
+  helm:
+    charts:
+      - name: kubevirt
+        repositoryName: suse-edge
+        version: {version-kubevirt-chart}
+        targetNamespace: kubevirt-system
+        createNamespace: true
+        installationNamespace: kube-system
+      - name: cdi
+        repositoryName: suse-edge
+        version: {version-cdi-chart}
+        targetNamespace: cdi-system
+        createNamespace: true
+        installationNamespace: kube-system
+    repositories:
+      - name: suse-edge
+        url: oci://registry.suse.com/edge/charts
+embeddedArtifactRegistry:
+  images:
+    - name: registry.suse.com/suse/sles/15.7/cdi-apiserver:1.64.0-150700.9.6.1
+    - name: registry.suse.com/suse/sles/15.7/cdi-controller:1.64.0-150700.9.6.1
+    - name: registry.suse.com/suse/sles/15.7/cdi-operator:1.64.0-150700.9.6.1
+    - name: registry.suse.com/suse/sles/15.7/cdi-uploadproxy:1.64.0-150700.9.6.1
+    - name: registry.suse.com/suse/sles/15.7/virt-api:1.7.0-150700.3.16.2
+    - name: registry.suse.com/suse/sles/15.7/virt-controller:1.7.0-150700.3.16.2
+    - name: registry.suse.com/suse/sles/15.7/virt-handler:1.7.0-150700.3.16.2
+    - name: registry.suse.com/suse/sles/15.7/virt-launcher:1.7.0-150700.3.16.2
+    - name: registry.suse.com/suse/sles/15.7/virt-operator:1.7.0-150700.3.16.2
+----
+
+让我们构建镜像：
+
+[,shell,subs="attributes"]
+----
+podman run --rm -it --privileged -v $CONFIG_DIR:/eib \
+registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+build --definition-file eib-iso-definition.yaml
+----
+
+输出应该与以下内容相似：
+[,console]
+----
+Pulling selected Helm charts... 100% |███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| (2/2, 48 it/min)
+Generating image customization components...
+Identifier ................... [SUCCESS]
+Custom Files ................. [SKIPPED]
+Time ......................... [SKIPPED]
+Network ...................... [SUCCESS]
+Groups ....................... [SKIPPED]
+Users ........................ [SUCCESS]
+Proxy ........................ [SKIPPED]
+Rpm .......................... [SKIPPED]
+Os Files ..................... [SKIPPED]
+Systemd ...................... [SKIPPED]
+Fips ......................... [SKIPPED]
+Elemental .................... [SKIPPED]
+Suma ......................... [SKIPPED]
+Populating Embedded Artifact Registry... 100% |██████████████████████████████████████████████████████████████████████████████████████████████████████████| (15/15, 4 it/min)
+Embedded Artifact Registry ... [SUCCESS]
+Keymap ....................... [SUCCESS]
+Configuring Kubernetes component...
+The Kubernetes CNI is not explicitly set, defaulting to 'cilium'.
+Downloading file: rke2_installer.sh
+Kubernetes ................... [SUCCESS]
+Certificates ................. [SKIPPED]
+Cleanup ...................... [SKIPPED]
+Building ISO image...
+Kernel Params ................ [SKIPPED]
+Build complete, the image can be found at: eib-image.iso
+----
+
+一旦配置了使用构建镜像的节点，我们就可以验证 KubeVirt 和 CDI 的安装。
+
+验证 KubeVirt：
+
+[,shell]
+----
+/var/lib/rancher/rke2/bin/kubectl get all -n kubevirt-system --kubeconfig /etc/rancher/rke2/rke2.yaml
+----
+
+输出应该与以下内容相似，显示所有内容已成功部署：
+[,console]
+----
+NAME                                  READY   STATUS    RESTARTS   AGE
+pod/virt-api-59cb997648-mmt67         1/1     Running   0          2m34s
+pod/virt-controller-69786b785-7cc96   1/1     Running   0          2m8s
+pod/virt-controller-69786b785-wq2dz   1/1     Running   0          2m8s
+pod/virt-handler-2l4dm                1/1     Running   0          2m8s
+pod/virt-operator-7c444cff46-nps4l    1/1     Running   0          3m1s
+pod/virt-operator-7c444cff46-r25xq    1/1     Running   0          3m1s
+
+NAME                                  TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
+service/kubevirt-operator-webhook     ClusterIP   10.43.167.109   <none>        443/TCP   2m36s
+service/kubevirt-prometheus-metrics   ClusterIP   None            <none>        443/TCP   2m36s
+service/virt-api                      ClusterIP   10.43.18.202    <none>        443/TCP   2m36s
+service/virt-exportproxy              ClusterIP   10.43.142.188   <none>        443/TCP   2m36s
+
+NAME                          DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR            AGE
+daemonset.apps/virt-handler   1         1         1       1            1           kubernetes.io/os=linux   2m8s
+
+NAME                              READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/virt-api          1/1     1            1           2m34s
+deployment.apps/virt-controller   2/2     2            2           2m8s
+deployment.apps/virt-operator     2/2     2            2           3m1s
+
+NAME                                        DESIRED   CURRENT   READY   AGE
+replicaset.apps/virt-api-59cb997648         1         1         1       2m34s
+replicaset.apps/virt-controller-69786b785   2         2         2       2m8s
+replicaset.apps/virt-operator-7c444cff46    2         2         2       3m1s
+
+NAME                            AGE    PHASE
+kubevirt.kubevirt.io/kubevirt   3m1s   Deployed
+----
+
+验证 CDI：
+
+[,shell]
+----
+/var/lib/rancher/rke2/bin/kubectl get all -n cdi-system --kubeconfig /etc/rancher/rke2/rke2.yaml
+----
+
+输出应该与以下内容相似，显示所有内容已成功部署：
+[,console]
+----
+NAME                                   READY   STATUS    RESTARTS   AGE
+pod/cdi-apiserver-5598c9bf47-pqfxw     1/1     Running   0          3m44s
+pod/cdi-deployment-7cbc5db7f8-g46z7    1/1     Running   0          3m44s
+pod/cdi-operator-777c865745-2qcnj      1/1     Running   0          3m48s
+pod/cdi-uploadproxy-646f4cd7f7-fzkv7   1/1     Running   0          3m44s
+
+NAME                             TYPE        CLUSTER-IP     EXTERNAL-IP   PORT(S)    AGE
+service/cdi-api                  ClusterIP   10.43.2.224    <none>        443/TCP    3m44s
+service/cdi-prometheus-metrics   ClusterIP   10.43.237.13   <none>        8080/TCP   3m44s
+service/cdi-uploadproxy          ClusterIP   10.43.114.91   <none>        443/TCP    3m44s
+
+NAME                              READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/cdi-apiserver     1/1     1            1           3m44s
+deployment.apps/cdi-deployment    1/1     1            1           3m44s
+deployment.apps/cdi-operator      1/1     1            1           3m48s
+deployment.apps/cdi-uploadproxy   1/1     1            1           3m44s
+
+NAME                                         DESIRED   CURRENT   READY   AGE
+replicaset.apps/cdi-apiserver-5598c9bf47     1         1         1       3m44s
+replicaset.apps/cdi-deployment-7cbc5db7f8    1         1         1       3m44s
+replicaset.apps/cdi-operator-777c865745      1         1         1       3m48s
+replicaset.apps/cdi-uploadproxy-646f4cd7f7   1         1         1       3m44s
+----
+
+== SUSE Private Registry 安装 [[suse-private-registry-install]]
+
+为了在隔离的部署中包含 SUSE Private Registry，我们必须更新定义文件，以包含所需的 helm chart 以及新镜像的嵌入式工件。
+
+让我们更新定义文件：
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+kubernetes:
+  version: {version-kubernetes-rke2}
+  helm:
+    charts:
+      - name: metallb
+        version: {version-metallb-chart}
+        targetNamespace: metallb-system
+        createNamespace: true
+        repositoryName: suse-edge-charts
+        installationNamespace: kube-system
+      - name: suse-storage
+        releaseName: longhorn
+        repositoryName: rancher-application-collection
+        targetNamespace: longhorn-system
+        createNamespace: true
+        version: {version-longhorn-chart}
+      - name: private-registry-helm
+        createNamespace: true
+        installationNamespace: kube-system
+        repositoryName: privateregistry
+        targetNamespace: suse-private-registry
+        valuesFile: privateregistry.yaml
+        version: {version-private-registry}
+    repositories:
+      - name: privateregistry
+        authentication:
+          username: $\{PRIVATE_REGISTRY_USERNAME\}
+          password: $\{PRIVATE_REGISTRY_PASSWORD\}
+        plainHTTP: false
+        skipTLSVerify: false
+        url: oci://registry.suse.com/private-registry
+      - name: rancher-application-collection
+        url: oci://dp.apps.rancher.io/charts
+        authentication:
+          username: $APPS.RANCHER.IO_USERNAME
+          password: $APPS.RANCHER.IO_ACCESS_TOKEN
+embeddedArtifactRegistry:
+  registries:
+    - uri: registry.suse.com
+      authentication:
+        username: $\{PRIVATE_REGISTRY_USERNAME\}
+        password: $\{PRIVATE_REGISTRY_PASSWORD\}
+    - uri: dp.apps.rancher.io
+        authentication:
+          username: $APPS.RANCHER.IO_USERNAME
+          password: $APPS.RANCHER.IO_ACCESS_TOKEN
+  images:
+    - name: registry.suse.com/private-registry/harbor-core:1.1.1-1.19
+    - name: registry.suse.com/private-registry/harbor-jobservice:1.1.1-1.19
+    - name: registry.suse.com/private-registry/harbor-portal:1.1.1-1.20
+    - name: registry.suse.com/private-registry/harbor-registry:1.1.1-1.19
+    - name: registry.suse.com/private-registry/harbor-registryctl:1.1.1-1.19
+    - name: registry.suse.com/private-registry/harbor-trivy-adapter:1.1.1-1.24
+----
+
+[NOTE] 
+====
+您将需要某些凭据，可以通过遵循官方 https://documentation.suse.com/cloudnative/suse-private-registry/html/private-registry/pr-deployment.html#pr-deployment-kube-secrets[SUSE Private Registry 文档] 来获取这些凭据。
+您还必须修改 `$\{PRIVATE_REGISTRY_USERNAME\}` 和 `$\{PRIVATE_REGISTRY_PASSWORD\}` 变量。请确保列出包含您所需组件版本的镜像。
+====
+
+现在，我们需要添加所需的 Kubernetes 清单，以正确配置 SUSE Private Registry。
+
+您需要在以下文件中修改 `$\{MGMT_CLUSTER_REGISTRY_IP\}`，为 SUSE Private Registry 保留一个静态 IP：
+
+. `kubernetes/manifests/metallb-registry.yaml`
++
+[,yaml,subs="attributes"]
+----
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: private-registry
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - private-registry-pool
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: private-registry-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - $\{MGMT_CLUSTER_REGISTRY_IP\}/32
+  serviceAllocation:
+    namespaces:
+    - suse-private-registry
+----
+
+. `kubernetes/helm/values/privateregistry.yaml`
++
+[,yaml,subs="attributes"]
+----
+core:
+  secretName: suse-registry-tls
+expose:
+  tls:
+    certSource: secret
+    enabled: true
+    secret:
+      secretName: suse-registry-tls
+  type: loadBalancer
+externalURL: https://$\{MGMT_CLUSTER_REGISTRY_IP\}
+persistence:
+  persistentVolumeClaim:
+    registry:
+      size: 20Gi
+----
+
+最后，必须使用以下内容创建 `kubernetes/manifests/suse-private-registry-creds.yaml`：
+
+[,yaml,subs="attributes"]
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: suse-registry
+  namespace: suse-private-registry
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: $\{DOCKER_CONFIG_JSON_BASE64\}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+    name: suse-registry-tls
+    namespace: suse-private-registry
+type: kubernetes.io/tls
+data:
+    tls.crt: $\{TLS_CRT_BASE64\}
+    tls.key: $\{TLS_KEY_BASE64\}
+----
+
+要为 `$\{DOCKER_CONFIG_JSON_BASE64\}` 正确配置 docker config json (base64)，请运行：
+
+[,shell,subs="attributes"]
+----
+# $\{DOCKER_CONFIG_JSON_BASE64\} CONTENT
+echo -n '{"auths": {"&lt;MGMT_CLUSTER_REGISTRY_IP&gt;": {"username": "&lt;USERNAME&gt;", "password": "&lt;PASSWORD&gt;", "auth": "&lt;AUTH&gt;"}}}' | base64
+----
+
+其中 IP 与之前配置的 `$\{MGMT_CLUSTER_REGISTRY_IP\}` 相同，`username`、`password` 和 `auth` 可以从 https://documentation.suse.com/cloudnative/suse-private-registry/html/private-registry/pr-deployment.html#pr-deployment-kube-secrets[SUSE Private Registry 官方文档] 中获取。
+
+要为 `$\{TLS_CRT_BASE64\}` 和 `$\{TLS_KEY_BASE64\}` 生成 base64 编码的 TLS 证书和密钥（`tls.crt` 和 `tls.key`），您可以运行以下命令来创建自己的证书和密钥：
+
+[,shell,subs="attributes"]
+----
+# Generate a self-signed certificate and key
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -sha256 -days 365 -nodes
+
+# Convert them to base64 for the suse-private-registry-creds.yaml file
+cat cert.pem | base64 -w 0
+cat key.pem | base64 -w 0
+----
+
+验证 SUSE Private Registry：
+
+[,shell]
+----
+/var/lib/rancher/rke2/bin/kubectl get pods -n suse-private-registry --kubeconfig /etc/rancher/rke2/rke2.yaml
+----
+
+输出应该与以下内容相似，显示所有内容已成功部署：
+[,console]
+----
+NAME                                                      READY   STATUS    RESTARTS   AGE
+pod/private-registry-harbor-core-588fd4876f-8tqnv         1/1     Running   0          4m30s
+pod/private-registry-harbor-database-0                    1/1     Running   0          4m30s
+pod/private-registry-harbor-jobservice-7658f97fbc-4vq6n   1/1     Running   0          4m30s
+pod/private-registry-harbor-portal-5455ccc4bc-jpmt5       1/1     Running   0          4m30s
+pod/private-registry-harbor-redis-0                       1/1     Running   0          4m30s
+pod/private-registry-harbor-registry-5648b9d89-wdswz      2/2     Running   0          4m30s
+pod/private-registry-harbor-trivy-0                       1/1     Running   0          4m30s
+----
+
+ifeval::["{flavor}" == "telco"]
+== Metal^3^ 安装 [[metal3-install]]
+
+在通过 EIB 和 Hauler 在隔离的环境中部署 Metal^3^ 时，需要为 Ironic Python Agent (IPA) 镜像进行特殊配置。IPA 镜像由 Metal^3^ 用于裸机主机检查和配置。
+
+[NOTE]
+====
+有关 Metal^3^ 安装和配置（包括 MetalLB 设置）的更多信息，请参阅 <<quickstart-metal3>>。
+====
+
+要在隔离的部署中包含 Metal^3^，您需要：
+
+1. 将 Metal^3^ Helm chart 添加到您的定义文件中
+2. 将 IPA 镜像添加到嵌入式制品仓库中
+3. 使用 `useHauler: true` 创建 Helm values 文件
+
+将以下内容添加到定义文件的 `kubernetes.helm.charts` 部分：
+
+[,yaml,subs="attributes"]
+----
+  helm:
+    charts:
+      - name: metal3
+        version: {version-metal3-chart}
+        targetNamespace: metal3-system
+        createNamespace: true
+        repositoryName: suse-edge-charts
+        installationNamespace: kube-system
+        valuesFile: metal3-values.yaml
+----
+
+将 IPA 镜像添加到 `embeddedArtifactRegistry.images` 部分：
+
+[,yaml,subs="attributes"]
+----
+embeddedArtifactRegistry:
+  images:
+    - name: registry.suse.com/edge/{version-edge-registry}/ironic-python-agent:{version-ipa}
+----
+
+为 Metal^3^ 创建一个 Helm values 文件：
+
+[,shell]
+----
+cat << EOF > $CONFIG_DIR/kubernetes/helm/values/metal3-values.yaml
+global:
+  ironicIP: <STATIC_IRONIC_IP>
+metal3-ironic:
+  ipa:
+    useHauler: true
+EOF
+----
+
+[IMPORTANT]
+====
+在通过 EIB/Hauler 在隔离的环境中进行部署时，`metal3-ironic.ipa.useHauler` 值 **必须** 设置为 `true`（布尔数据类型）。这指示 Metal^3^ 从嵌入式制品仓库中检索 IPA 镜像，而不是尝试从互联网下载。
+====
+endif::[]
+
+== 查错
+
+如果您在构建镜像时遇到任何问题，或者希望进一步测试和调试该过程，请参阅 https://github.com/suse-edge/edge-image-builder/tree/release-1.1/docs[上游文档]。

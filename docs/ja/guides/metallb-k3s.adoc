@@ -1,0 +1,382 @@
+[#guides-metallb-k3s]
+= K3s上のMetalLB（レイヤー2モードを使用）
+:revdate: 2025-05-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+MetalLBは、標準的なルーティングプロトコルを使用する、ベアメタルKubernetesクラスター向けのロードバランサー実装です。
+
+このガイドでは、MetalLBをレイヤー2（L2）モードでデプロイする方法を説明します。
+
+== MetalLBを使用する理由
+
+MetalLBがベアメタルKubernetesクラスターでのロードバランシングにおいて魅力的な選択肢である理由はいくつかあります。
+
+. Kubernetesとのネイティブな統合:MetalLBはKubernetesとシームレスに統合されるため、使い慣れたKubernetesツールや手法を使用して簡単にデプロイおよび管理できます。
+. ベアメタルとの互換性:クラウドベースのロードバランサーとは異なり、MetalLBは、従来のロードバランサーが利用できない、または実現不可能なオンプレミス環境向けに特別に設計されています。
+. 複数のプロトコルをサポート:MetalLBはレイヤー2モードとBGP（Border Gateway Protocol）モードの両方をサポートしており、さまざまなネットワークアーキテクチャや要件に対応できる柔軟性を備えています。
+. 高可用性:MetalLBは、ロードバランシングの役割を複数のノードに分散させることで、サービスの可用性と信頼性を確保します。
+. スケーラビリティ:MetalLBは大規模なデプロイメントに対応でき、Kubernetesクラスターとともにスケーリングして、増大する需要を満たすことができます。
+
+レイヤー2モードでは、1つのノードがローカルネットワークに対してサービスをアドバタイズする役割を担います。ネットワークの観点からは、そのマシンに複数のIPアドレスがネットワークインタフェースに割り当てられているように見えるだけです。
+
+レイヤー2モードの最大の利点はその汎用性です。特別なハードウェアや高度なルーターを必要とせず、あらゆるイーサネットネットワークで動作します。
+
+== K3s上のMetalLB（L2を使用）
+
+このクイックスタートでは、L2モードを使用します。
+これは、特別なネットワーク機器は必要なく、ネットワーク範囲内で3つの空きIPアドレスが必要であることを意味します。
+
+== 前提条件
+
+* MetalLBをデプロイするK3sクラスター。
+
+[WARNING]
+====
+K3sには、Klipperという独自のサービスロードバランサーが付属しています。MetalLBを実行するには、 https://metallb.universe.tf/configuration/k3s/[それを無効にする必要があります]。Klipperを無効にするには、`--disable=servicelb`フラグを使用してK3sをインストールする必要があります。
+====
+
+* Helm
+* ネットワーク範囲内の3つの未割り当てIPアドレス。この例では`192.168.122.10-192.168.122.12`
+
+[IMPORTANT]
+====
+これらのIPアドレスが割り当てられていないことを確認する必要があります。
+DHCP環境では、二重割り当てを避けるため、これらのアドレスをDHCPプールに含めないようにする必要があります。
+====
+
+== 展開
+
+{product}ソリューションの一部として公開されているMetalLB Helmチャートを使用します。
+
+[,bash,subs="attributes"]
+----
+helm install \
+  metallb oci://registry.suse.com/edge/charts/metallb \
+  --namespace metallb-system \
+  --create-namespace
+
+while ! kubectl wait --for condition=ready -n metallb-system $(kubectl get\
+ pods -n metallb-system -l app.kubernetes.io/component=controller -o name)\
+ --timeout=10s; do
+ sleep 2
+done
+----
+
+== 設定
+
+この時点で、インストール作業は完了です。それでは、例の値を使用して https://metallb.universe.tf/configuration/[設定]を行います。
+
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: ip-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - 192.168.122.10/32
+  - 192.168.122.11/32
+  - 192.168.122.12/32
+EOF
+----
+
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: ip-pool-l2-adv
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - ip-pool
+EOF
+----
+
+これで、使用する準備が整いました。L2モードでは、以下のような多くの項目をカスタマイズできます。
+
+* https://metallb.universe.tf/usage/#ipv6-and-dual-stack-services[IPv6およびデュアルスタックサービス]
+* https://metallb.universe.tf/configuration/_advanced_ipaddresspool_configuration/#controlling-automatic-address-allocation[自動アドレス割り当ての制御]
+* https://metallb.universe.tf/configuration/_advanced_ipaddresspool_configuration/#reduce-scope-of-address-allocation-to-specific-namespace-and-service[アドレス割り当ての範囲を特定のネームスペースおよびサービスに限定]
+* https://metallb.universe.tf/configuration/_advanced_l2_configuration/#limiting-the-set-of-nodes-where-the-service-can-be-announced-from[サービスをアナウンスできるノードセットの制限]
+* https://metallb.universe.tf/configuration/_advanced_l2_configuration/#specify-network-interfaces-that-lb-ip-can-be-announced-from[LB IPをアナウンスできるネットワークインタフェースの指定]
+
+その他、 https://metallb.universe.tf/configuration/_advanced_bgp_configuration/[BGP]に関する多くの設定が可能です。
+
+[#traefik-and-metallb]
+=== TraefikとMetalLB
+
+TraefikはK3sでデフォルトでデプロイされ（ https://docs.k3s.io/networking#traefik-ingress-controller`--disable=traefik`で無効化可能）、デフォルトで`LoadBalancer`として公開されます（Klipperで使用するため）。しかし、Klipperを無効にする必要があるため、イングレス用のTraefikサービスは依然として`LoadBalancer`タイプです。そのため、MetalLBをデプロイする時点で、最初のIPが自動的にTraefik Ingressに割り当てられます。
+
+[,console]
+----
+# Before deploying MetalLB
+kubectl get svc -n kube-system traefik
+NAME      TYPE           CLUSTER-IP     EXTERNAL-IP   PORT(S)                      AGE
+traefik   LoadBalancer   10.43.44.113   <pending>     80:31093/TCP,443:32095/TCP   28s
+# After deploying MetalLB
+kubectl get svc -n kube-system traefik
+NAME      TYPE           CLUSTER-IP     EXTERNAL-IP      PORT(S)                      AGE
+traefik   LoadBalancer   10.43.44.113   192.168.122.10   80:31093/TCP,443:32095/TCP   3m10s
+----
+
+これはプロセスの<<ingress-with-metallb,後ほど>>適用されます。
+
+== 使用方法
+
+デプロイメントの例を作成してみましょう。
+
+[,bash]
+----
+cat <<- EOF | kubectl apply -f -
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hello-kubernetes
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hello-kubernetes
+  namespace: hello-kubernetes
+  labels:
+    app.kubernetes.io/name: hello-kubernetes
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-kubernetes
+  namespace: hello-kubernetes
+  labels:
+    app.kubernetes.io/name: hello-kubernetes
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hello-kubernetes
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hello-kubernetes
+    spec:
+      serviceAccountName: hello-kubernetes
+      containers:
+        - name: hello-kubernetes
+          image: "paulbouwer/hello-kubernetes:1.10"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          env:
+          - name: HANDLER_PATH_PREFIX
+            value: ""
+          - name: RENDER_PATH_PREFIX
+            value: ""
+          - name: KUBERNETES_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: KUBERNETES_POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: KUBERNETES_NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+          - name: CONTAINER_IMAGE
+            value: "paulbouwer/hello-kubernetes:1.10"
+EOF
+----
+
+そして最後に、サービスです。
+
+[,bash]
+----
+cat <<- EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-kubernetes
+  namespace: hello-kubernetes
+  labels:
+    app.kubernetes.io/name: hello-kubernetes
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: hello-kubernetes
+EOF
+----
+
+実際に動作している様子を見てみましょう。
+
+[,console]
+----
+kubectl get svc -n hello-kubernetes
+NAME               TYPE           CLUSTER-IP     EXTERNAL-IP      PORT(S)        AGE
+hello-kubernetes   LoadBalancer   10.43.127.75   192.168.122.11   80:31461/TCP   8s
+
+curl http://192.168.122.11
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hello Kubernetes!</title>
+    <link rel="stylesheet" type="text/css" href="/css/main.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Ubuntu:300" >
+</head>
+<body>
+
+  <div class="main">
+    <img src="/images/kubernetes.png"/>
+    <div class="content">
+      <div id="message">
+  Hello world!
+</div>
+<div id="info">
+  <table>
+    <tr>
+      <th>namespace:</th>
+      <td>hello-kubernetes</td>
+    </tr>
+    <tr>
+      <th>pod:</th>
+      <td>hello-kubernetes-7c8575c848-2c6ps</td>
+    </tr>
+    <tr>
+      <th>node:</th>
+      <td>allinone (Linux 5.14.21-150400.24.46-default)</td>
+    </tr>
+  </table>
+</div>
+<div id="footer">
+  paulbouwer/hello-kubernetes:1.10 (linux/amd64)
+</div>
+    </div>
+  </div>
+
+</body>
+</html>
+----
+
+[#ingress-with-metallb]
+=== MetalLBを使用したイングレス
+
+Traefikはすでにイングレスコントローラーとして機能しているため、次のような`Ingress`オブジェクトを使用してHTTP/HTTPSトラフィックを公開できます。
+
+[,bash]
+----
+IP=$(kubectl get svc -n kube-system traefik -o jsonpath="{.status.loadBalancer.ingress[0].ip}")
+cat <<- EOF | kubectl apply -f -
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hello-kubernetes-ingress
+  namespace: hello-kubernetes
+spec:
+  rules:
+  - host: hellok3s.${IP}.sslip.io
+    http:
+      paths:
+        - path: "/"
+          pathType: Prefix
+          backend:
+            service:
+              name: hello-kubernetes
+              port:
+                name: http
+EOF
+----
+
+続いて：
+
+[,console]
+----
+curl http://hellok3s.${IP}.sslip.io
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hello Kubernetes!</title>
+    <link rel="stylesheet" type="text/css" href="/css/main.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Ubuntu:300" >
+</head>
+<body>
+
+  <div class="main">
+    <img src="/images/kubernetes.png"/>
+    <div class="content">
+      <div id="message">
+  Hello world!
+</div>
+<div id="info">
+  <table>
+    <tr>
+      <th>namespace:</th>
+      <td>hello-kubernetes</td>
+    </tr>
+    <tr>
+      <th>pod:</th>
+      <td>hello-kubernetes-7c8575c848-fvqm2</td>
+    </tr>
+    <tr>
+      <th>node:</th>
+      <td>allinone (Linux 5.14.21-150400.24.46-default)</td>
+    </tr>
+  </table>
+</div>
+<div id="footer">
+  paulbouwer/hello-kubernetes:1.10 (linux/amd64)
+</div>
+    </div>
+  </div>
+
+</body>
+</html>
+----
+
+MetalLBが正しく動作していることを確認します。
+
+[,bash]
+----
+% arping hellok3s.${IP}.sslip.io
+
+ARPING 192.168.64.210
+60 bytes from 92:12:36:00:d3:58 (192.168.64.210): index=0 time=1.169 msec
+60 bytes from 92:12:36:00:d3:58 (192.168.64.210): index=1 time=2.992 msec
+60 bytes from 92:12:36:00:d3:58 (192.168.64.210): index=2 time=2.884 msec
+----
+
+上記の例では、トラフィックは次のように流れます。
+
+. `hellok3s.$\{IP}.sslip.io`は実際のIPに解決されます。
+. 次に、トラフィックは`metallb-speaker`ポッドによって処理されます。
+. `metallb-speaker`はトラフィックを`traefik`コントローラーにリダイレクトします。
+. 最後に、Traefikはリクエストを`hello-kubernetes`サービスに転送します。

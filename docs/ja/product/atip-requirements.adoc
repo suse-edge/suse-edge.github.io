@@ -1,0 +1,364 @@
+[#atip-requirements]
+= 要件と前提
+:revdate: 2025-08-25
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+[#atip-hardware]
+== Hardware (ハードウェア)
+
+SUSE Telco Cloudのハードウェア要件は以下の通りです。
+
+* **管理クラスタ**:管理クラスタには`SUSE Linux Micro`、`RKE2`、`SUSE Rancher Prime`、`Metal^3^`などのコンポーネントが含まれており、複数のダウンストリームクラスタを管理するために使用されます。管理するダウンストリームクラスタの数に応じて、サーバーのハードウェア要件は異なる場合があります。
+  ** サーバー（`VM`または`bare-metal`）の最小要件は以下の通りです。
+     *** RAM:最小8 GB（16 GB以上を推奨）
+     *** CPU:最小2（4 CPU以上を推奨）
+
+* **ダウンストリームクラスタ**:ダウンストリームクラスタは、Telcoワークロードを実行するためにデプロイされるクラスタです。`SR-IOV`、`CPU Performance Optimization`などの特定のTelco機能を有効にするには、特定の要件が必要です。
+  ** SR-IOV: パススルーモードでVF（仮想機能）をCNF/VNFに接続するには、NICがSR-IOVをサポートし、BIOSでVT-d/AMD-Viが有効になっている必要があります。
+  ** CPUプロセッサ:特定のTelcoワークロードを実行するには、この参照<<atip-features,テーブル>>で利用可能な機能のほとんどを有効にするために、CPUプロセッサモデルを適合させる必要があります。
+  ** 仮想メディアを使用してインストールするためのファームウェア要件:
++
+|===
+| サーバハードウェア | BMCモデル | 管理
+
+| Dellハードウェア
+| 第15世代
+| iDRAC9
+
+| Supermicroハードウェア
+| 01.00.25
+| Supermicro SMC - redfish
+
+| HPEハードウェア
+| 1.50
+| iLO6
+|===
+
+[#atip-network]
+== ネットワーク
+
+ネットワークアーキテクチャの参考として、次の図にTelco環境の一般的なネットワークアーキテクチャを示します。
+
+image::product-atip-requirements1.png[scaledwidth=100%]
+
+ネットワークアーキテクチャは、以下のコンポーネントに基づいています。
+
+* **管理ネットワーク**:このネットワークは、ダウンストリームクラスターノードの管理に使用されます。これは帯域外管理に使用されます。通常、このネットワークは別の管理スイッチにも接続されますが、VLANを使用してトラフィックを分離することで、同じサービススイッチに接続することも可能です。
+* **コントロールプレーンネットワーク**:このネットワークは、ダウンストリームクラスターノード間およびそれらで実行されているサービス間の通信に使用されます。このネットワークは、ノードと`DHCP`や`DNS`サーバーなどの外部サービスとの間の通信にも使用されます。接続環境によっては、スイッチ/ルーターがインターネット経由のトラフィックを処理できる場合があります。
+* **その他のネットワーク**:特定の目的のために、ノードが他のネットワークに接続される場合があります。
+
+[NOTE]
+====
+ダイレクトネットワークプロビジョニングワークフローを使用するには、ホストの準備とプロビジョニングを自動化できるように、管理クラスタがダウンストリームクラスタサーバーのベースボード管理コントローラー（BMC）へのネットワーク接続を備えている必要があります。
+====
+
+[#atip-ports]
+== ポートの要件
+
+適切に動作させるために、SUSE Telco Cloudのデプロイメントでは、管理ノードおよびダウンストリームKubernetesクラスターノードで多数のポートに到達できる必要があります。
+
+[NOTE]
+====
+正確なリストは、デプロイされたオプションコンポーネントおよび選択されたデプロイメントオプション（CNIプラグインなど）によって異なります。
+====
+
+=== 管理ノード
+
+次の表は、管理クラスタを実行しているノードで開かれているポートの一覧です。
+
+[NOTE]
+====
+CNIプラグイン関連のポートについては、<<cni-specific-port-requirements,CNI固有のポート要件>>を参照してください。
+====
+
+
+.管理ノードのインバウンドネットワークルール
+[#table-inbound-network-rules-for-management-nodes]
+|===
+| プロトコル | ポート | ソース | 説明
+
+| TCP
+| 22
+| SSHアクセスを必要とするすべてのソース
+| 管理クラスタのノードへのSSHアクセス
+
+| TCP
+| 80
+| 外部TLS終端を行うロードバランサー/プロキシ
+| 外部TLS終端が使用されている場合のRancher UI/API
+
+| TCP
+| 443
+| Rancher UI/APIへのTLSアクセスを必要とするすべてのソース
+| Rancherエージェント、Rancher UI/API
+
+| TCP
+| 2379
+| RKE2（管理クラスタ）サーバーノード
+| `etcd` クライアントポート
+
+| TCP
+| 2380
+| RKE2（管理クラスタ）サーバーノード
+| `etcd` ピアポート
+
+| TCP
+| 6180
+| この公開ポート（非TLS）からIPA^(2)^ラムディスクイメージをプルするように`Metal^3^/ironic`から以前に指示されたすべてのBMC^(1)^
+| 仮想メディアベースのブート用にIPA^(2)^ ISOイメージを提供する`Ironic` httpd非TLS Webサーバー +
+ +
+ このポートが有効な場合、機能的に同等なTLS対応ポート（下記参照）は開かれません
+
+| TCP
+| 6185
+| この公開ポート（TLS）からIPA^(2)^ラムディスクイメージをプルするように`Metal^3^/ironic`から以前に指示されたすべてのBMC^(1)^
+| 仮想メディアベースのブート用にIPA^(2)^ ISOイメージを提供する`Ironic` httpd TLS対応Webサーバー +
+ +
+ このポートが有効な場合、機能的に同等なTLS非対応ポート（上記参照）は開かれません
+
+| TCP
+| 6385
+| 「登録済み」インスタンスでデプロイおよび実行されている任意の `Metal^3^/ironic` IPA^(1)^ ラムディスクイメージ`BareMetalHost`
+| Ironic API
+
+| TCP
+| 6443
+| 任意の管理クラスタのノード、任意の（管理クラスタ外の）Kubernetes クライアント
+| Kubernetes API
+
+| TCP
+| 6545
+| 任意の管理クラスタのノード
+| OCI 準拠レジストリ（Hauler）からアーティファクトをプルする
+
+| TCP
+| 9345
+| RKE2 サーバーおよびエージェントノード（管理クラスタ）
+| ノード登録用の RKE2 スーパーバイザー API（すべての RKE2 サーバーノードでポートを開放）
+
+| TCP
+| 10250
+| 任意の管理クラスタのノード
+| `kubelet` メトリクス
+
+| TCP/UDP/SCTP
+| 30000-32767
+| `spec.type: NodePort` または `spec.type: LoadBalancer` https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types[Service API オブジェクト] を介してプライマリネットワーク上で公開されたサービスにアクセスする任意の（管理クラスタ外の）外部ソース
+| 利用可能な `NodePort` ポート範囲
+|===
+^(1)^ BMC:ベースボード管理コントローラー +
+^(2)^ IPA:Ironic Python Agent 
+
+=== ダウンストリーム ノード
+
+SUSE Telco Cloud では、任意の（ダウンストリーム）サーバーが実行中のダウンストリーム Kubernetes クラスタの一部になる（またはそれ自体がシングルノードのダウンストリーム Kubernetes クラスタを実行する）前に、 https://github.com/metal3-io/baremetal-operator/blob/main/docs/baremetalhost-states.md[BaremetalHost プロビジョニング状態] のいくつかを通過する必要があります。
+
+* 宣言されたばかりのダウンストリームサーバーのベースボード管理コントローラー（BMC）は、帯域外ネットワーク経由でアクセス可能である必要があります。BMC は（管理クラスタ上で実行されている ironic サービスから）実行すべき初期ステップについて指示を受けます：
+. BMC が提供する `virtual media` に、指定された IPA ラムディスクイメージをプルしてロードします。
+. サーバーの電源を入れます。
+
+BMCから公開されることが想定されるポートは以下の通りです（正確なハードウェアによって異なる場合があります）。
+
+.ベースボード管理コントローラーのインバウンドネットワークルール
+[#table-inbound-network-rules-for-baseboard-management-controllers]
+|===
+| プロトコル | ポート | ソース | 説明
+
+| TCP
+| 80
+| Ironicコンダクター（管理クラスタから）
+| Redfish APIアクセス（HTTP）
+
+| TCP
+| 443
+| Ironicコンダクター（管理クラスタから）
+| Redfish APIアクセス（HTTPS）
+|===
+
+* BMC `virtual media` に読み込まれた IPA RAMディスクイメージを使用してダウンストリームサーバーイメージを起動すると、ハードウェア検査フェーズが開始されます。次の表は、実行中の IPA RAMディスクイメージによって公開されるポートの一覧です。
+
+.ダウンストリームノードのインバウンドネットワークルール - `Metal^3^/Ironic` プロビジョニングフェーズ
+[#table-inbound-network-rules-for-downstream-nodes-provisioning-phase]
+|===
+| プロトコル | ポート | ソース | 説明
+
+| TCP
+| 22
+| IPA RAMディスクイメージへのSSHアクセスを必要とするすべてのソース
+| 検査中のダウンストリームクラスタのノードへのSSHアクセス
+
+| TCP
+| 9999
+| Ironicコンダクター（管理クラスタから）
+| 実行中のRAMディスクイメージに対するIronicコマンド
+|===
+
+* ベアメタルホストが適切にプロビジョニングされ、ダウンストリームのKubernetesクラスタに参加すると、以下のポートが公開されます。
+
+[NOTE]
+====
+CNIプラグイン関連のポートについては、<<cni-specific-port-requirements,CNI固有のポート要件>>を参照してください。
+====
+
+.ダウンストリームノードのインバウンドネットワークルール
+[#table-inbound-network-rules-for-downstream-nodes]
+|===
+| プロトコル | ポート | ソース | 説明
+
+| TCP
+| 22
+| SSHアクセスを必要とするすべてのソース
+| ダウンストリームクラスターノードへのSSHアクセス
+
+| TCP
+| 80
+| 外部TLS終端を行うロードバランサー/プロキシ
+| 外部TLS終端が使用されている場合のRancher UI/API
+
+| TCP
+| 443
+| Rancher UI/APIへのTLSアクセスを必要とするすべてのソース
+| Rancherエージェント、Rancher UI/API
+
+| TCP
+| 2379
+| RKE2（ダウンストリームクラスタ）サーバーノード
+| `etcd` クライアントポート
+
+| TCP
+| 2380
+| RKE2（ダウンストリームクラスタ）サーバーノード
+| `etcd` ピアポート
+
+| TCP
+| 6443
+| 任意のダウンストリームクラスターノード、任意の外部（ダウンストリームクラスタ外の）Kubernetesクライアント。
+| Kubernetes API
+
+| TCP
+| 9345
+| RKE2サーバーおよびエージェントノード（ダウンストリームクラスタ）
+| ノード登録用の RKE2 スーパーバイザー API（すべての RKE2 サーバーノードでポートを開放）
+
+| TCP
+| 10250
+| 任意のダウンストリームクラスターノード
+| `kubelet` メトリクス
+
+| TCP
+| 10255
+| 任意のダウンストリームクラスターノード
+| `kubelet` 読み込み専用アクセス
+
+| TCP/UDP/SCTP
+| 30000-32767
+| `spec.type: NodePort`または`spec.type: LoadBalancer` https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types[Service APIオブジェクト]を通じてプライマリネットワーク上で公開されているサービスにアクセスする（ダウンストリームクラスタ外の）外部ソース
+| 利用可能な `NodePort` ポート範囲
+|===
+
+[#cni-specific-port-requirements]
+=== CNI固有のポート要件
+
+サポートされている各CNIバリアントには、独自のポート要件セットがあります。詳細については、RKE2ドキュメントの https://docs.rke2.io/install/requirements#cni-specific-inbound-network-rules[CNI固有のインバウンドネットワークルール]を参照してください。
+
+`cilium`がデフォルト/プライマリCNIプラグインとして設定されている場合、`cilium-operator`ワークロードがデプロイ先のKubernetesクラスタ外にメトリクスを公開するように構成されていると、以下のTCPポートが追加で公開されます。これにより、そのKubernetesクラスタ外で実行されている外部`Prometheus`サーバインスタンスが、引き続きこれらのメトリクスを収集できるようになります。
+
+[NOTE]
+====
+これは、rke2-cilium Helmチャートを介して`cilium`をデプロイする場合のデフォルトオプションです。
+====
+
+.管理/ダウンストリームノードのインバウンドネットワークルール - `cilium-operator`が有効な場合の外部メトリクス公開
+[#table-inbound-network-rules-for-management-downstream-nodes-external-metrics-cilium-operator]
+|===
+| プロトコル | ポート | ソース | 説明
+
+| TCP
+| 9963
+| 外部（Kubernetesクラスタ外の）メトリクスコレクタ
+| cilium-operatorメトリクスの公開
+|===
+
+
+[#atip-services]
+== サービス（DHCP、DNSなど）
+
+デプロイ先の環境の種類によっては、`DHCP`、`DNS`などの外部サービスが必要になる場合があります。
+
+* **接続環境**:この場合、ノードは（L3ルーティングプロトコルを介して）インターネットに接続され、外部サービスはお客様によって提供されます。
+* **切断環境 / エアギャップ環境**:この場合、ノードはインターネットIP接続を持たず、ダイレクトネットワークプロビジョニングワークフローで必要とされるコンテンツをローカルにミラーリングするために追加のサービスが必要となります。
+* **ファイルサーバ**:ファイルサーバは、ダイレクトネットワークプロビジョニングワークフロー中にダウンストリームクラスターノードにプロビジョニングされるOSイメージを保存するために使用されます。`Metal^3^` HelmチャートはOSイメージを保存するためのメディアサーバをデプロイできます。次のxref:metal3-media-server[セクション]を確認してください。ただし、既存のローカルWebサーバを使用することも可能です。
+
+[#atip-systemd-services]
+== systemdサービスの無効化
+
+Telcoワークロードの場合、ノード上で実行されているワークロードのパフォーマンス（レイテンシ）への影響を回避するために、ノード上で実行されている一部のサービスを無効にするか、適切に設定することが重要です。
+
+* `rebootmgr`は、システムに保留中の更新がある場合に再起動の戦略を設定できるようにするサービスです。
+Telcoワークロードの場合、システムによってスケジュールされた更新によるノードの再起動を回避し、ノード上で実行されているサービスへの影響を避けるために、`rebootmgr`サービスを無効にするか、適切に設定することが非常に重要です。
+
+[NOTE]
+====
+`rebootmgr`の詳細については、 https://github.com/SUSE/rebootmgr[rebootmgr GitHubリポジトリ]を参照してください。
+====
+
+使用されている戦略を確認するには、次を実行します。
+
+[,shell]
+----
+cat /etc/rebootmgr.conf
+[rebootmgr]
+window-start=03:30
+window-duration=1h30m
+strategy=best-effort
+lock-group=default
+----
+
+また、次を実行して無効にすることもできます。
+
+[,shell]
+----
+sed -i 's/strategy=best-effort/strategy=off/g' /etc/rebootmgr.conf
+----
+
+または、`rebootmgrctl`コマンドを使用します。
+
+[,shell]
+----
+rebootmgrctl strategy off
+----
+
+[NOTE]
+====
+`rebootmgr`戦略を設定するためのこの構成は、ダイレクトネットワークプロビジョニングワークフローを使用して自動化できます。詳細については、<<atip-automated-provisioning,自動プロビジョニングのドキュメント>>を確認してください。
+====
+
+* `transactional-update`は、システムによって制御される自動更新を可能にするサービスです。Telcoワークロードの場合、ノード上で実行されているサービスへの影響を回避するために、自動更新を無効にすることが重要です。
+
+自動更新を無効にするには、次のコマンドを実行します。
+
+[,shell]
+----
+systemctl --now disable transactional-update.timer
+systemctl --now disable transactional-update-cleanup.timer
+----
+
+* `fstrim`は、毎週自動的にファイルシステムをトリムできるようにするサービスです。Telcoワークロードの場合、ノード上で実行されているサービスへの影響を回避するために、自動トリムを無効にすることが重要です。
+
+自動トリムを無効にするには、次のコマンドを実行します。
+
+[,shell]
+----
+systemctl --now disable fstrim.timer
+----

@@ -1,0 +1,220 @@
+[#{cluster-type}-day2-upgrade-controller]
+== Upgrade Controller
+:revdate: 2025-01-16
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+[IMPORTANT]
+====
+El `Upgrade Controller` actualmente solo admite operaciones `Day 2` para clústeres de gestión *sin entorno aislado*.
+====
+
+Esta sección cubre cómo realizar las diversas operaciones de `Day 2` relacionadas con la actualización de su clúster `management` de una versión de plataforma `{product}` a otra.
+
+Las operaciones de `Day 2` están automatizadas por el <<components-upgrade-controller, Upgrade Controller>> e incluyen:
+
+* Actualización del SO <<components-slmicro, SUSE Linux Micro>>
+ifeval::["{flavor}" == "edge"]
+* Actualización de Kubernetes <<components-rke2>> o <<components-k3s>>
+endif::[]
+ifeval::["{flavor}" == "telco"]
+* Actualización de Kubernetes <<components-rke2>>
+endif::[]
+* Actualización de componentes adicionales de SUSE (SUSE Rancher Prime, SUSE Security, etc.)
+
+=== Requisitos previos
+
+Antes de actualizar su clúster `management`, se deben cumplir los siguientes requisitos previos:
+
+. `SCC registered nodes` - asegúrese de que el SO de los nodos de su clúster esté registrado con una clave de suscripción que admita la versión del SO especificada en la `{product}` <<release-notes,release>> a la que pretende actualizar.
+
+. `Upgrade Controller` - asegúrese de que el `Upgrade Controller` se haya desplegado en su clúster `management`. Para conocer los pasos de instalación, consulte <<components-upgrade-controller-installation>>.
+
+=== Actualización
+
+. Determine la versión de `{product}` <<release-notes,release>> a la que desea actualizar su clúster `management`.
+
+. En el clúster `management`, despliegue un `UpgradePlan` que especifique la `release version` deseada. El `UpgradePlan` debe desplegarse en el espacio de nombres del `Upgrade Controller`.
++
+[,bash]
+----
+kubectl apply -n <upgrade_controller_namespace> -f - <<EOF
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
+metadata:
+  name: upgrade-plan-mgmt
+spec:
+  # Version retrieved from release notes
+  releaseVersion: 3.X.Y
+EOF
+----
++
+[NOTE]
+====
+Puede haber casos de uso en los que desee realizar configuraciones adicionales sobre el `UpgradePlan`. Para todas las configuraciones posibles, consulte <<components-upgrade-controller-extensions-upgrade-plan>>.
+====
+
+. El despliegue del `UpgradePlan` en el espacio de nombres `Upgrade Controller's` iniciará el `upgrade process`.
++
+[NOTE]
+====
+Para obtener más información sobre el `upgrade process` real, consulte <<components-upgrade-controller-how>>.
+
+Para obtener información sobre cómo realizar el seguimiento del `upgrade process`, consulte <<components-upgrade-controller-how-track>>.
+====
+
+=== Pasos posteriores a la actualización
+Las actualizaciones de `{product}` desde la última versión z-stream de `{previous-edge-version}` a `{static-edge-version}` pueden requerir algunos pasos manuales finales que deben realizarse después de que el `Upgrade Controller` haya completado el proceso de actualización. Estos están relacionados con la sustitución de Ingress-NGINX por Traefik como el único controlador de entrada admitido en `{product}` a partir de la versión `{version}`.
+
+[NOTE]
+====
+El proveedor de entrada `Traefik` integrado en RKE2/K3s es el único controlador de entrada admitido en la versión `{product} {version}`, siendo todavía posible ejecutar temporalmente `Ingress-NGINX` junto con `Traefik` para admitir escenarios complejos de migración de entrada, pero solo después de que los clústeres de gestión y/o sentido descendente `{product}` se hayan actualizado a la versión `{version}` y durante el tiempo necesario para realizar dicha migración.
+
+La guía de RKE2 https://docs.rke2.io/reference/ingress_migration[Migración de Ingress NGINX a Traefik] proporciona detalles sobre las rutas de migración de entrada disponibles una vez que el controlador de entrada `Traefik` sustituya al `Ingress-NGINX` discontinuado.
+====
+
+En caso de que el clúster de gestión recién actualizado no estuviera ejecutando el controlador de entrada `Traefik` (sino el predeterminado Ingress-NGINX) antes de iniciar la actualización, ahora es necesario desplegar manualmente `Traefik`.
+
+Primero vamos a asegurarnos de que la instancia de ingress-NGINX implementada esté configurada correctamente (por ejemplo, para evitar colisiones innecesarias de hostPort entre los pods de los dos controladores de entrada):
+
+[,shell]
+----
+kubectl apply -f - <<- EOF
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-ingress-nginx
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    controller:
+      hostPort:
+        enabled: false  # not needed when exposing through a type:LoadBalancer service
+      config:
+        use-forwarded-headers: "true"
+        enable-real-ip: "true"
+      publishService:
+        enabled: true
+      service:
+        enabled: true
+        type: LoadBalancer
+        externalTrafficPolicy: Local
+EOF
+----
+
+Ahora podemos proceder con el despliegue de `Traefik`, mediante la instalación de los gráficos de Helm `rke2-traefik-crd` y `rke2-traefik`.
+[NOTE]
+====
+Despliegue estos gráficos de Helm a través de manifiestos `HelmChart`, como se muestra a continuación, para asegurar que `Upgrade Controller` se encargue también de actualizar estos gráficos de Helm en futuras actualizaciones del clúster de gestión.
+====
+
+[,shell]
+----
+kubectl apply -f - <<- EOF
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: rke2-traefik-crd
+  namespace: kube-system
+spec:
+  chart: rke2-traefik-crd
+  version: {rke2-traefik-crd Helm chart version}
+  repo: https://rke2-charts.rancher.io
+  bootstrap: false
+  failurePolicy: reinstall
+  backOffLimit: 20
+  targetNamespace: kube-system
+  set:
+    global.cattle.systemDefaultRegistry: registry.rancher.com
+    global.rke2DataDir: /var/lib/rancher/rke2
+    global.systemDefaultRegistry: registry.rancher.com
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: rke2-traefik
+  namespace: kube-system
+spec:
+  chart: rke2-traefik
+  version: {rke2-traefik Helm chart version}
+  repo: https://rke2-charts.rancher.io
+  bootstrap: false
+  failurePolicy: reinstall
+  backOffLimit: 20
+  targetNamespace: kube-system
+  set:
+    global.cattle.systemDefaultRegistry: registry.rancher.com
+    global.rke2DataDir: /var/lib/rancher/rke2
+    global.systemDefaultRegistry: registry.rancher.com
+  valuesContent: |-
+    ingressClass:
+      isDefaultClass: false  # if traefik deployed alongside ingress-nginx
+    ports:
+      web:
+        hostPort: null    # disallow hostPort
+        exposedPort: 80
+      websecure:
+        hostPort: null    # disallow hostPort
+        exposedPort: 443
+    service:
+      enabled: true
+      type: LoadBalancer
+      spec:
+        externalTrafficPolicy: Local
+        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+    providers:
+      kubernetesIngressNginx:  # this provider allows traefik to "understand" most of the ingress-nginx annotations
+        enabled: true
+        ingressClass: "rke2-ingress-nginx-migration"
+        controllerClass: "rke2.​cattle.​io/ingress-nginx-migration"
+EOF
+----
+
+El `{rke2-traefik-crd Helm chart version}` y el `{rke2-traefik-crd Helm chart version}` son los dictados por la versión de RKE2/k3s a la que hemos actualizado.
+
+En el último paso, creamos finalmente los objetos necesarios de MetalLB para exponer el servicio `Traefik` a través de un servicio de tipo LoadBalancer:
+
+[,shell]
+----
+kubectl apply -f - <<- EOF
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: ingress-ippool-traefik
+  namespace: metallb-system
+spec:
+  addresses:
+  - {EXTERNAL_IP_FOR_TRAEFIK_SERVICE}/32
+  serviceAllocation:
+    priority: 100
+    serviceSelectors:
+    - matchExpressions:
+      - {key: app.kubernetes.io/name, operator: In, values: [rke2-traefik]}
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: ingress-l2-adv-traefik
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - ingress-ippool-traefik
+EOF
+----
+
+Ahora tanto `Traefik` como `Ingress-NGINX` se ejecutan simultáneamente, lo que le permite realizar de forma segura la migración necesaria de sus ingresses de uno a otro.
+
+[IMPORTANT]
+====
+Una vez que todos los ingresses se hayan migrado y ya no necesite `Ingress-NGINX`, asegúrese de desinstalarlo y limpiar todos los recursos relacionados para evitar cualquier consumo innecesario de recursos en su clúster.
+====

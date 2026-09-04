@@ -1,0 +1,1018 @@
+[#components-nmc]
+= エッジネットワーキング
+:revdate: 2025-03-26
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+このセクションでは、{product}ソリューションにおけるネットワーク設定へのアプローチについて説明します。
+SUSE Linux MicroでNetworkManagerを宣言的な方法で設定する方法と、関連ツールがどのように統合されているかを説明します。
+
+== NetworkManagerの概要
+
+NetworkManagerは、プライマリネットワーク接続とその他の接続インタフェースを管理するツールです。
+
+NetworkManagerは、ネットワーク設定を目的の状態を含む接続ファイルとして保存します。
+これらの接続は、`/etc/NetworkManager/system-connections/`ディレクトリにファイルとして保存されます。
+
+NetworkManagerの詳細については、{link-micro-networkmanager}[SUSE Linux Microドキュメント]を参照してください。
+
+== nmstateの概要
+
+nmstateは、事前定義されたスキーマを介してネットワーク設定用の宣言型APIを提供する、広く採用されているライブラリ（および付属のCLIツール）です。
+
+nmstateの詳細については、 https://nmstate.io/[アップストリームドキュメント]を参照してください。
+
+== 次のように入力します。NetworkManager Configurator (nmc)
+
+{product}で利用可能なネットワークカスタマイズオプションは、NetworkManager Configurator、略して_nmc_と呼ばれるCLIツールを介して実現されます。
+これはnmstateライブラリによって提供される機能を活用しており、そのため、静的IPアドレス、DNSサーバー、VLAN、ボンディング、ブリッジなどの設定を完全に行うことができます。
+このツールを使用すると、事前定義された目的の状態からネットワーク設定を生成し、それらを多くの異なるノードに自動化された方法で適用できます。
+
+NetworkManager Configurator (nmc)の詳細については、 https://github.com/suse-edge/nm-configurator[アップストリームリポジトリ]を参照してください。
+
+== {product}はどのようにNetworkManager Configuratorを使用しますか？
+
+{product}は、さまざまなプロビジョニングモデルにおけるネットワークのカスタマイズに_nmc_を利用します。
+ifeval::["{flavor}" == "telco"]
+* ダイレクトネットワークプロビジョニングシナリオにおけるカスタムネットワーク設定 (<<quickstart-metal3>>)
+endif::[]
+* イメージベースのプロビジョニングシナリオにおける宣言型静的設定 (<<quickstart-eib>>)
+
+== Edge Image Builderによる設定
+
+Edge Image Builder (EIB) は、単一のOSイメージで複数のホストを構成できるようにするツールです。
+このセクションでは、宣言型アプローチを使用して目的のネットワーク状態を記述する方法、それらがどのように対応するNetworkManager接続に変換されるか、そしてプロビジョニングプロセス中にどのように適用されるかを示します。
+
+=== 前提条件
+
+このガイドに従う場合は、以下のものがすでに用意されていることを前提としています。
+
+* SLES 15 SP6またはopenSUSE Leap 15.6を実行している{x86-64}物理ホスト（または仮想マシン）
+* 利用可能なコンテナランタイム（例：Podman）
+* https://www.suse.com/download/sle-micro/[こちら]にあるSUSE Linux Micro {version-operatingsystem} RAWイメージのコピー
+
+=== Edge Image Builderコンテナイメージの取得
+
+EIBコンテナイメージは公開されており、以下のコマンドを実行することで{product}レジストリからダウンロードできます。
+
+[,shell,subs="attributes"]
+----
+podman pull registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib}
+----
+
+=== イメージ構成ディレクトリ[[image-config-dir-creation]]の作成
+
+設定ディレクトリの作成から始めましょう。
+
+[,shell]
+----
+export CONFIG_DIR=$HOME/eib
+mkdir -p $CONFIG_DIR/base-images
+----
+
+次に、ダウンロードしたベースイメージのコピーを設定ディレクトリに確実に移動します。
+
+[,shell,subs="attributes"]
+----
+mv /path/to/downloads/{micro-base-image-raw} $CONFIG_DIR/base-images/
+----
+
+> NOTE: EIBがベースイメージの入力を変更することはありません。変更を加えた新しいイメージが作成されます。
+
+この時点での設定ディレクトリは、以下のようになっているはずです。
+
+[,console,subs="attributes"]
+----
+└── base-images/
+    └── {micro-base-image-raw}
+----
+
+=== イメージ定義ファイルの作成
+
+定義ファイルには、Edge Image Builderがサポートする構成可能なオプションの大部分が記述されています。
+
+OSイメージの非常に基本的な定義ファイルから始めましょう。
+
+[,shell,subs="attributes,specialchars"]
+----
+cat << EOF > $CONFIG_DIR/definition.yaml
+apiVersion: {version-eib-api-latest}
+image:
+  arch: x86_64
+  imageType: raw
+  baseImage: {micro-base-image-raw}
+  outputImageName: modified-image.raw
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$jHugJNNd3HElGsUZ$eodjVe4te5ps44SVcWshdfWizrP.xAyd71CVEXazBJ/.v799/WRCBXxfYmunlBO2yp1hm/zb4r8EmnrrNCF.P/
+EOF
+----
+
+`image`セクションは必須であり、入力イメージ、そのアーキテクチャとタイプ、および出力イメージの名前を指定します。
+`operatingSystem`セクションはオプションであり、`root/eib`ユーザー名/パスワードを使用してプロビジョニングされたシステムへのログインを有効にするための構成が含まれています。
+
+> NOTE: `openssl passwd -6 <password>`を実行して、独自の暗号化されたパスワードを自由に使用してください。
+
+この時点での設定ディレクトリは、以下のようになっているはずです。
+
+[,console,subs="attributes"]
+----
+├── definition.yaml
+└── base-images/
+    └── {micro-base-image-raw}
+----
+
+=== ネットワーク構成の定義 [[default-network-definition]]
+
+目的のネットワーク構成は、作成したばかりのイメージ定義ファイルの一部ではありません。
+これらを特別な`network/`ディレクトリの下に配置します。作成しましょう。
+
+[,shell]
+----
+mkdir -p $CONFIG_DIR/network
+----
+
+前述のように、NetworkManager Configurator（_nmc_）ツールは、定義済みのスキーマ形式の入力を想定しています。
+さまざまなネットワークオプションの設定方法については、 https://nmstate.io/examples.html[アップストリームのNMStateの例のドキュメント]で確認できます。
+
+このガイドでは、3つの異なるノードでネットワークを設定する方法を説明します。
+
+* 2つのイーサネットインターフェイスを使用するノード
+* ネットワークボンディングを使用するノード
+* ネットワークブリッジを使用するノード
+
+[WARNING]
+====
+本番環境のビルド、特にKubernetesクラスターを構成する場合は、完全に異なるネットワーク設定を使用することは推奨されません。
+ネットワーク構成は、一般的にノード間、あるいは少なくとも特定のクラスター内の役割間で均一である必要があります。
+このガイドには、参考例としてさまざまなオプションが含まれています。
+====
+
+> NOTE: 以下では、IPアドレス範囲`192.168.122.1/24`を持つデフォルトの`libvirt`ネットワークを想定しています。
+環境が異なる場合は、それに応じて調整してください。
+
+`node1.suse.com`と呼ぶ最初のノードの目的の状態を作成しましょう。
+
+[,shell]
+----
+cat << EOF > $CONFIG_DIR/network/node1.suse.com.yaml
+routes:
+  config:
+    - destination: 0.0.0.0/0
+      metric: 100
+      next-hop-address: 192.168.122.1
+      next-hop-interface: eth0
+      table-id: 254
+    - destination: 192.168.122.0/24
+      metric: 100
+      next-hop-address: 192.168.122.1
+      next-hop-interface: eth0
+      table-id: 254
+dns-resolver:
+  config:
+    server:
+      - 192.168.122.1
+      - 8.8.8.8
+interfaces:
+  - name: eth0
+    type: ethernet
+    state: up
+    mac-address: 34:8A:B1:4B:16:E1
+    ipv4:
+      address:
+        - ip: 192.168.122.50
+          prefix-length: 24
+      dhcp: false
+      enabled: true
+    ipv6:
+      enabled: false
+  - name: eth3
+    type: ethernet
+    state: down
+    mac-address: 34:8A:B1:4B:16:E2
+    ipv4:
+      address:
+        - ip: 192.168.122.55
+          prefix-length: 24
+      dhcp: false
+      enabled: true
+    ipv6:
+      enabled: false
+EOF
+----
+
+この例では、2つのイーサネットインターフェイス（eth0およびeth3）の目的の状態、要求されたIPアドレス、ルーティング、およびDNS解決を定義します。
+
+[WARNING]
+====
+すべてのイーサネットインターフェイスのMACアドレスがリストされていることを確認する必要があります。
+これらは、プロビジョニングプロセス中にノードの識別子として使用され、どの構成を適用すべきかを決定するために役立ちます。
+このようにして、単一のISOまたはRAWイメージを使用して複数のノードを構成できます。
+====
+
+次は、`node2.suse.com`と呼ぶ2番目のノードで、ネットワークボンディングを使用します。
+
+[,shell]
+----
+cat << EOF > $CONFIG_DIR/network/node2.suse.com.yaml
+routes:
+  config:
+    - destination: 0.0.0.0/0
+      metric: 100
+      next-hop-address: 192.168.122.1
+      next-hop-interface: bond99
+      table-id: 254
+    - destination: 192.168.122.0/24
+      metric: 100
+      next-hop-address: 192.168.122.1
+      next-hop-interface: bond99
+      table-id: 254
+dns-resolver:
+  config:
+    server:
+      - 192.168.122.1
+      - 8.8.8.8
+interfaces:
+  - name: bond99
+    type: bond
+    state: up
+    ipv4:
+      address:
+        - ip: 192.168.122.60
+          prefix-length: 24
+      enabled: true
+    link-aggregation:
+      mode: balance-rr
+      options:
+        miimon: '140'
+      port:
+        - eth0
+        - eth1
+  - name: eth0
+    type: ethernet
+    state: up
+    mac-address: 34:8A:B1:4B:16:E3
+    ipv4:
+      enabled: false
+    ipv6:
+      enabled: false
+  - name: eth1
+    type: ethernet
+    state: up
+    mac-address: 34:8A:B1:4B:16:E4
+    ipv4:
+      enabled: false
+    ipv6:
+      enabled: false
+EOF
+----
+
+この例では、IPアドレッシングを有効にしない2つのイーサネットインターフェイス（eth0およびeth1）の目的の状態と、ラウンドロビンポリシーを持つボンド、およびネットワークトラフィックの転送に使用されるそれぞれの宛先アドレスを定義します。
+
+最後に、ネットワークブリッジを利用する3番目で最後の目的の状態ファイルを作成します。これを`node3.suse.com`と呼びます。
+
+[,shell]
+----
+cat << EOF > $CONFIG_DIR/network/node3.suse.com.yaml
+routes:
+  config:
+    - destination: 0.0.0.0/0
+      metric: 100
+      next-hop-address: 192.168.122.1
+      next-hop-interface: linux-br0
+      table-id: 254
+    - destination: 192.168.122.0/24
+      metric: 100
+      next-hop-address: 192.168.122.1
+      next-hop-interface: linux-br0
+      table-id: 254
+dns-resolver:
+  config:
+    server:
+      - 192.168.122.1
+      - 8.8.8.8
+interfaces:
+  - name: eth0
+    type: ethernet
+    state: up
+    mac-address: 34:8A:B1:4B:16:E5
+    ipv4:
+      enabled: false
+    ipv6:
+      enabled: false
+  - name: linux-br0
+    type: linux-bridge
+    state: up
+    ipv4:
+      address:
+        - ip: 192.168.122.70
+          prefix-length: 24
+      dhcp: false
+      enabled: true
+    bridge:
+      options:
+        group-forward-mask: 0
+        mac-ageing-time: 300
+        multicast-snooping: true
+        stp:
+          enabled: true
+          forward-delay: 15
+          hello-time: 2
+          max-age: 20
+          priority: 32768
+      port:
+        - name: eth0
+          stp-hairpin-mode: false
+          stp-path-cost: 100
+          stp-priority: 32
+EOF
+----
+
+この時点での設定ディレクトリは、以下のようになっているはずです。
+
+[,console,subs="attributes"]
+----
+├── definition.yaml
+├── network/
+│   │── node1.suse.com.yaml
+│   │── node2.suse.com.yaml
+│   └── node3.suse.com.yaml
+└── base-images/
+    └── {micro-base-image-raw}
+----
+
+> NOTE: `network/`ディレクトリ内のファイル名は意図的なものです。
+これらは、プロビジョニングプロセス中に設定されるホスト名に対応しています。
+
+=== OSイメージのビルド
+
+必要な構成がすべて整いましたので、単に以下を実行してイメージをビルドできます。
+
+[,shell,subs="attributes"]
+----
+podman run --rm -it -v $CONFIG_DIR:/eib registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} build --definition-file definition.yaml
+----
+
+出力は以下のような内容である必要があります。
+
+[,shell]
+----
+Generating image customization components...
+Identifier ................... [SUCCESS]
+Custom Files ................. [SKIPPED]
+Time ......................... [SKIPPED]
+Network ...................... [SUCCESS]
+Groups ....................... [SKIPPED]
+Users ........................ [SUCCESS]
+Proxy ........................ [SKIPPED]
+Rpm .......................... [SKIPPED]
+Systemd ...................... [SKIPPED]
+Elemental .................... [SKIPPED]
+Suma ......................... [SKIPPED]
+Embedded Artifact Registry ... [SKIPPED]
+Keymap ....................... [SUCCESS]
+Kubernetes ................... [SKIPPED]
+Certificates ................. [SKIPPED]
+Building RAW image...
+Kernel Params ................ [SKIPPED]
+Image build complete!
+----
+
+上記のコードスニペットは、`Network`コンポーネントが正常に構成されたことを示しており、エッジノードのプロビジョニングに進むことができます。
+
+> NOTE: ログファイル（`network-config.log`）および対応するNetworkManager接続ファイルは、イメージ実行のタイムスタンプ付きディレクトリの下にある、結果の`_build`ディレクトリで確認できます。
+
+=== エッジノードのプロビジョニング
+
+作成されたRAWイメージをコピーしましょう。
+
+[,shell]
+----
+mkdir edge-nodes && cd edge-nodes
+for i in {1..4}; do cp $CONFIG_DIR/modified-image.raw node$i.raw; done
+----
+
+ビルドされたイメージを4回コピーしましたが、3つのノードのネットワーク構成しか指定していないことに気づくでしょう。
+これは、どの目的の構成にも一致しないノードをプロビジョニングした場合に何が起こるかを紹介するためでもあります。
+
+> NOTE: このガイドでは、ノードプロビジョニングの例として仮想化を使用します。BIOSで必要な拡張機能が有効になっていることを確認してください（詳細は https://documentation.suse.com/sles/15-SP6/html/SLES-all/cha-virt-support.html#sec-kvm-requires-hardware[こちら]を参照してください）。
+
+コピーされたrawディスクを使用して仮想マシンを作成するために、`virt-install`を使用します。
+各仮想マシンは、10 GBのRAMと6つのvCPUを使用します。
+
+==== 最初のノードのプロビジョニング
+
+仮想マシンを作成しましょう。
+
+[,shell]
+----
+virt-install --name node1 --ram 10000 --vcpus 6 --disk path=node1.raw,format=raw --osinfo detect=on,name=sle-unknown --graphics none --console pty,target_type=serial --network default,mac=34:8A:B1:4B:16:E1 --network default,mac=34:8A:B1:4B:16:E2 --virt-type kvm --import
+----
+
+> NOTE: 上記で説明した目的の状態にあるものと同じMACアドレスでネットワークインタフェースを作成することが重要です。
+
+操作が完了すると、次のようなものが表示されます。
+
+[,console]
+----
+Starting install...
+Creating domain...
+
+Running text console command: virsh --connect qemu:///system console node1
+Connected to domain 'node1'
+Escape character is ^] (Ctrl + ])
+
+
+Welcome to SUSE Linux Micro 6.0 (x86_64) - Kernel 6.4.0-18-default (tty1).
+
+SSH host key: SHA256:XN/R5Tw43reG+QsOw480LxCnhkc/1uqMdwlI6KUBY70 (RSA)
+SSH host key: SHA256:/96yGrPGKlhn04f1rb9cXv/2WJt4TtrIN5yEcN66r3s (DSA)
+SSH host key: SHA256:Dy/YjBQ7LwjZGaaVcMhTWZNSOstxXBsPsvgJTJq5t00 (ECDSA)
+SSH host key: SHA256:TNGqY1LRddpxD/jn/8dkT/9YmVl9hiwulqmayP+wOWQ (ED25519)
+eth0: 192.168.122.50
+eth1:
+
+
+Configured with the Edge Image Builder
+Activate the web console with: systemctl enable --now cockpit.socket
+
+node1 login:
+----
+
+これで、`root:eib`の資格情報のペアを使用してログインできるようになりました。
+ここで提示された`virsh console`よりも好む場合は、ホストにSSHで接続することもできます。
+
+ログインしたら、すべての設定が適切に行われていることを確認しましょう。
+
+ホスト名が正しく設定されていることを確認します。
+
+[,shell]
+----
+node1:~ # hostnamectl
+ Static hostname: node1.suse.com
+ ...
+----
+
+ルーティングが正しく構成されていることを確認します。
+
+[,shell]
+----
+node1:~ # ip r
+default via 192.168.122.1 dev eth0 proto static metric 100
+192.168.122.0/24 dev eth0 proto static scope link metric 100
+192.168.122.0/24 dev eth0 proto kernel scope link src 192.168.122.50 metric 100
+----
+
+インターネット接続が利用可能であることを確認します。
+
+[,shell]
+----
+node1:~ # ping google.com
+PING google.com (142.250.72.78) 56(84) bytes of data.
+64 bytes from den16s09-in-f14.1e100.net (142.250.72.78): icmp_seq=1 ttl=56 time=13.2 ms
+64 bytes from den16s09-in-f14.1e100.net (142.250.72.78): icmp_seq=2 ttl=56 time=13.4 ms
+^C
+--- google.com ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1002ms
+rtt min/avg/max/mdev = 13.248/13.304/13.361/0.056 ms
+----
+
+イーサネットインターフェイスが正確に2つ構成されており、そのうちの1つだけがアクティブであることを確認します。
+
+[,shell]
+----
+node1:~ # ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 34:8a:b1:4b:16:e1 brd ff:ff:ff:ff:ff:ff
+    altname enp0s2
+    altname ens2
+    inet 192.168.122.50/24 brd 192.168.122.255 scope global noprefixroute eth0
+       valid_lft forever preferred_lft forever
+3: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 34:8a:b1:4b:16:e2 brd ff:ff:ff:ff:ff:ff
+    altname enp0s3
+    altname ens3
+
+node1:~ # nmcli -f NAME,UUID,TYPE,DEVICE,FILENAME con show
+NAME  UUID                                  TYPE      DEVICE  FILENAME
+eth0  dfd202f5-562f-5f07-8f2a-a7717756fb70  ethernet  eth0    /etc/NetworkManager/system-connections/eth0.nmconnection
+eth1  7e211aea-3d14-59cf-a4fa-be91dac5dbba  ethernet  --      /etc/NetworkManager/system-connections/eth1.nmconnection
+----
+
+2番目のインターフェイスが、目的のネットワーク状態で事前定義された`eth3`ではなく、`eth1`になっていることに気づくでしょう。
+これは、NetworkManager Configurator（_nmc_）が、OSがMACアドレス`34:8a:b1:4b:16:e2`を持つNICに異なる名前を割り当てたことを検出し、それに応じて設定を調整できるためです。
+
+プロビジョニングのCombustionフェーズを検査して、これが実際に発生したことを確認します。
+
+[,shell]
+----
+node1:~ # journalctl -u combustion | grep nmc
+Apr 23 09:20:19 localhost.localdomain combustion[1360]: [2024-04-23T09:20:19Z INFO  nmc::apply_conf] Identified host: node1.suse.com
+Apr 23 09:20:19 localhost.localdomain combustion[1360]: [2024-04-23T09:20:19Z INFO  nmc::apply_conf] Set hostname: node1.suse.com
+Apr 23 09:20:19 localhost.localdomain combustion[1360]: [2024-04-23T09:20:19Z INFO  nmc::apply_conf] Processing interface 'eth0'...
+Apr 23 09:20:19 localhost.localdomain combustion[1360]: [2024-04-23T09:20:19Z INFO  nmc::apply_conf] Processing interface 'eth3'...
+Apr 23 09:20:19 localhost.localdomain combustion[1360]: [2024-04-23T09:20:19Z INFO  nmc::apply_conf] Using interface name 'eth1' instead of the preconfigured 'eth3'
+Apr 23 09:20:19 localhost.localdomain combustion[1360]: [2024-04-23T09:20:19Z INFO  nmc] Successfully applied config
+----
+
+残りのノードをプロビジョニングしますが、最終的な構成の相違点のみを示します。
+プロビジョニングしようとしているすべてのノードに対して、上記のチェックの一部またはすべてを自由に行ってください。
+
+==== 2番目のノードのプロビジョニング
+
+仮想マシンを作成しましょう。
+
+[,shell]
+----
+virt-install --name node2 --ram 10000 --vcpus 6 --disk path=node2.raw,format=raw --osinfo detect=on,name=sle-unknown --graphics none --console pty,target_type=serial --network default,mac=34:8A:B1:4B:16:E3 --network default,mac=34:8A:B1:4B:16:E4 --virt-type kvm --import
+----
+
+仮想マシンが起動して実行されたら、このノードがボンドインタフェースを使用していることを確認できます。
+
+[,shell]
+----
+node2:~ # ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,SLAVE,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast master bond99 state UP group default qlen 1000
+    link/ether 34:8a:b1:4b:16:e3 brd ff:ff:ff:ff:ff:ff
+    altname enp0s2
+    altname ens2
+3: eth1: <BROADCAST,MULTICAST,SLAVE,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast master bond99 state UP group default qlen 1000
+    link/ether 34:8a:b1:4b:16:e3 brd ff:ff:ff:ff:ff:ff permaddr 34:8a:b1:4b:16:e4
+    altname enp0s3
+    altname ens3
+4: bond99: <BROADCAST,MULTICAST,MASTER,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default qlen 1000
+    link/ether 34:8a:b1:4b:16:e3 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.122.60/24 brd 192.168.122.255 scope global noprefixroute bond99
+       valid_lft forever preferred_lft forever
+----
+
+ルーティングがボンドを使用していることを確認します。
+
+[,shell]
+----
+node2:~ # ip r
+default via 192.168.122.1 dev bond99 proto static metric 100
+192.168.122.0/24 dev bond99 proto static scope link metric 100
+192.168.122.0/24 dev bond99 proto kernel scope link src 192.168.122.60 metric 300
+----
+
+静的接続ファイルが適切に使用されていることを確認します。
+
+[,shell]
+----
+node2:~ # nmcli -f NAME,UUID,TYPE,DEVICE,FILENAME con show
+NAME    UUID                                  TYPE      DEVICE  FILENAME
+bond99  4a920503-4862-5505-80fd-4738d07f44c6  bond      bond99  /etc/NetworkManager/system-connections/bond99.nmconnection
+eth0    dfd202f5-562f-5f07-8f2a-a7717756fb70  ethernet  eth0    /etc/NetworkManager/system-connections/eth0.nmconnection
+eth1    0523c0a1-5f5e-5603-bcf2-68155d5d322e  ethernet  eth1    /etc/NetworkManager/system-connections/eth1.nmconnection
+----
+
+==== 3番目のノードのプロビジョニング
+
+仮想マシンを作成しましょう。
+
+[,shell]
+----
+virt-install --name node3 --ram 10000 --vcpus 6 --disk path=node3.raw,format=raw --osinfo detect=on,name=sle-unknown --graphics none --console pty,target_type=serial --network default,mac=34:8A:B1:4B:16:E5 --virt-type kvm --import
+----
+
+仮想マシンが起動して実行されたら、このノードがネットワークブリッジを使用していることを確認できます。
+
+[,shell]
+----
+node3:~ # ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast master linux-br0 state UP group default qlen 1000
+    link/ether 34:8a:b1:4b:16:e5 brd ff:ff:ff:ff:ff:ff
+    altname enp0s2
+    altname ens2
+3: linux-br0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP group default qlen 1000
+    link/ether 34:8a:b1:4b:16:e5 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.122.70/24 brd 192.168.122.255 scope global noprefixroute linux-br0
+       valid_lft forever preferred_lft forever
+----
+
+ルーティングがブリッジを使用していることを確認します。
+
+[,shell]
+----
+node3:~ # ip r
+default via 192.168.122.1 dev linux-br0 proto static metric 100
+192.168.122.0/24 dev linux-br0 proto static scope link metric 100
+192.168.122.0/24 dev linux-br0 proto kernel scope link src 192.168.122.70 metric 425
+----
+
+静的接続ファイルが適切に使用されていることを確認します。
+
+[,shell]
+----
+node3:~ # nmcli -f NAME,UUID,TYPE,DEVICE,FILENAME con show
+NAME       UUID                                  TYPE      DEVICE     FILENAME
+linux-br0  1f8f1469-ed20-5f2c-bacb-a6767bee9bc0  bridge    linux-br0  /etc/NetworkManager/system-connections/linux-br0.nmconnection
+eth0       dfd202f5-562f-5f07-8f2a-a7717756fb70  ethernet  eth0       /etc/NetworkManager/system-connections/eth0.nmconnection
+----
+
+==== 4番目のノードのプロビジョニング
+
+最後に、MACアドレスによる事前定義された構成のいずれにも一致しないノードをプロビジョニングします。
+このような場合、デフォルトでDHCPを使用してネットワークインタフェースを構成します。
+
+仮想マシンを作成しましょう。
+
+[,shell]
+----
+virt-install --name node4 --ram 10000 --vcpus 6 --disk path=node4.raw,format=raw --osinfo detect=on,name=sle-unknown --graphics none --console pty,target_type=serial --network default --virt-type kvm --import
+----
+
+仮想マシンが起動して実行されたら、このノードがネットワークインタフェースにランダムなIPアドレスを使用していることを確認できます。
+
+[,shell]
+----
+localhost:~ # ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 52:54:00:56:63:71 brd ff:ff:ff:ff:ff:ff
+    altname enp0s2
+    altname ens2
+    inet 192.168.122.86/24 brd 192.168.122.255 scope global dynamic noprefixroute eth0
+       valid_lft 3542sec preferred_lft 3542sec
+    inet6 fe80::5054:ff:fe56:6371/64 scope link noprefixroute
+       valid_lft forever preferred_lft forever
+----
+
+nmcがこのノードに対して静的設定の適用に失敗したことを確認します。
+
+[,shell]
+----
+localhost:~ # journalctl -u combustion | grep nmc
+Apr 23 12:15:45 localhost.localdomain combustion[1357]: [2024-04-23T12:15:45Z ERROR nmc] Applying config failed: None of the preconfigured hosts match local NICs
+----
+
+イーサネットインタフェースがDHCP経由で設定されたことを確認します。
+
+[,shell]
+----
+localhost:~ # journalctl | grep eth0
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7801] manager: (eth0): new Ethernet device (/org/freedesktop/NetworkManager/Devices/2)
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7802] device (eth0): state change: unmanaged -> unavailable (reason 'managed', sys-iface-state: 'external')
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7929] device (eth0): carrier: link connected
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7931] device (eth0): state change: unavailable -> disconnected (reason 'carrier-changed', sys-iface-state: 'managed')
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7944] device (eth0): Activation: starting connection 'Wired Connection' (300ed658-08d4-4281-9f8c-d1b8882d29b9)
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7945] device (eth0): state change: disconnected -> prepare (reason 'none', sys-iface-state: 'managed')
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7947] device (eth0): state change: prepare -> config (reason 'none', sys-iface-state: 'managed')
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7953] device (eth0): state change: config -> ip-config (reason 'none', sys-iface-state: 'managed')
+Apr 23 12:15:29 localhost.localdomain NetworkManager[704]: <info>  [1713874529.7964] dhcp4 (eth0): activation: beginning transaction (timeout in 90 seconds)
+Apr 23 12:15:33 localhost.localdomain NetworkManager[704]: <info>  [1713874533.1272] dhcp4 (eth0): state changed new lease, address=192.168.122.86
+
+localhost:~ # nmcli -f NAME,UUID,TYPE,DEVICE,FILENAME con show
+NAME              UUID                                  TYPE      DEVICE  FILENAME
+Wired Connection  300ed658-08d4-4281-9f8c-d1b8882d29b9  ethernet  eth0    /var/run/NetworkManager/system-connections/default_connection.nmconnection
+----
+
+[#networking-unified]
+=== 統合ノード設定
+
+既知のMACアドレスに依存することが選択肢とならない場合があります。このような場合、_統合設定_を選択できます。これにより、`_all.yaml`ファイルで設定を指定し、プロビジョニングされたすべてのノードに適用できるようになります。
+
+異なる設定構造を使用してエッジノードを構築およびプロビジョニングします。<<image-config-dir-creation>>から<<default-network-definition>>までのすべての手順に従ってください。
+
+この例では、2つのイーサネットインターフェイス（eth0およびeth1）の目的の状態を定義します。1つはDHCPを使用し、もう1つは静的IPアドレスを割り当てます。
+
+[,shell]
+----
+mkdir -p $CONFIG_DIR/network
+
+cat <<- EOF > $CONFIG_DIR/network/_all.yaml
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  ipv4:
+    dhcp: true
+    enabled: true
+  ipv6:
+    enabled: false
+- name: eth1
+  type: ethernet
+  state: up
+  ipv4:
+    address:
+    - ip: 10.0.0.1
+      prefix-length: 24
+    enabled: true
+    dhcp: false
+  ipv6:
+    enabled: false
+EOF
+----
+
+イメージをビルドしましょう。
+
+[,shell,subs="attributes"]
+----
+podman run --rm -it -v $CONFIG_DIR:/eib registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} build --definition-file definition.yaml
+----
+
+イメージが正常にビルドされたら、それを使用して仮想マシンを作成しましょう。
+
+[,shell]
+----
+virt-install --name node1 --ram 10000 --vcpus 6 --disk path=$CONFIG_DIR/modified-image.raw,format=raw --osinfo detect=on,name=sle-unknown --graphics none --console pty,target_type=serial --network default --network default --virt-type kvm --import
+----
+
+プロビジョニング処理には数分かかる場合があります。完了したら、提供された資格情報を使用してシステムにログインしてください。
+
+ルーティングが正しく設定されていることを確認します。
+
+[,shell]
+----
+localhost:~ # ip r
+default via 192.168.122.1 dev eth0 proto dhcp src 192.168.122.100 metric 100
+10.0.0.0/24 dev eth1 proto kernel scope link src 10.0.0.1 metric 101
+192.168.122.0/24 dev eth0 proto kernel scope link src 192.168.122.100 metric 100
+----
+
+インターネット接続が利用可能であることを確認します。
+
+[,shell]
+----
+localhost:~ # ping google.com
+PING google.com (142.250.72.46) 56(84) bytes of data.
+64 bytes from den16s08-in-f14.1e100.net (142.250.72.46): icmp_seq=1 ttl=56 time=14.3 ms
+64 bytes from den16s08-in-f14.1e100.net (142.250.72.46): icmp_seq=2 ttl=56 time=14.2 ms
+^C
+--- google.com ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1001ms
+rtt min/avg/max/mdev = 14.196/14.260/14.324/0.064 ms
+----
+
+イーサネットインタフェースが設定され、アクティブになっていることを確認してください。
+
+[,shell]
+----
+localhost:~ # ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 52:54:00:26:44:7a brd ff:ff:ff:ff:ff:ff
+    altname enp1s0
+    inet 192.168.122.100/24 brd 192.168.122.255 scope global dynamic noprefixroute eth0
+       valid_lft 3505sec preferred_lft 3505sec
+3: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 52:54:00:ec:57:9e brd ff:ff:ff:ff:ff:ff
+    altname enp7s0
+    inet 10.0.0.1/24 brd 10.0.0.255 scope global noprefixroute eth1
+       valid_lft forever preferred_lft forever
+
+localhost:~ # nmcli -f NAME,UUID,TYPE,DEVICE,FILENAME con show
+NAME  UUID                                  TYPE      DEVICE  FILENAME
+eth0  dfd202f5-562f-5f07-8f2a-a7717756fb70  ethernet  eth0    /etc/NetworkManager/system-connections/eth0.nmconnection
+eth1  0523c0a1-5f5e-5603-bcf2-68155d5d322e  ethernet  eth1    /etc/NetworkManager/system-connections/eth1.nmconnection
+
+localhost:~ # cat /etc/NetworkManager/system-connections/eth0.nmconnection
+[connection]
+autoconnect=true
+autoconnect-slaves=-1
+id=eth0
+interface-name=eth0
+type=802-3-ethernet
+uuid=dfd202f5-562f-5f07-8f2a-a7717756fb70
+
+[ipv4]
+dhcp-client-id=mac
+dhcp-send-hostname=true
+dhcp-timeout=2147483647
+ignore-auto-dns=false
+ignore-auto-routes=false
+method=auto
+never-default=false
+
+[ipv6]
+addr-gen-mode=0
+dhcp-timeout=2147483647
+method=disabled
+
+localhost:~ # cat /etc/NetworkManager/system-connections/eth1.nmconnection
+[connection]
+autoconnect=true
+autoconnect-slaves=-1
+id=eth1
+interface-name=eth1
+type=802-3-ethernet
+uuid=0523c0a1-5f5e-5603-bcf2-68155d5d322e
+
+[ipv4]
+address0=10.0.0.1/24
+dhcp-timeout=2147483647
+method=manual
+
+[ipv6]
+addr-gen-mode=0
+dhcp-timeout=2147483647
+method=disabled
+----
+
+=== カスタムネットワーク設定
+
+Edge Image Builderのデフォルトのネットワーク設定についてはすでに説明しましたが、これはNetworkManager Configuratorに依存しています。
+ただし、カスタムスクリプトを使用して変更するオプションもあります。このオプションは非常に柔軟でMACアドレスにも依存しませんが、単一のイメージで複数のノードを起動する場合、使用するのがはるかに不便であるという制限があります。
+
+> NOTE: `/network` ディレクトリの下にある、目的のネットワーク状態を記述したファイルを使用して、デフォルトのネットワーク設定を使用することをお勧めします。
+その動作がユースケースに適用できない場合にのみ、カスタムスクリプトを選択してください。
+
+異なる設定構造を使用してエッジノードを構築およびプロビジョニングします。<<image-config-dir-creation>>から<<default-network-definition>>までのすべての手順に従ってください。
+
+この例では、プロビジョニングされたすべてのノードで `eth0` インターフェイスに静的設定を適用し、NetworkManagerによって自動的に作成された有線接続を削除および無効化するカスタムスクリプトを作成します。これは、クラスター内のすべてのノードが同一のネットワーク設定を持つようにしたい場合に有益であり、そのため、イメージ作成前に各ノードのMACアドレスを気にする必要がありません。
+
+まず、接続ファイルを `/custom/files` ディレクトリに保存することから始めましょう。
+
+[,shell]
+----
+mkdir -p $CONFIG_DIR/custom/files
+
+cat << EOF > $CONFIG_DIR/custom/files/eth0.nmconnection
+[connection]
+autoconnect=true
+autoconnect-slaves=-1
+autoconnect-retries=1
+id=eth0
+interface-name=eth0
+type=802-3-ethernet
+uuid=dfd202f5-562f-5f07-8f2a-a7717756fb70
+wait-device-timeout=60000
+
+[ipv4]
+dhcp-timeout=2147483647
+method=auto
+
+[ipv6]
+addr-gen-mode=eui64
+dhcp-timeout=2147483647
+method=disabled
+EOF
+----
+
+静的設定が作成されたので、カスタムネットワークスクリプトも作成します。
+
+[,shell]
+----
+mkdir -p $CONFIG_DIR/network
+
+cat << EOF > $CONFIG_DIR/network/configure-network.sh
+#!/bin/bash
+set -eux
+
+# Remove and disable wired connections
+mkdir -p /etc/NetworkManager/conf.d/
+printf "[main]\nno-auto-default=*\n" > /etc/NetworkManager/conf.d/no-auto-default.conf
+rm -f /var/run/NetworkManager/system-connections/* || true
+
+# Copy pre-configured network configuration files into NetworkManager
+mkdir -p /etc/NetworkManager/system-connections/
+cp eth0.nmconnection /etc/NetworkManager/system-connections/
+chmod 600 /etc/NetworkManager/system-connections/*.nmconnection
+EOF
+
+chmod a+x $CONFIG_DIR/network/configure-network.sh
+----
+
+> NOTE: nmcバイナリは引き続きデフォルトで含まれるため、必要に応じて `configure-network.sh` スクリプトで使用することもできます。
+
+[WARNING]
+====
+カスタムスクリプトは、常に設定ディレクトリ内の `/network/configure-network.sh` に配置する必要があります。ファイルが存在する場合、他のすべてのファイルは無視されます。
+YAML形式の静的構成とカスタムスクリプトの両方を同時に使用してネットワークを構成することはできません。
+====
+
+この時点での設定ディレクトリは、以下のようになっているはずです。
+
+[,console,subs="attributes"]
+----
+├── definition.yaml
+├── custom/
+│   └── files/
+│       └── eth0.nmconnection
+├── network/
+│   └── configure-network.sh
+└── base-images/
+    └── {micro-base-image-raw}
+----
+
+イメージをビルドしましょう。
+
+[,shell,subs="attributes"]
+----
+podman run --rm -it -v $CONFIG_DIR:/eib registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} build --definition-file definition.yaml
+----
+
+イメージが正常にビルドされたら、それを使用して仮想マシンを作成しましょう。
+
+[,shell]
+----
+virt-install --name node1 --ram 10000 --vcpus 6 --disk path=$CONFIG_DIR/modified-image.raw,format=raw --osinfo detect=on,name=sle-unknown --graphics none --console pty,target_type=serial --network default --virt-type kvm --import
+----
+
+プロビジョニング処理には数分かかる場合があります。完了したら、提供された資格情報を使用してシステムにログインしてください。
+
+ルーティングが正しく構成されていることを確認します。
+
+[,shell]
+----
+localhost:~ # ip r
+default via 192.168.122.1 dev eth0 proto dhcp src 192.168.122.185 metric 100
+192.168.122.0/24 dev eth0 proto kernel scope link src 192.168.122.185 metric 100
+----
+
+インターネット接続が利用可能であることを確認します。
+
+[,shell]
+----
+localhost:~ # ping google.com
+PING google.com (142.250.72.78) 56(84) bytes of data.
+64 bytes from den16s09-in-f14.1e100.net (142.250.72.78): icmp_seq=1 ttl=56 time=13.6 ms
+64 bytes from den16s09-in-f14.1e100.net (142.250.72.78): icmp_seq=2 ttl=56 time=13.6 ms
+^C
+--- google.com ping statistics ---
+2 packets transmitted, 2 received, 0% packet loss, time 1001ms
+rtt min/avg/max/mdev = 13.592/13.599/13.606/0.007 ms
+----
+
+接続ファイルを使用してイーサネットインタフェースが静的に設定され、アクティブになっていることを確認してください。
+
+[,shell]
+----
+localhost:~ # ip a
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 52:54:00:31:d0:1b brd ff:ff:ff:ff:ff:ff
+    altname enp0s2
+    altname ens2
+    inet 192.168.122.185/24 brd 192.168.122.255 scope global dynamic noprefixroute eth0
+
+localhost:~ # nmcli -f NAME,UUID,TYPE,DEVICE,FILENAME con show
+NAME  UUID                                  TYPE      DEVICE  FILENAME
+eth0  dfd202f5-562f-5f07-8f2a-a7717756fb70  ethernet  eth0    /etc/NetworkManager/system-connections/eth0.nmconnection
+
+localhost:~ # cat  /etc/NetworkManager/system-connections/eth0.nmconnection
+[connection]
+autoconnect=true
+autoconnect-slaves=-1
+autoconnect-retries=1
+id=eth0
+interface-name=eth0
+type=802-3-ethernet
+uuid=dfd202f5-562f-5f07-8f2a-a7717756fb70
+wait-device-timeout=60000
+
+[ipv4]
+dhcp-timeout=2147483647
+method=auto
+
+[ipv6]
+addr-gen-mode=eui64
+dhcp-timeout=2147483647
+method=disabled
+----

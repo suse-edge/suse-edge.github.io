@@ -1,0 +1,382 @@
+[#guides-metallb-k3s]
+= K3s 上的 MetalLB（使用层 2 模式）
+:revdate: 2025-05-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+MetalLB 是一种用于裸机 Kubernetes 集群的负载平衡器实现，它使用标准路由协议。
+
+在本指南中，我们将演示如何以层 2 (L2) 模式部署 MetalLB。
+
+== 为什么要使用 MetalLB
+
+MetalLB 是裸机 Kubernetes 集群中负载平衡的理想选择，原因如下：
+
+. 与 Kubernetes 的原生集成：MetalLB 与 Kubernetes 无缝集成，使用熟悉的 Kubernetes 工具和实践即可轻松部署和管理。
+. 裸机兼容性：与基于云的负载平衡器不同，MetalLB 专为本地部署而设计，在这些环境中，传统的负载平衡器可能无法使用或不可行。
+. 支持多个协议：MetalLB 支持层 2 和 BGP（边界网关协议）模式，为不同的网络架构和需求提供了灵活性。
+. 高可用性：通过在多个节点之间分配负载平衡职责，MetalLB 可确保服务的高可用性和可靠性。
+. 可伸缩性：MetalLB 可以处理大规模部署，并随着 Kubernetes 集群的伸缩而伸缩，以满足不断增长的需求。
+
+在层 2 模式下，一个节点负责向本地网络通告服务。从网络的角度来看，这看起来就像该机器的网络接口分配了多个IP地址。
+
+层 2 模式的主要优势在于其通用性：它适用于任何以太网，无需特殊硬件，甚至不需要高级路由器。
+
+== K3s 上的 MetalLB（使用层 2）
+
+在本快速入门中，将使用层 2 模式。
+这意味着我们不需要任何特殊的网络设备，只需要网络范围内三个空闲的IP地址。
+
+== 先决条件
+
+* 一个即将部署 MetalLB 的 K3s 集群。
+
+[WARNING]
+====
+K3s 自带一个名为 Klipper 的服务负载平衡器。您 https://metallb.universe.tf/configuration/k3s/[需要禁用它才能运行 MetalLB]。要禁用 Klipper，需要使用 `--disable=servicelb` 标志安装 K3s。
+====
+
+* Helm
+* 网络范围内三个空闲的IP地址。在此示例中为 `192.168.122.10-192.168.122.12`
+
+[IMPORTANT]
+====
+您必须确保这些 IP 地址未被分配。
+在 DHCP 环境中，这些地址不得属于 DHCP 地址池，以避免双重分配。
+====
+
+== 部署
+
+我们将使用作为 {product} 解决方案一部分发布的 MetalLB Helm chart：
+
+[,bash,subs="attributes"]
+----
+helm install \
+  metallb oci://registry.suse.com/edge/charts/metallb \
+  --namespace metallb-system \
+  --create-namespace
+
+while ! kubectl wait --for condition=ready -n metallb-system $(kubectl get\
+ pods -n metallb-system -l app.kubernetes.io/component=controller -o name)\
+ --timeout=10s; do
+ sleep 2
+done
+----
+
+== 配置
+
+此时，安装已完成。现在是时候使用我们的示例值进行 https://metallb.universe.tf/configuration/[配置] 了：
+
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: ip-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - 192.168.122.10/32
+  - 192.168.122.11/32
+  - 192.168.122.12/32
+EOF
+----
+
+[,bash]
+----
+cat <<-EOF | kubectl apply -f -
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: ip-pool-l2-adv
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - ip-pool
+EOF
+----
+
+现在，它已准备好可以使用。您可以为 L2 模式自定义许多内容，例如：
+
+* https://metallb.universe.tf/usage/#ipv6-and-dual-stack-services[IPv6 和双栈服务]
+* https://metallb.universe.tf/configuration/_advanced_ipaddresspool_configuration/#controlling-automatic-address-allocation[控制自动地址分配]
+* https://metallb.universe.tf/configuration/_advanced_ipaddresspool_configuration/#reduce-scope-of-address-allocation-to-specific-namespace-and-service[将地址分配范围缩小到特定的名称空间和服务]
+* https://metallb.universe.tf/configuration/_advanced_l2_configuration/#limiting-the-set-of-nodes-where-the-service-can-be-announced-from[限制可以从中通告服务的节点集]
+* https://metallb.universe.tf/configuration/_advanced_l2_configuration/#specify-network-interfaces-that-lb-ip-can-be-announced-from[指定可以从中通告 LB IP 的网络接口]
+
+以及更多关于 https://metallb.universe.tf/configuration/_advanced_bgp_configuration/[BGP]的内容。
+
+[#traefik-and-metallb]
+=== Traefik 和 MetalLB
+
+Traefik 默认随 K3s 部署（ https://docs.k3s.io/networking#traefik-ingress-controller[可以禁用] 使用 `--disable=traefik`），并且默认作为 `LoadBalancer` 暴露（供 Klipper 使用）。然而，由于需要禁用 Klipper，用于 Ingress 的 Traefik 服务仍然是 `LoadBalancer` 类型。因此，在部署 MetalLB 时，第一个 IP 将自动分配给 Traefik Ingress。
+
+[,console]
+----
+# Before deploying MetalLB
+kubectl get svc -n kube-system traefik
+NAME      TYPE           CLUSTER-IP     EXTERNAL-IP   PORT(S)                      AGE
+traefik   LoadBalancer   10.43.44.113   <pending>     80:31093/TCP,443:32095/TCP   28s
+# After deploying MetalLB
+kubectl get svc -n kube-system traefik
+NAME      TYPE           CLUSTER-IP     EXTERNAL-IP      PORT(S)                      AGE
+traefik   LoadBalancer   10.43.44.113   192.168.122.10   80:31093/TCP,443:32095/TCP   3m10s
+----
+
+这将在流程的 <<ingress-with-metallb,稍后>> 阶段应用。
+
+== 用法
+
+让我们创建一个示例部署：
+
+[,bash]
+----
+cat <<- EOF | kubectl apply -f -
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hello-kubernetes
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hello-kubernetes
+  namespace: hello-kubernetes
+  labels:
+    app.kubernetes.io/name: hello-kubernetes
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-kubernetes
+  namespace: hello-kubernetes
+  labels:
+    app.kubernetes.io/name: hello-kubernetes
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hello-kubernetes
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hello-kubernetes
+    spec:
+      serviceAccountName: hello-kubernetes
+      containers:
+        - name: hello-kubernetes
+          image: "paulbouwer/hello-kubernetes:1.10"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          env:
+          - name: HANDLER_PATH_PREFIX
+            value: ""
+          - name: RENDER_PATH_PREFIX
+            value: ""
+          - name: KUBERNETES_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: KUBERNETES_POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: KUBERNETES_NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+          - name: CONTAINER_IMAGE
+            value: "paulbouwer/hello-kubernetes:1.10"
+EOF
+----
+
+最后是服务：
+
+[,bash]
+----
+cat <<- EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-kubernetes
+  namespace: hello-kubernetes
+  labels:
+    app.kubernetes.io/name: hello-kubernetes
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: hello-kubernetes
+EOF
+----
+
+让我们看看它的实际运行效果：
+
+[,console]
+----
+kubectl get svc -n hello-kubernetes
+NAME               TYPE           CLUSTER-IP     EXTERNAL-IP      PORT(S)        AGE
+hello-kubernetes   LoadBalancer   10.43.127.75   192.168.122.11   80:31461/TCP   8s
+
+curl http://192.168.122.11
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hello Kubernetes!</title>
+    <link rel="stylesheet" type="text/css" href="/css/main.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Ubuntu:300" >
+</head>
+<body>
+
+  <div class="main">
+    <img src="/images/kubernetes.png"/>
+    <div class="content">
+      <div id="message">
+  Hello world!
+</div>
+<div id="info">
+  <table>
+    <tr>
+      <th>namespace:</th>
+      <td>hello-kubernetes</td>
+    </tr>
+    <tr>
+      <th>pod:</th>
+      <td>hello-kubernetes-7c8575c848-2c6ps</td>
+    </tr>
+    <tr>
+      <th>node:</th>
+      <td>allinone (Linux 5.14.21-150400.24.46-default)</td>
+    </tr>
+  </table>
+</div>
+<div id="footer">
+  paulbouwer/hello-kubernetes:1.10 (linux/amd64)
+</div>
+    </div>
+  </div>
+
+</body>
+</html>
+----
+
+[#ingress-with-metallb]
+=== 使用 MetalLB 的 Ingress
+
+由于 Traefik 已经作为 Ingress 控制器运行，我们可以通过 `Ingress` 对象来暴露任何 HTTP/HTTPS 流量，例如：
+
+[,bash]
+----
+IP=$(kubectl get svc -n kube-system traefik -o jsonpath="{.status.loadBalancer.ingress[0].ip}")
+cat <<- EOF | kubectl apply -f -
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hello-kubernetes-ingress
+  namespace: hello-kubernetes
+spec:
+  rules:
+  - host: hellok3s.${IP}.sslip.io
+    http:
+      paths:
+        - path: "/"
+          pathType: Prefix
+          backend:
+            service:
+              name: hello-kubernetes
+              port:
+                name: http
+EOF
+----
+
+然后：
+
+[,console]
+----
+curl http://hellok3s.${IP}.sslip.io
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hello Kubernetes!</title>
+    <link rel="stylesheet" type="text/css" href="/css/main.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Ubuntu:300" >
+</head>
+<body>
+
+  <div class="main">
+    <img src="/images/kubernetes.png"/>
+    <div class="content">
+      <div id="message">
+  Hello world!
+</div>
+<div id="info">
+  <table>
+    <tr>
+      <th>namespace:</th>
+      <td>hello-kubernetes</td>
+    </tr>
+    <tr>
+      <th>pod:</th>
+      <td>hello-kubernetes-7c8575c848-fvqm2</td>
+    </tr>
+    <tr>
+      <th>node:</th>
+      <td>allinone (Linux 5.14.21-150400.24.46-default)</td>
+    </tr>
+  </table>
+</div>
+<div id="footer">
+  paulbouwer/hello-kubernetes:1.10 (linux/amd64)
+</div>
+    </div>
+  </div>
+
+</body>
+</html>
+----
+
+验证 MetalLB 是否正常工作：
+
+[,bash]
+----
+% arping hellok3s.${IP}.sslip.io
+
+ARPING 192.168.64.210
+60 bytes from 92:12:36:00:d3:58 (192.168.64.210): index=0 time=1.169 msec
+60 bytes from 92:12:36:00:d3:58 (192.168.64.210): index=1 time=2.992 msec
+60 bytes from 92:12:36:00:d3:58 (192.168.64.210): index=2 time=2.884 msec
+----
+
+在上面的示例中，流量流向如下：
+
+. `hellok3s.$\{IP}.sslip.io` 被解析为实际 IP。
+. 然后流量由 `metallb-speaker` Pod 处理。
+. `metallb-speaker` 将流量重定向到 `traefik` 控制器。
+. 最后，Traefik 将请求转发到 `hello-kubernetes` 服务。

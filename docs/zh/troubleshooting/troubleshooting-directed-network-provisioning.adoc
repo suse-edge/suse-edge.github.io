@@ -1,0 +1,132 @@
+[#troubleshooting-directed-network-provisioning]
+== 定向网络配置故障排查
+:revdate: 2025-06-17
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+定向网络配置场景涉及使用 Metal^3^ 和 CAPI 元素来配置下游集群。它还包括用于创建操作系统映像的 EIB。在主机首次引导时，或在检查或配置过程中，可能会出现问题。
+
+.常见问题
+
+* *固件过旧*:验证所使用的物理主机上的所有不同固件是否均已更新。这包括 BMC 固件，因为有时 Metal^3^ https://book.metal3.io/bmo/supported_hardware#redfish-and-its-variants[需要特定/更新的固件]。
+* *配置因 SSL 错误而失败*:如果提供映像的 Web 服务器使用 https，则需要配置 Metal^3^ 以在 IPA 映像上注入并信任该证书。请参阅 <<mgmt-cluster-kubernetes-folder,Kubernetes 文件夹>>，了解如何将 `ca-additional.crt` 文件包含到 Metal^3^ 图表中。
+* *使用 IPA 引导主机时出现证书问题*:某些服务器供应商在将虚拟媒体 ISO 映像附加到 BMC 时会验证 SSL 连接，这可能会导致问题，因为为 Metal3 部署生成的证书是自签名的。可能会出现主机正在引导但进入 UEFI shell 的情况。请参阅 <<disabling-tls-for-virtualmedia-iso-attachment,禁用虚拟媒体 ISO 附加的 TLS>> 以了解如何修复此问题。
+* *名称或标签引用错误*:如果集群引用的节点名称或标签错误，集群会显示为已部署，但 BMH 仍保持“可用”状态。请仔细检查 BMH 相关对象上的引用。
+* *BMC 通信问题*:确保在管理集群上运行的 Metal^3^ pod 能够访问正在配置的主机的 BMC（通常 BMC 网络受到严格限制）。
+* *裸机主机状态不正确*:BMH 对象在其生命周期内会进入不同的状态（检查中、准备中、已配置等） https://book.metal3.io/bmo/state_machine[状态机生命周期]。如果检测到状态不正确，请检查 BMH 对象的 `status` 字段，因为它包含更多信息，如 `kubectl get bmh <name> -o jsonpath=’{.status}’| jq`。
+* *主机未被取消配置*：如果计划取消配置的主机失败，可以在将“detached”注解添加到 BMH 对象后尝试移除，如下所示：`kubectl annotate bmh/<BMH> baremetalhost.metal3.io/detached=””`。
+* *镜像错误*：验证使用 EIB 为下游集群构建的镜像是否可用、是否具有正确的校验和，以及是否因过大而无法解压或超过磁盘容量。
+* *磁盘大小不匹配*：默认情况下，磁盘不会扩展以填满整个磁盘。正如 <<growfs-script,Growfs 脚本>> 一节中所述，需要在使用 EIB 为下游集群主机构建的镜像中包含 Growfs 脚本。
+* *清理处理卡住*：清理处理会重试多次。如果由于主机问题导致无法进行清理，请先通过将 BMH 对象上的 `automatedCleanMode` 字段设置为 `disabled` 来禁用清理。
++
+[WARNING]
+====
+不建议在清理处理耗时过长或失败时手动去除终结器。这样做会从 Kubernetes 中删除主机记录，但会将其保留在 Ironic 中。当前正在运行的操作会在后台继续，并且由于冲突，再次添加主机的尝试可能会失败。
+====
+* *Metal3/Rancher Turtles/CAPI Pod 问题*：所有必需组件的部署流程如下：
++
+** Rancher Turtles 控制器部署 CAPI 操作器控制器。
+** 随后，CAPI 操作器控制器部署提供程序控制器（CAPI 核心、CAPM3 和 RKE2 控制平面/启动）。
+
+验证所有 Pod 是否运行正常，否则请检查日志。
+
+
+.日志
+* *Metal^3^ 日志*：检查不同 pod 的日志。
++
+[,shell]
+----
+kubectl logs -n metal3-system -l app.kubernetes.io/component=baremetal-operator
+kubectl logs -n metal3-system -l app.kubernetes.io/component=ironic
+----
++
+[NOTE]
+====
+metal3-ironic pod 在同一个 pod 上包含至少 4 个不同的容器（`ironic-httpd`、` ironic-log-watch`、`ironic` 和 `ironic-ipa-downloader` (init)）。使用 `kubectl logs` 时使用 `-c` 标志来验证每个容器的日志。
+====
++
+[NOTE]
+====
+如果网络连接支持将这些日志发送回管理集群，则 `ironic-log-watch` 容器会在检查/配置后公开来自主机的控制台日志。这在出现配置错误但您无法直接访问 BMC 控制台日志的情况下非常有用。
+====
+
+* *Rancher Turtles 日志*：检查不同 pod 的日志。
++
+[,shell]
+----
+kubectl logs -n cattle-turtles-system -l control-plane=controller-manager
+kubectl logs -n cattle-turtles-system -l app.kubernetes.io/name=cluster-api-operator
+kubectl logs -n rke2-bootstrap-system -l cluster.x-k8s.io/provider=bootstrap-rke2
+kubectl logs -n rke2-control-plane-system -l cluster.x-k8s.io/provider=control-plane-rke2
+kubectl logs -n cattle-capi-system -l cluster.x-k8s.io/provider=cluster-api
+kubectl logs -n capm3-system -l cluster.x-k8s.io/provider=infrastructure-metal3
+----
+
+* *BMC 日志*：通常 BMC 有一个 UI，可以在其中完成大部分交互。通常有一个“日志”部分，可以观察潜在问题（无法访问镜像、硬件故障等）。
+
+* *控制台日志*：连接到 BMC 控制台（通过 BMC webui、串口等）并检查正在写入的日志中是否存在错误。
+
+.排查步骤
+
+. *检查 `BareMetalHost` 状态*：
+
+* `kubectl get bmh -A` 显示当前状态。查找 `provisioning`、`ready`、`error`、`registering`。
+* `kubectl describe bmh -n <namespace> <bmh_name>` 提供详细的事件和条件，解释 BMH 可能卡住的原因。
+
+. *测试 RedFish 连接*：
+
+* 使用 Metal^3^ 控制平面中的 `curl` 来测试通过 redfish 与 BMC 的连接。
+* 确保在 `BareMetalHost-Secret` 定义中提供了正确的 BMC 凭据。
+
+. *验证 turtles/CAPI/metal3 pod 状态*：确保管理集群上的容器已启动并运行：`kubectl get pods -n metal3-system` 和 `kubectl get pods -n cattle-turtles-system`（另请参阅 `cattle-capi-system`、`capm3-system`、`rke2-bootstrap-system` 和 `rke2-control-plane-system`）。
+
+. *验证从正在配置的主机是否可以访问 Ironic 端点*：正在配置的主机需要能够访问 Ironic 端点，以便向 Metal^3^ 报告。使用 `kubectl get svc -n metal3-system metal3-metal3-ironic` 检查 IP，并尝试通过 `curl/nc` 访问它。
+
+. *验证从 BMC 是否可以访问 IPA 镜像*：IPA 由 Ironic 端点提供服务，并且由于它被用作虚拟 CD，因此必须能够从 BMC 访问它。
+
+. *验证从正在配置的主机是否可以访问操作系统镜像*：用于配置主机的镜像需要能够从主机本身（运行 IPA 时）访问，因为它将被临时下载并写入磁盘。
+
+. *检查 Metal^3^ 组件日志*：请参见上文。
+
+. *重新触发 BMH 检查*： 如果检查失败或可用主机的硬件发生变化，可以通过为 BMH 对象添加 `inspect.metal3.io: ""` 注解来触发新的检查流程。有关更多信息，请参阅 https://book.metal3.io/bmo/inspect_annotation[Metal^3^ 控制检查] 指南。
+
+. *裸机 IPA 控制台*：排查 IPA 问题有几种方法：
+
+* 启用“自动登录”。这使得 root 用户在连接到 IPA 控制台时能够自动登录。
++
+[WARNING]
+====
+这仅用于调试目的，因为它提供了对主机的完全访问权限。
+====
++
+要启用自动登录，Metal3 helm `global.ironicKernelParams` 值应如下所示：`console=ttyS0 suse.autologin=ttyS0`（根据控制台的不同，`ttyS0` 可以更改）。然后应重新部署 Metal^3^ chart。（注意 `ttyS0` 是一个示例，这应该与实际终端匹配，例如在裸机上很多情况下可能是 `tty1`，这可以通过查看引导时 IPA ramdisk 的控制台输出来验证，其中 `/etc/issue` 会打印控制台名称）。
++
+另一种方法是更改 `metal3-system` 命名空间中 `ironic` configmap 上的 `IRONIC_KERNEL_PARAMS` 参数。这可能更容易，因为可以通过 `kubectl` edit 来完成，但在更新 chart 时它会被覆盖。然后需要使用 `kubectl delete pod -n metal3-system -l app.kubernetes.io/component=ironic` 重启 Metal^3^ pod。
+
+* 为 IPA 上的 root 用户注入 SSH 密钥。
++ 
+[WARNING]
+====
+这仅用于调试目的，因为它提供了对主机的完全访问权限。
+====
++
+要为 root 用户注入 SSH 密钥，应使用 Metal^3^ helm `debug.ironicRamdiskSshKey` 值。然后应该执行 Metal^3^ chart 的重新部署。
++
+另一种方法是更改 `IRONIC_RAMDISK_SSH_KEY` 名称空间中 `ironic configmap` 上的 `metal3-system` 参数。这可能更容易，因为可以通过 `kubectl` 编辑 来完成，但在更新图表时它会被覆盖。然后需要使用 `kubectl delete pod -n metal3-system -l app.kubernetes.io/component=ironic` 重启 Metal^3^ pod
+
+
+[NOTE]
+====
+查看 https://cluster-api.sigs.k8s.io/user/troubleshooting[CAPI 故障排除] 和 https://book.metal3.io/troubleshooting[Metal^3^ 故障排除] 指南。
+====
+

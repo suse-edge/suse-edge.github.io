@@ -1,0 +1,474 @@
+[#{cluster-type}-day2-fleet-os-upgrade]
+== Fazer upgrade do SO
+:revdate: 2025-05-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+:toc: auto
+
+Esta seção descreve como fazer upgrade do sistema operacional usando <<components-fleet>> e o <<components-system-upgrade-controller>>.
+
+Os tópicos a seguir são abordados como parte desta seção:
+
+. <<{cluster-type}-day2-fleet-os-upgrade-components>> - componentes adicionais usados pelo processo de upgrade.
+. <<{cluster-type}-day2-fleet-os-upgrade-overview>> - visão geral do processo de upgrade.
+. <<{cluster-type}-day2-fleet-os-upgrade-requirements>> - requisitos do processo de upgrade.
+. <<{cluster-type}-day2-fleet-os-upgrade-plan-deployment>> - informações sobre como implantar o `SUC plans`, responsável por acionar o processo de upgrade.
+
+[#{cluster-type}-day2-fleet-os-upgrade-components]
+=== Componentes
+
+Esta seção aborda os componentes personalizados que o processo de `OS upgrade` usa em relação aos <<{cluster-type}-day2-fleet-components,componentes>> padrão de "Day 2".
+
+[#{cluster-type}-day2-fleet-os-upgrade-components-systemd-service]
+==== systemd.service
+
+O upgrade do SO em um nó específico é gerenciado por um link:https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html[systemd.service].
+
+Um serviço diferente é criado dependendo do tipo de upgrade que o SO requer de uma versão do Edge para outra:
+
+* Para versões do Edge que requerem a mesma versão do SO (por exemplo, `6.1`), o `os-pkg-update.service` será criado. Ele usa link:https://kubic.opensuse.org/documentation/man-pages/transactional-update.8.html[transactional-update] para realizar um link:https://en.opensuse.org/SDB:Zypper_usage#Updating_packages[upgrade normal de pacotes].
+
+* Para versões do Edge que requerem uma migração de versão do SO (por exemplo, `6.1` -> `6.2`), o `os-migration.service` será criado. Ele usa link:https://kubic.opensuse.org/documentation/man-pages/transactional-update.8.html[transactional-update] para realizar:
+
+.. Um link:https://en.opensuse.org/SDB:Zypper_usage#Updating_packages[upgrade normal de pacotes] que garante que todos os pacotes estejam atualizados para mitigar quaisquer falhas na migração relacionadas a versões antigas de pacotes.
+
+.. Uma migração de SO utilizando o comando `zypper migration`.
+
+Os serviços mencionados acima são fornecidos em cada nó por meio de um `SUC plan` que deve estar localizado no cluster {cluster-type} que precisa de upgrade do SO.
+
+[#{cluster-type}-day2-fleet-os-upgrade-overview]
+=== Visão geral
+
+O upgrade do sistema operacional para nós de cluster {cluster-type} é feito utilizando `Fleet` e o `System Upgrade Controller (SUC)`.
+
+*Fleet* é usado para implantar e gerenciar `SUC plans` no cluster desejado. 
+
+[NOTE]
+====
+`SUC plans` são link:https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/[recursos personalizados] que descrevem as etapas que o `SUC` precisa seguir para que uma tarefa específica seja executada em um conjunto de nós. Para um exemplo de como um `SUC plan` se parece, consulte o link:https://github.com/rancher/system-upgrade-controller?tab=readme-ov-file#example-plans[repositório upstream].
+====
+
+Os `OS SUC plans` são enviados para cada cluster implantando um recurso https://fleet.rancher.io/gitrepo-add[GitRepo] ou https://fleet.rancher.io/bundle-add[Bundle] em um link:https://fleet.rancher.io/namespaces#gitrepos-bundles-clusters-clustergroups[workspace] específico do Fleet. O Fleet recupera os `GitRepo/Bundle` implantados e implanta seu conteúdo (o `OS SUC plans`) no(s) cluster(es) desejado(s).
+
+[NOTE]
+====
+Os recursos `GitRepo/Bundle` são sempre implantados no `management cluster`. Se usar um recurso `GitRepo` ou `Bundle` depende do seu caso de uso, verifique <<{cluster-type}-day2-fleet-determine-use-case>> para mais informações.
+====
+
+`OS SUC plans` descrevem o seguinte fluxo de trabalho:
+
+. Sempre link:https://kubernetes.io/docs/reference/kubectl/generated/kubectl_cordon/[cordon] os nós antes de upgrades do SO.
+
+. Sempre faça upgrade dos nós `control-plane` antes dos nós `worker`.
+
+. Sempre faça upgrade do cluster, um nó por vez.
+
+Uma vez que os `OS SUC plans` são implantados, o fluxo de trabalho é o seguinte:
+
+. O SUC reconcilia os `OS SUC plans` implantados e cria um `Kubernetes Job` em *cada nó*.
+
+. O `Kubernetes Job` cria um <<{cluster-type}-day2-fleet-os-upgrade-components-systemd-service, `systemd.service`>> para upgrade de pacote ou migração de SO.
+
+. O `systemd.service` criado aciona o processo de upgrade do SO no nó específico.
++
+[IMPORTANT]
+====
+Assim que o processo de upgrade do SO terminar, o nó correspondente será `rebooted` para aplicar as atualizações no sistema.
+====
+
+Abaixo você pode encontrar um diagrama da descrição acima:
+
+image::fleet-day2-{cluster-type}-os-upgrade.png[scaledwidth=100%]
+
+[#{cluster-type}-day2-fleet-os-upgrade-requirements]
+=== Requisitos
+
+_Geral:_
+
+. *Máquina registrada no SCC* - Todos os {cluster-type} nós do cluster devem estar registrados no `https://scc.suse.com/`, o que é necessário para que o respectivo `systemd.service` possa se conectar com sucesso ao repositório RPM desejado.
++
+[IMPORTANT]
+====
+Para versões Edge que exigem uma migração de versão de SO (por exemplo, `6.1` -> `6.2`), certifique-se de que sua chave SCC suporte a migração para a nova versão.
+====
+
+. *Certifique-se de que as tolerâncias do Plano SUC correspondam às tolerâncias do nó* - Se os nós do seu cluster Kubernetes tiverem *taints* personalizados, certifique-se de adicionar link:https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/[tolerâncias] para esses taints nos *Planos SUC*. Por padrão, *SUC Plans* possuem tolerâncias apenas para nós *control-plane*. As tolerâncias padrão incluem:
+
+* _CriticalAddonsOnly=true:NoExecute_
+
+* _node-role.kubernetes.io/control-plane:NoSchedule_
+
+* _node-role.kubernetes.io/etcd:NoExecute_
++
+[NOTE]
+====
+Quaisquer tolerâncias adicionais devem ser adicionadas na seção `.spec.tolerations` de cada Plano. *SUC Plans* relacionados ao upgrade do SO podem ser encontrados no repositório link:https://github.com/suse-edge/fleet-examples[suse-edge/fleet-examples] em `fleets/day2/system-upgrade-controller-plans/os-upgrade`. *Certifique-se de usar os Planos de uma tag de link:https://github.com/suse-edge/fleet-examples/releases[release] de repositório válida.*
+
+Um exemplo de definição de tolerâncias personalizadas para o plano SUC *control-plane* seria assim:
+[,yaml]
+----
+apiVersion: upgrade.cattle.io/v1
+kind: Plan
+metadata:
+  name: os-upgrade-control-plane
+spec:
+  ...
+  tolerations:
+  # default tolerations
+  - key: "CriticalAddonsOnly"
+    operator: "Equal"
+    value: "true"
+    effect: "NoExecute"
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Equal"
+    effect: "NoSchedule"
+  - key: "node-role.kubernetes.io/etcd"
+    operator: "Equal"
+    effect: "NoExecute"
+  # custom toleration
+  - key: "foo"
+    operator: "Equal"
+    value: "bar"
+    effect: "NoSchedule"
+...
+----
+====
+
+_Air-gapped:_
+
+. *Espelhar repositórios RPM da SUSE* - Os repositórios RPM do SO devem ser espelhados localmente para que o `systemd.service` possa ter acesso a eles. Isso pode ser alcançado usando link:https://documentation.suse.com/sles/15-SP6/html/SLES-all/book-rmt.html[RMT] ou link:https://documentation.suse.com/suma/5.0/en/suse-manager/index.html[SUMA].
+
+[#{cluster-type}-day2-fleet-os-upgrade-plan-deployment]
+=== Upgrade do SO - implantação do plano SUC
+
+[IMPORTANT]
+====
+Para ambientes atualizados anteriormente usando este procedimento, os usuários devem garantir que *uma* das seguintes etapas seja concluída:
+
+* `Remove any previously deployed SUC Plans related to older Edge release versions from the {cluster-type} cluster` - pode ser feito removendo o cluster desejado da `GitRepo/Bundle` link:https://fleet.rancher.io/gitrepo-targets#target-matching[target configuration] existente, ou removendo o recurso `GitRepo/Bundle` por completo.
+
+* `Reuse the existing GitRepo/Bundle resource` - pode ser feito apontando a revisão do recurso para uma nova tag que contenha as frotas corretas para o `suse-edge/fleet-examples` link:https://github.com/suse-edge/fleet-examples/releases[release] desejado.
+
+Isso é feito para evitar conflitos entre `SUC Plans` para versões de release do Edge mais antigas.
+
+Se os usuários tentarem fazer upgrade enquanto houver `SUC Plans` existentes no cluster {cluster-type}, eles verão o seguinte erro do Fleet:
+
+[,bash]
+----
+Not installed: Unable to continue with install: Plan <plan_name> in namespace <plan_namespace> exists and cannot be imported into the current release: invalid ownership metadata; annotation validation error..
+----
+====
+
+Como mencionado em <<{cluster-type}-day2-fleet-os-upgrade-overview>>, os upgrades do SO são feitos enviando `SUC plans` para o cluster desejado por meio de uma das seguintes maneiras:
+
+* Recurso `GitRepo` do Fleet - <<{cluster-type}-day2-fleet-os-upgrade-plan-deployment-gitrepo>>.
+
+* Recurso `Bundle` do Fleet - <<{cluster-type}-day2-fleet-os-upgrade-plan-deployment-bundle>>.
+
+Para determinar qual recurso você deve usar, consulte <<{cluster-type}-day2-fleet-determine-use-case>>.
+
+Para casos de uso em que você deseja implantar o `OS SUC plans` a partir de uma ferramenta GitOps de terceiros, consulte <<{cluster-type}-day2-fleet-os-upgrade-plan-deployment-third-party>>
+
+[#{cluster-type}-day2-fleet-os-upgrade-plan-deployment-gitrepo]
+==== Implantação do plano SUC - recurso GitRepo
+
+Um recurso *GitRepo*, que implanta o `OS SUC plans` necessário, pode ser implantado de uma das seguintes maneiras:
+
+. Através do `Rancher UI` - <<{cluster-type}-day2-fleet-os-upgrade-plan-deployment-gitrepo-rancher>> (quando `Rancher` estiver disponível).
+
+. Ao <<{cluster-type}-day2-fleet-os-upgrade-plan-deployment-gitrepo-manual,implantar manualmente>> o recurso no seu `management cluster`.
+
+Uma vez implantado, para monitorar o processo de upgrade do SO dos nós do seu cluster alvo, consulte <<components-system-upgrade-controller-monitor-plans>>.
+
+[#{cluster-type}-day2-fleet-os-upgrade-plan-deployment-gitrepo-rancher]
+===== Criação de GitRepo - UI do Rancher
+
+Para criar um recurso `GitRepo` através da UI do Rancher, siga a link:https://ranchermanager.docs.rancher.com/{rancher-docs-version}/integrations-in-rancher/fleet/overview#accessing-fleet-in-the-rancher-ui[documentação] oficial deles.
+
+A equipe Edge mantém um link:https://github.com/suse-edge/fleet-examples/tree/{release-tag-fleet-examples}/fleets/day2/system-upgrade-controller-plans/os-upgrade[fleet] pronto para uso. Dependendo do seu ambiente, este fleet pode ser usado diretamente ou como um modelo.
+
+[IMPORTANT]
+====
+Sempre use este fleet a partir de uma tag de link:https://github.com/suse-edge/fleet-examples/releases[release] válida do Edge.
+====
+
+Para casos de uso onde nenhuma alteração personalizada precisa ser incluída no `SUC plans` que o fleet entrega, os usuários podem referenciar diretamente o fleet `os-upgrade` do repositório `suse-edge/fleet-examples`.
+
+Em casos onde alterações personalizadas são necessárias (por exemplo, para adicionar tolerâncias personalizadas), os usuários devem referenciar o fleet `os-upgrade` de um repositório separado, permitindo que adicionem as alterações aos planos SUC conforme necessário.
+
+Um exemplo de como um `GitRepo` pode ser configurado para usar o fleet do repositório `suse-edge/fleet-examples`, pode ser visto link:https://github.com/suse-edge/fleet-examples/blob/{release-tag-fleet-examples}/gitrepos/day2/os-upgrade-gitrepo.yaml[aqui].
+
+[#{cluster-type}-day2-fleet-os-upgrade-plan-deployment-gitrepo-manual]
+===== Criação de GitRepo - manual
+
+. Puxe o recurso *GitRepo*:
++
+[,bash,subs="attributes"]
+----
+curl -o os-upgrade-gitrepo.yaml https://raw.githubusercontent.com/suse-edge/fleet-examples/refs/tags/{release-tag-fleet-examples}/gitrepos/day2/os-upgrade-gitrepo.yaml
+----
+
+ifeval::["{cluster-type}" == "downstream"]
+. Edite a configuração do *GitRepo*, em `spec.targets` especifique sua lista de destino desejada. Por padrão, os recursos `GitRepo` do `suse-edge/fleet-examples` *NÃO* são mapeados para nenhum cluster downstream.
+
+** Para corresponder a todos os clusters, altere o `GitRepo` *destino* padrão para:
++
+[,yaml]
+----
+spec:
+  targets:
+  - clusterSelector: {}
+----
+
+** Alternativamente, se você quiser uma seleção de cluster mais granular, veja link:https://fleet.rancher.io/gitrepo-targets[Mapeamento para Clusters Downstream]
+endif::[]
+
+ifeval::["{cluster-type}" == "management"]
+. Edite a configuração do *GitRepo*:
+
+** Remova a seção `spec.targets` - necessária apenas para clusters downstream.
++
+[,bash]
+----
+# Example using sed
+sed -i.bak '/^  targets:/,$d' os-upgrade-gitrepo.yaml && rm -f os-upgrade-gitrepo.yaml.bak
+
+# Example using yq (v4+)
+yq eval 'del(.spec.targets)' -i os-upgrade-gitrepo.yaml
+----
+
+** Aponte o namespace do `GitRepo` para o namespace `{fleet-workspace}` - feito para implantar o recurso no cluster de gerenciamento.
++
+[,bash]
+----
+# Example using sed
+sed -i.bak 's/namespace: fleet-default/namespace: fleet-local/' os-upgrade-gitrepo.yaml && rm -f os-upgrade-gitrepo.yaml.bak
+
+# Example using yq (v4+)
+yq eval '.metadata.namespace = "fleet-local"' -i os-upgrade-gitrepo.yaml 
+----
+endif::[]
+
+. Aplique o recurso *GitRepo* ao seu `management cluster`:
++
+[,bash]
+----
+kubectl apply -f os-upgrade-gitrepo.yaml
+----
+
+. Visualize o recurso *GitRepo* criado no namespace `{fleet-workspace}`:
++
+[,bash,subs="attributes"]
+----
+kubectl get gitrepo os-upgrade -n {fleet-workspace}
+
+# Example output
+NAME            REPO                                              COMMIT         BUNDLEDEPLOYMENTS-READY   STATUS
+os-upgrade      https://github.com/suse-edge/fleet-examples.git   {release-tag-fleet-examples}  0/0
+----
+
+[#{cluster-type}-day2-fleet-os-upgrade-plan-deployment-bundle]
+==== Implantação do plano SUC - Recurso de Bundle
+
+Um recurso *Bundle*, que inclui os `OS SUC Plans` necessários, pode ser implantado de uma das seguintes maneiras:
+
+. Através do `Rancher UI` - <<{cluster-type}-day2-fleet-os-upgrade-plan-deployment-bundle-rancher>> (quando `Rancher` estiver disponível).
+
+. Ao <<{cluster-type}-day2-fleet-os-upgrade-plan-deployment-bundle-manual,implantar manualmente>> o recurso no seu `management cluster`.
+
+Uma vez implantado, para monitorar o processo de fazer upgrade do SO dos nós do seu cluster alvo, consulte <<components-system-upgrade-controller-monitor-plans>>.
+
+[#{cluster-type}-day2-fleet-os-upgrade-plan-deployment-bundle-rancher]
+===== Criação de Bundle - Interface do Rancher
+
+A equipe Edge mantém um link:https://github.com/suse-edge/fleet-examples/blob/{release-tag-fleet-examples}/bundles/day2/system-upgrade-controller-plans/os-upgrade/os-upgrade-bundle.yaml[bundle] pronto para uso que pode ser usado nas etapas abaixo.
+
+[IMPORTANT]
+====
+Sempre use este bundle a partir de uma tag de link:https://github.com/suse-edge/fleet-examples/releases[release] Edge válida.
+====
+
+Para criar um bundle através da interface do Rancher:
+
+. No canto superior esquerdo, clique em *☰ -> Continuous Delivery*
+
+. Vá para *Avançado* > *Bundles*
+
+. Selecione *Criar a partir de YAML*
+
+. A partir daqui, você pode criar o Bundle de uma das seguintes maneiras:
++
+[NOTE]
+====
+Pode haver casos de uso em que você precise incluir alterações personalizadas no `SUC plans` que o bundle inclui (por exemplo, para adicionar tolerâncias personalizadas). Certifique-se de incluir essas alterações no bundle que será gerado pelas etapas abaixo.
+====
+
+.. Copiando manualmente o link:https://raw.githubusercontent.com/suse-edge/fleet-examples/refs/tags/{release-tag-fleet-examples}/bundles/day2/system-upgrade-controller-plans/os-upgrade/os-upgrade-bundle.yaml[conteúdo do bundle] de `suse-edge/fleet-examples` para a página *Criar a partir de YAML*.
+
+.. Clonando o repositório link:https://github.com/suse-edge/fleet-examples[suse-edge/fleet-examples] da link:https://github.com/suse-edge/fleet-examples/releases[release] desejada e selecionando a opção *Ler a partir de arquivo* na página *Criar a partir de YAML*. A partir daí, navegue até o local do bundle (`bundles/day2/system-upgrade-controller-plans/os-upgrade`) e selecione o arquivo do bundle. Isso preencherá automaticamente a página *Criar a partir de YAML* com o conteúdo do bundle.
+
+ifeval::["{cluster-type}" == "downstream"]
+. Altere os clusters *target* para o `Bundle`:
+
+** Para corresponder a todos os clusters downstream, altere o Bundle `.spec.targets` padrão para:
++
+[, yaml]
+----
+spec:
+  targets:
+  - clusterSelector: {}
+----
+
+** Para mapeamentos de clusters downstream mais granulares, consulte link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters].
+endif::[]
+
+ifeval::["{cluster-type}" == "management"]
+. Edite o Bundle na interface do usuário do Rancher:
+
+** Altere o *namespace* do `Bundle` para apontar para o namespace `{fleet-workspace}`.
++
+[,yaml,subs="attributes"]
+----
+# Example
+kind: Bundle
+apiVersion: fleet.cattle.io/v1alpha1
+metadata:
+  name: os-upgrade
+  namespace: {fleet-workspace}
+...
+----
+
+** Altere os clusters *target* para o `Bundle` apontar para o seu cluster `local`(gerenciamento):
++
+[, yaml]
+----
+spec:
+  targets:
+  - clusterName: local
+----
++
+[NOTE]
+====
+Existem alguns casos de uso em que seu cluster `local` pode ter um nome diferente. 
+
+Para recuperar o nome do seu cluster `local`, execute o comando abaixo:
+
+[,bash]
+----
+kubectl get clusters.fleet.cattle.io -n fleet-local
+----
+====
+endif::[]
+
+. Selecione *Criar*
+
+[#{cluster-type}-day2-fleet-os-upgrade-plan-deployment-bundle-manual]
+===== Criação de Bundle - manual
+
+. Obtenha o recurso *Bundle*:
++
+[,bash,subs="attributes"]
+----
+curl -o os-upgrade-bundle.yaml https://raw.githubusercontent.com/suse-edge/fleet-examples/refs/tags/{release-tag-fleet-examples}/bundles/day2/system-upgrade-controller-plans/os-upgrade/os-upgrade-bundle.yaml
+----
+
+ifeval::["{cluster-type}" == "downstream"]
+. Edite as configurações de `Bundle` *target*, em `spec.targets` forneça sua lista de target desejada. Por padrão, os recursos `Bundle` do `suse-edge/fleet-examples` *NÃO* são mapeados para nenhum cluster downstream.
+
+** Para corresponder a todos os clusters, altere o `Bundle` *target* padrão para:
++
+[, yaml]
+----
+spec:
+  targets:
+  - clusterSelector: {}
+----
+
+** Alternativamente, se você quiser uma seleção de clusters mais granular, veja link:https://fleet.rancher.io/gitrepo-targets[Mapping to Downstream Clusters]
+endif::[]
+
+ifeval::["{cluster-type}" == "management"]
+. Edite a configuração do `Bundle`:
+
+** Altere os clusters *target* para o `Bundle` apontar para o seu cluster `local`(gerenciamento):
++
+[, yaml]
+----
+spec:
+  targets:
+  - clusterName: local
+----
++
+[NOTE]
+====
+Existem alguns casos de uso em que seu cluster `local` pode ter um nome diferente. 
+
+Para recuperar o nome do seu cluster `local`, execute o comando abaixo:
+
+[,bash]
+----
+kubectl get clusters.fleet.cattle.io -n fleet-local
+----
+====
+
+** Altere o *namespace* do `Bundle` para apontar para o namespace `{fleet-workspace}`.
++
+[,yaml,subs="attributes"]
+----
+# Example
+kind: Bundle
+apiVersion: fleet.cattle.io/v1alpha1
+metadata:
+  name: os-upgrade
+  namespace: {fleet-workspace}
+...
+----
+endif::[]
+
+. Aplique o recurso *Bundle* ao seu `management cluster`:
++
+[,bash]
+----
+kubectl apply -f os-upgrade-bundle.yaml
+----
+
+. Visualize o recurso *Bundle* criado no namespace `{fleet-workspace}`:
++
+[,bash,subs="attributes"]
+----
+kubectl get bundles -n {fleet-workspace}
+----
+
+[#{cluster-type}-day2-fleet-os-upgrade-plan-deployment-third-party]
+==== Implantação do plano SUC - fluxo de trabalho GitOps de terceiros
+
+Pode haver casos de uso em que os usuários desejem incorporar o `OS SUC plans` ao seu próprio fluxo de trabalho GitOps de terceiros (por exemplo, `Flux`).
+
+Para obter os recursos de fazer upgrade do SO de que você precisa, primeiro determine a tag de link:https://github.com/suse-edge/fleet-examples/releases[release] do Edge do repositório link:https://github.com/suse-edge/fleet-examples[suse-edge/fleet-examples] que você deseja usar.
+
+Depois disso, os recursos podem ser encontrados em `fleets/day2/system-upgrade-controller-plans/os-upgrade`, onde:
+
+* `plan-control-plane.yaml` é um recurso de plano SUC para nós de *control-plane*.
+
+* `plan-worker.yaml` é um recurso de plano SUC para nós de *worker*.
+
+* `secret.yaml` é um Secret que contém o script `upgrade.sh`, que é responsável por criar o <<{cluster-type}-day2-fleet-os-upgrade-components-systemd-service, systemd.service>>.
+
+* `config-map.yaml` é um ConfigMap que contém configurações que são consumidas pelo script `upgrade.sh`.
+
+[IMPORTANT]
+====
+Estes recursos `Plan` são interpretados pelo `System Upgrade Controller` e devem ser implantados em cada cluster downstream que você deseja fazer upgrade. Para informações sobre a implantação do SUC, consulte <<components-system-upgrade-controller-install>>.
+====
+
+Para entender melhor como seu fluxo de trabalho GitOps pode ser usado para implantar os *SUC Plans* para fazer upgrade do SO, pode ser útil dar uma olhada na <<{cluster-type}-day2-fleet-os-upgrade-overview,visão geral>>.

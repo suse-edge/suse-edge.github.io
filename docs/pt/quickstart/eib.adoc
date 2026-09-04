@@ -1,0 +1,619 @@
+[#quickstart-eib]
+= Clusters autônomos com o Edge Image Builder
+:revdate: 2025-07-31
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+O Edge Image Builder (EIB) é uma ferramenta que simplifica o processo de geração de imagens de disco personalizadas e prontas para inicialização (CRB) para inicializar máquinas, mesmo em cenários totalmente air-gapped. O EIB é usado para criar imagens de implantação para uso em todos os três tipos de pegadas de implantação {product}, pois é flexível o suficiente para oferecer desde as menores personalizações, por exemplo, adicionar um usuário ou definir o fuso horário, até oferecer uma imagem configurada de forma abrangente que configura, por exemplo, configurações de rede complexas, implanta clusters Kubernetes de vários nós, implanta cargas de trabalho do cliente e registra na plataforma de gerenciamento centralizado via Rancher/Elemental e SUSE Multi-Linux Manager. O EIB é executado como uma imagem de contêiner, tornando-o incrivelmente portátil entre plataformas e garantindo que todas as dependências necessárias sejam autocontidas, tendo um impacto muito mínimo nos pacotes instalados do sistema que está sendo usado para operar a ferramenta.
+
+[NOTE]
+====
+Para cenários de vários nós, o EIB implanta automaticamente o MetalLB e o Endpoint Copier Operator para que os hosts provisionados usando a mesma imagem criada ingressem automaticamente em um cluster Kubernetes.
+====
+
+Para mais informações, leia a <<components-eib,Introdução ao Edge Image Builder>>.
+
+[WARNING]
+====
+O Edge Image Builder {version-eib} oferece suporte à personalização de imagens do SUSE Linux Micro {version-operatingsystem}.
+Versões mais antigas, como o SUSE Linux Enterprise Micro 5.5 ou 6.0, não são suportadas.
+====
+
+[#eib-prerequisites]
+== Pré-requisitos
+* Uma máquina host de compilação {x86-64} (física ou virtual) executando o SLES 15 SP6.
+* O mecanismo de contêiner Podman
+* Uma imagem ISO SelfInstall do SUSE Linux Micro {version-operatingsystem} criada usando o <<guides-kiwi-builder-images,procedimento do Kiwi Builder>>
+
+[NOTE]
+====
+Para fins que não sejam de produção, o openSUSE Leap 15.6 ou o openSUSE Tumbleweed podem ser usados como máquina host de compilação. 
+Outros sistemas operacionais podem funcionar, desde que um tempo de execução do contêiner compatível esteja disponível.
+====
+
+=== Obtendo a imagem do EIB
+
+A imagem de contêiner do EIB está disponível publicamente e pode ser baixada do registro {product} executando o seguinte comando em seu host de compilação de imagem:
+
+[,shell,subs="attributes"]
+----
+podman pull registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib}
+----
+
+== Criando o diretório de configuração da imagem
+
+Como o EIB é executado dentro de um contêiner, precisamos montar um diretório de configuração a partir do host, permitindo que você especifique a configuração desejada e, durante o processo de compilação, o EIB tenha acesso a quaisquer arquivos de entrada e artefatos de suporte necessários. Este diretório deve seguir uma estrutura específica. Vamos criá-lo, assumindo que este diretório existirá em seu diretório home e será chamado de "eib":
+
+[,shell]
+----
+export CONFIG_DIR=$HOME/eib
+mkdir -p $CONFIG_DIR/base-images
+----
+
+Na etapa anterior, criamos um diretório "base-images" que hospedará a imagem de entrada do SUSE Linux Micro {version-operatingsystem}, vamos garantir que a imagem seja copiada para o diretório de configuração:
+
+[,shell,subs="attributes"]
+----
+cp /path/to/{micro-base-image-iso} $CONFIG_DIR/base-images/slemicro.iso
+----
+
+
+[NOTE]
+====
+Durante a execução do EIB, a imagem base original *não* é modificada; uma versão nova e personalizada é criada com a configuração desejada na raiz do diretório de configuração do EIB.
+====
+
+O diretório de configuração neste ponto deve estar assim:
+
+[,console]
+----
+└── base-images/
+    └── slemicro.iso
+----
+
+[#quickstart-eib-definition-file]
+== Criando o arquivo de definição de imagem
+
+O arquivo de definição descreve a maioria das opções configuráveis que o Edge Image Builder suporta; um exemplo completo de opções pode ser encontrado {link-eib-full-example}[aqui], e recomendamos que você dê uma olhada no {link-eib-building-images}[guia de construção de imagens upstream] para exemplos mais abrangentes do que o que vamos analisar abaixo. Vamos começar com um arquivo de definição muito básico para nossa imagem de SO:
+
+[,console,subs="attributes,specialchars"]
+----
+cat << EOF > $CONFIG_DIR/iso-definition.yaml
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+EOF
+----
+
+Esta definição especifica que estamos gerando uma imagem de saída para um sistema baseado em {x86-64}. A imagem que será usada como base para modificações posteriores é uma imagem `iso` chamada `slemicro.iso`, esperada para estar localizada em `$CONFIG_DIR/base-images/slemicro.iso`. Ela também descreve que, após o EIB terminar de modificar a imagem, a imagem de saída será nomeada `eib-image.iso` e, por padrão, residirá em `$CONFIG_DIR`.
+
+Agora, nossa estrutura de diretórios deve estar assim:
+[,console]
+----
+├── iso-definition.yaml
+└── base-images/
+    └── slemicro.iso
+----
+
+Nas seções a seguir, percorreremos alguns exemplos de operações comuns:
+
+=== Configurando o Sistema Operacional (SO)
+
+A seção `operatingSystem` do EIB destina-se a configurar onde o sistema operacional será instalado, o tamanho da imagem, etc.
+É uma seção opcional e não deve ser incluída, a menos que uma ou mais personalizações estejam sendo aplicadas.
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-Base-RT-SelfInstall.iso
+operatingSystem:
+  isoConfiguration:
+    installDevice: /dev/disk/by-id/ata-QEMU_HARDDISK_111-disk1 # first defined disk
+----
+
+.Configuração específica do tipo
+
+Dependendo do tipo de imagem que está sendo personalizada, uma das seguintes seções opcionais pode ser incluída.
+
+* `isoConfiguration` - Opcional; a configuração nesta seção aplica-se apenas à imagem ISO.
+  * `installDevice` - Opcional; especifica o disco que deve ser usado como dispositivo de instalação. Este precisa ser um dispositivo de bloco e, por padrão, apagará automaticamente quaisquer dados encontrados no disco.
+  Além disso, especificar este atributo aciona uma substituição do GRUB para instalar automaticamente o sistema operacional em vez de solicitar ao usuário que inicie a instalação, permitindo uma instalação totalmente autônoma e automatizada. Se omitido, o usuário é solicitado a selecionar a opção \"Install\" no menu do GRUB, além de ter que selecionar o disco de instalação e confirmar que o dispositivo será apagado no processo.
++
+[NOTE]
+====
+O dispositivo sendo usado na seção `installDevice` pode ser especificado como `/dev/sda` ou usando a nomenclatura `/dev/disk/by-id`, `/dev/disk/by-path` para garantir que o dispositivo correto esteja sendo usado.
+Se estiver usando VMs libvirt, o valor do atributo `serial` pode ser especificado ao criar um disco para a VM (por exemplo, `serial=111-disk1`) para que possa ser usado no valor `installDevice` com a nomenclatura `by-id`, como por exemplo `/dev/disk/by-id/ata-QEMU_HARDDISK_111-disk1` se estiver usando dispositivos ATA (`libvirt` prefixa automaticamente o ID com `ata-QEMU_HARDDISK_` para dispositivos ATA, ou `virtio-` para dispositivos virtio, veja https://github.com/systemd/systemd/issues/17670#issuecomment-731261739[#17670 virtio issue] para mais informações). 
+====
+* `rawConfiguration` - Opcional; a configuração nesta seção aplica-se apenas a imagens RAW.
+  * `diskSize` - Opcional; define o tamanho desejado da imagem de disco bruta para o qual o EIB redimensionará a imagem resultante. Isso é importante para garantir que sua imagem de disco seja grande o suficiente para acomodar quaisquer artefatos sendo incorporados na imagem. É aconselhável definir isso como um valor ligeiramente menor que o tamanho do seu cartão SD (ou dispositivo de bloco, se estiver gravando diretamente em um disco), pois o sistema expandirá automaticamente no momento da inicialização para preencher o tamanho do dispositivo de bloco. Isso é opcional, mas altamente recomendado. Especifique como um número inteiro com \"M\" (Megabyte), \"G\" (Gigabyte) ou \"T\" (Terabyte) como sufixo (por exemplo, "32G").
+  * `luksKey` - Obrigatório para imagens criptografadas; a chave LUKS fornecida para uma imagem RAW criptografada, que é necessária para que o EIB possa concluir o processo de construção.
+  * `expandEncryptedPartition` - Opcional; desativado por padrão, quando ativado, expande automaticamente a partição criptografada para seu tamanho máximo. Por exemplo, se `diskSize` for `25G` e este campo for `true`, o EIB expandirá a partição criptografada para `25G` durante o processo de compilação.
+
+[#configuring-os-users]
+=== Configurando usuários do SO
+
+O EIB permite que você pré-configure usuários com informações de login, como senhas ou chaves SSH, incluindo a definição de uma senha de root fixa. Como parte deste exemplo, vamos definir a senha de root, e o primeiro passo é usar `OpenSSL` para criar uma senha criptografada de mão única:
+
+[,console]
+----
+openssl passwd -6 SecurePassword
+----
+
+Isso gerará algo semelhante a:
+
+[,console]
+----
+$6$G392FCbxVgn[...]Y7zTXnC1
+----
+
+Podemos então adicionar uma seção no arquivo de definição chamada `operatingSystem` com uma matriz `users` dentro dela. O arquivo resultante deve ter a seguinte aparência:
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$G392FCbxVgn[...]Y7zTXnC1
+----
+
+[NOTE]
+====
+Também é possível adicionar usuários adicionais, criar os diretórios home, definir IDs de usuário, adicionar autenticação por chave SSH e modificar informações de grupo. Consulte o {link-eib-building-images}[guia de criação de imagens upstream] para obter mais exemplos.
+====
+
+[#configuring-os-time]
+=== Configurando o horário do SO
+
+A seção `time` é opcional, mas é altamente recomendável que seja configurada para evitar possíveis problemas com certificados e desvio de relógio. O EIB configurará o chronyd e o `/etc/localtime` dependendo dos parâmetros aqui.
+
+[,console]
+----
+operatingSystem:
+  time:
+    timezone: Europe/London
+    ntp:
+      forceWait: true
+      pools:
+        - 2.suse.pool.ntp.org
+      servers:
+        - 10.0.0.1
+        - 10.0.0.2
+----
+
+* O `timezone` especifica o fuso horário no formato "Região/Localidade" (por exemplo, "Europe/London"). A lista completa pode ser encontrada executando `timedatectl list-timezones` em um sistema Linux.
+* ntp - Define atributos relacionados à configuração do NTP (usando chronyd):
+  * forceWait - Solicita que o chronyd tente sincronizar as fontes de tempo antes de iniciar outros serviços, com um tempo limite de 180s.
+  * pools - Especifica uma lista de pools que o chronyd usará como fontes de dados (usando `iburst` para melhorar o tempo necessário para a sincronização inicial).
+  * servers - Especifica uma lista de servidores que o chronyd usará como fontes de dados (usando `iburst` para melhorar o tempo necessário para a sincronização inicial).
+
+[NOTE]
+====
+Os valores fornecidos neste exemplo são apenas para fins ilustrativos. Por favor, ajuste-os para atender aos seus requisitos específicos.
+====
+
+[#adding-certificates]
+=== Adicionando certificados
+
+Arquivos de certificado com a extensão ".pem" ou ".crt" armazenados no diretório `certificates` serão instalados no armazenamento de certificados de todo o sistema do nó:
+
+[,console]
+----
+.
+├── definition.yaml
+└── certificates
+    ├── my-ca.pem
+    └── my-ca.crt
+----
+
+Consulte o https://documentation.suse.com/smart/security/html/tls-certificates/index.html#tls-adding-new-certificates[guia "Securing Communication with TLS Certificate"] para obter mais informações.
+
+[#adding-operating-system-files]
+=== Adicionando Arquivos de sistema operacional
+
+Os arquivos colocados no diretório `os-files` no diretório de configuração da imagem são copiados automaticamente para o sistema de arquivos da imagem criada. 
+O diretório exato será mantido quando eles forem copiados. 
+Por exemplo, se um arquivo existe em um subdiretório chamado `os-files/etc`, ele é colocado no diretório `/etc` da imagem criada. 
+
+[NOTE]
+====
+Se o diretório `os-files` existir, ele não pode estar vazio. 
+====
+
+[,console]
+----
+.
+├── definition.yaml
+└── os-files
+    └── etc
+        └── ssh
+            └── sshd_config
+----
+
+[#eib-configuring-rpm-packages]
+=== Configurando pacotes RPM
+
+Um dos principais recursos do EIB é fornecer um mecanismo para adicionar pacotes de software adicionais à imagem, para que, quando a instalação for concluída, o sistema seja capaz de aproveitar os pacotes instalados imediatamente. O EIB permite que os usuários especifiquem o seguinte:
+
+* Pacotes por seus nomes dentro de uma lista na definição da imagem
+* Repositórios de rede para pesquisar esses pacotes
+* Credenciais do SUSE Customer Center (SCC) para pesquisar repositórios oficiais da SUSE pelos pacotes listados
+* Por meio de um diretório `$CONFIG_DIR/rpms`, carregue pacotes RPM personalizados que não existem em repositórios de rede
+* Por meio do mesmo diretório (`$CONFIG_DIR/rpms/gpg-keys`), chaves GPG para permitir a validação de pacotes de terceiros
+
+O EIB então executará um processo de resolução de pacotes no momento da criação da imagem, tomando a imagem base como entrada, e tentará baixar e instalar todos os pacotes fornecidos, seja especificados por meio da lista ou fornecidos localmente. O EIB baixa todos os pacotes, incluindo quaisquer dependências, para um repositório que existe dentro da imagem de saída e instrui o sistema a instalá-los durante o processo de primeira inicialização. Realizar esse processo durante a criação da imagem garante que os pacotes sejam instalados com sucesso durante a primeira inicialização na plataforma desejada, por exemplo, o nó na borda. Isso também é vantajoso em ambientes onde você deseja incluir os pacotes adicionais na imagem em vez de baixá-los pela rede durante a operação, por exemplo, para ambientes air-gapped ou com rede restrita.
+
+Como um exemplo simples para demonstrar isso, vamos instalar o pacote RPM `nvidia-container-toolkit` encontrado no repositório NVIDIA suportado por terceiros:
+
+[,yaml]
+----
+  packages:
+    packageList:
+      - nvidia-container-toolkit
+    additionalRepos:
+      - url: https://nvidia.github.io/libnvidia-container/stable/rpm/x86_64
+----
+
+O arquivo de definição resultante parece com o seguinte:
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$G392FCbxVgn[...]Y7zTXnC1
+  packages:
+    packageList:
+      - nvidia-container-toolkit
+    additionalRepos:
+      - url: https://nvidia.github.io/libnvidia-container/stable/rpm/x86_64
+----
+
+O exemplo acima é simples, mas para fins de completude, baixe a chave de assinatura do pacote NVIDIA antes de executar a geração da imagem:
+
+[,bash]
+----
+$ mkdir -p $CONFIG_DIR/rpms/gpg-keys
+$ curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey > $CONFIG_DIR/rpms/gpg-keys/nvidia.gpg
+----
+
+[WARNING]
+====
+Adicionar pacotes RPM adicionais por meio deste método destina-se à adição de componentes de terceiros suportados ou pacotes fornecidos (e mantidos) pelo usuário; este mecanismo não deve ser usado para adicionar pacotes que normalmente não seriam suportados no SUSE Linux Micro. Se este mecanismo for usado para adicionar componentes de repositórios openSUSE (que não são suportados), incluindo de versões ou pacotes de serviço mais recentes, você pode acabar com uma configuração não suportada, especialmente quando a resolução de dependências resulta na substituição de partes principais do sistema operacional, mesmo que o sistema resultante possa parecer funcionar conforme o esperado. Se você não tiver certeza, entre em contato com seu representante SUSE para obter assistência na determinação da capacidade de suporte da configuração desejada.
+====
+
+[NOTE]
+====
+Um guia mais abrangente com exemplos adicionais pode ser encontrado no {link-eib-installing-packages}[guia de instalação de pacotes upstream].
+====
+
+=== Configurando o cluster Kubernetes e as cargas de trabalho do usuário
+
+Outro recurso do EIB é sua capacidade de automatizar a implantação de clusters Kubernetes, tanto de nó único quanto de múltiplos nós altamente disponíveis que se inicializam no local (ou seja, não requerem qualquer forma de infraestrutura de gerenciamento centralizada para coordenação). O principal motivador por trás dessa abordagem são as implantações air-gapped ou ambientes com rede restrita, mas também serve como uma maneira de inicializar rapidamente clusters autônomos, mesmo que o acesso total e irrestrito à rede esteja disponível.
+
+Este método permite não apenas a implantação do sistema operacional personalizado, mas também a capacidade de especificar a configuração do Kubernetes, quaisquer componentes em camadas adicionais via gráficos Helm e quaisquer cargas de trabalho do usuário via manifestos do Kubernetes fornecidos. No entanto, o princípio de design por trás deste método é que partimos do pressuposto de que o usuário deseja operar em ambiente air-gapped. Portanto, quaisquer itens especificados na definição da imagem serão incluídos na imagem, o que inclui cargas de trabalho fornecidas pelo usuário. O EIB garante que quaisquer imagens descobertas que sejam exigidas pelas definições sejam copiadas localmente e servidas pelo registro de imagem incorporado no sistema implantado resultante.
+
+Neste próximo exemplo, vamos utilizar nossa definição de imagem existente e especificar uma configuração do Kubernetes (neste exemplo, como ela não lista os sistemas e suas funções, assumimos por padrão que se trata de um nó único), o que instruirá o EIB a provisionar um cluster Kubernetes RKE2 de nó único. Para demonstrar a automação na implantação tanto de cargas de trabalho fornecidas pelo usuário (via manifesto) quanto de componentes em camadas (via Helm), vamos instalar o KubeVirt utilizando o chart Helm {product}, assim como o NGINX por meio de um manifesto do Kubernetes. A configuração adicional que precisamos anexar à definição de imagem existente é a seguinte:
+
+[,yaml,subs="attributes"]
+----
+kubernetes:
+  version: {version-kubernetes-rke2}
+  manifests:
+    urls:
+      - https://k8s.io/examples/application/nginx-app.yaml
+  helm:
+    charts:
+      - name: kubevirt
+        version: {version-kubevirt-chart}
+        repositoryName: suse-edge
+    repositories:
+      - name: suse-edge
+        url: oci://registry.suse.com/edge/charts
+----
+
+O arquivo de definição completo resultante deve agora ter a seguinte aparência:
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: iso
+  arch: x86_64
+  baseImage: slemicro.iso
+  outputImageName: eib-image.iso
+operatingSystem:
+  users:
+    - username: root
+      encryptedPassword: $6$G392FCbxVgn[...]Y7zTXnC1
+  packages:
+    packageList:
+      - nvidia-container-toolkit
+    additionalRepos:
+      - url: https://nvidia.github.io/libnvidia-container/stable/rpm/x86_64
+kubernetes:
+  version: {version-kubernetes-k3s}
+  manifests:
+    urls:
+      - https://k8s.io/examples/application/nginx-app.yaml
+  helm:
+    charts:
+      - name: kubevirt
+        version: {version-kubevirt-chart}
+        repositoryName: suse-edge
+    repositories:
+      - name: suse-edge
+        url: oci://registry.suse.com/edge/charts
+----
+
+[NOTE]
+====
+Outros exemplos de opções, como implantações de vários nós, rede personalizada e opções/valores de gráfico Helm, podem ser encontrados na {link-eib-building-images}[documentação upstream].
+====
+
+[#quickstart-eib-network]
+=== Configurando a rede
+
+No último exemplo deste guia de início rápido, vamos configurar a rede que será ativada quando um sistema for provisionado com a imagem gerada pelo EIB. É importante entender que, a menos que uma configuração de rede seja fornecida, o modelo padrão é que o DHCP seja usado em todas as interfaces descobertas no momento da inicialização. No entanto, essa nem sempre é uma configuração desejável, especialmente se o DHCP não estiver disponível e você precisar fornecer configurações estáticas, ou se precisar configurar construções de rede mais complexas, por exemplo, bonds, LACP e VLANs, ou precisar substituir certos parâmetros, por exemplo, nomes de host, servidores DNS e rotas.
+
+O EIB oferece a capacidade de fornecer configurações por nó (onde o sistema em questão é identificado exclusivamente pelo seu endereço MAC), ou uma substituição para fornecer uma configuração idêntica a cada máquina, o que é mais útil quando os endereços MAC do sistema não são conhecidos. Uma ferramenta adicional é usada pelo EIB chamada Network Manager Configurator, ou `nmc` para abreviar, que é uma ferramenta criada pela equipe {product} para permitir que configurações de rede personalizadas sejam aplicadas com base no esquema de rede declarativo https://nmstate.io/[nmstate.io] e, no momento da inicialização, identificará o nó no qual está inicializando e aplicará a configuração de rede desejada antes que quaisquer serviços sejam iniciados.
+
+Agora aplicaremos uma configuração de rede estática para um sistema com uma única interface descrevendo o estado de rede desejado em um arquivo específico do nó (com base no nome de host desejado) no diretório `network` necessário:
+
+[,console]
+----
+mkdir $CONFIG_DIR/network
+
+cat << EOF > $CONFIG_DIR/network/host1.local.yaml
+routes:
+  config:
+  - destination: 0.0.0.0/0
+    metric: 100
+    next-hop-address: 192.168.122.1
+    next-hop-interface: eth0
+    table-id: 254
+  - destination: 192.168.122.0/24
+    metric: 100
+    next-hop-address: 192.168.122.1
+    next-hop-interface: eth0
+    table-id: 254
+dns-resolver:
+  config:
+    server:
+    - 192.168.122.1
+    - 8.8.8.8
+interfaces:
+- name: eth0
+  type: ethernet
+  state: up
+  mac-address: 34:8A:B1:4B:16:E7
+  ipv4:
+    address:
+    - ip: 192.168.122.50
+      prefix-length: 24
+    dhcp: false
+    enabled: true
+  ipv6:
+    enabled: false
+EOF
+----
+
+[WARNING]
+====
+O exemplo acima está configurado para a sub-rede `192.168.122.0/24` padrão, assumindo que o teste está sendo executado em uma máquina virtual. Por favor, adapte-o para o seu ambiente, não se esquecendo do endereço MAC. Como a mesma imagem pode ser usada para provisionar vários nós, a rede configurada pelo EIB (via `nmc`) depende de sua capacidade de identificar exclusivamente o nó pelo seu endereço MAC e, portanto, durante a inicialização, o `nmc` aplicará a configuração de rede correta a cada máquina. Isso significa que você precisará saber os endereços MAC dos sistemas nos quais deseja instalar. Alternativamente, o comportamento padrão é confiar no DHCP, mas você pode utilizar o hook `configure-network.sh` para aplicar uma configuração comum a todos os nós. Consulte o <<components-nmc,guia de redes>> para obter mais detalhes.
+====
+
+A estrutura de arquivos resultante deve ser semelhante a:
+
+[,console]
+----
+├── iso-definition.yaml
+├── base-images/
+│   └── slemicro.iso
+└── network/
+    └── host1.local.yaml
+----
+
+A configuração de rede que acabamos de criar será analisada e os arquivos de conexão do NetworkManager necessários serão gerados automaticamente e inseridos na nova imagem de instalação que o EIB criará. Esses arquivos serão aplicados durante o provisionamento do host, resultando em uma configuração de rede completa.
+
+[NOTE]
+====
+Consulte o <<components-nmc,componente Edge Networking>> para obter uma explicação mais abrangente da configuração acima e exemplos desse recurso.
+====
+
+[#eib-how-to-build-image]
+== Criando a imagem
+
+Agora que temos uma imagem base e uma definição de imagem para o EIB consumir, vamos prosseguir e criar a imagem. Para isso, usamos simplesmente o `podman` para chamar o contêiner do EIB com o comando \"build\", especificando o arquivo de definição:
+
+[,bash,subs="attributes"]
+----
+podman run --rm -it --privileged -v $CONFIG_DIR:/eib \
+registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} \
+build --definition-file iso-definition.yaml
+----
+
+A saída do comando deve ser semelhante a:
+
+[,console]
+----
+Setting up Podman API listener...
+Downloading file: dl-manifest-1.yaml 100% (498/498 B, 9.5 MB/s)
+Pulling selected Helm charts... 100% (1/1, 43 it/min)
+Generating image customization components...
+Identifier ................... [SUCCESS]
+Custom Files ................. [SKIPPED]
+Time ......................... [SKIPPED]
+Network ...................... [SUCCESS]
+Groups ....................... [SKIPPED]
+Users ........................ [SUCCESS]
+Proxy ........................ [SKIPPED]
+Resolving package dependencies...
+Rpm .......................... [SUCCESS]
+Os Files ..................... [SKIPPED]
+Systemd ...................... [SKIPPED]
+Fips ......................... [SKIPPED]
+Elemental .................... [SKIPPED]
+Suma ......................... [SKIPPED]
+Populating Embedded Artifact Registry... 100% (3/3, 10 it/min)
+Embedded Artifact Registry ... [SUCCESS]
+Keymap ....................... [SUCCESS]
+Configuring Kubernetes component...
+The Kubernetes CNI is not explicitly set, defaulting to 'cilium'.
+Downloading file: rke2_installer.sh
+Downloading file: rke2-images-core.linux-amd64.tar.zst 100% (657/657 MB, 48 MB/s)
+Downloading file: rke2-images-cilium.linux-amd64.tar.zst 100% (368/368 MB, 48 MB/s)
+Downloading file: rke2.linux-amd64.tar.gz 100% (35/35 MB, 50 MB/s)
+Downloading file: sha256sum-amd64.txt 100% (4.3/4.3 kB, 6.2 MB/s)
+Kubernetes ................... [SUCCESS]
+Certificates ................. [SKIPPED]
+Cleanup ...................... [SKIPPED]
+Building ISO image...
+Kernel Params ................ [SKIPPED]
+Build complete, the image can be found at: eib-image.iso
+----
+
+A imagem ISO criada é armazenada em `$CONFIG_DIR/eib-image.iso`:
+
+[,console]
+----
+├── iso-definition.yaml
+├── eib-image.iso
+├── _build
+│   └── cache/
+│       └── ...
+│   └── build-<timestamp>/
+│       └── ...
+├── base-images/
+│   └── slemicro.iso
+└── network/
+    └── host1.local.yaml
+----
+
+Cada compilação cria uma pasta com carimbo de data/hora em `$CONFIG_DIR/_build/` que inclui os logs da compilação, os artefatos usados durante a compilação, e os diretórios `combustion` e `artefacts`, que contêm todos os scripts e artefatos que são adicionados à imagem CRB.
+
+O conteúdo deste diretório deve ser semelhante a:
+[,console]
+----
+├── build-<timestamp>/
+│   │── combustion/
+│   │   ├── 05-configure-network.sh
+│   │   ├── 10-rpm-install.sh
+│   │   ├── 12-keymap-setup.sh
+│   │   ├── 13b-add-users.sh
+│   │   ├── 20-k8s-install.sh
+│   │   ├── 26-embedded-registry.sh
+│   │   ├── 48-message.sh
+│   │   ├── network/
+│   │   │   ├── host1.local/
+│   │   │   │   └── eth0.nmconnection
+│   │   │   └── host_config.yaml
+│   │   ├── nmc
+│   │   └── script
+│   │── artefacts/
+│   │   │── registry/
+│   │   │   ├── hauler
+│   │   │   ├── nginx:<version>-registry.tar.zst
+│   │   │   ├── rancher_kubectl:<version>-registry.tar.zst
+│   │   │   └── registry.suse.com_suse_sles_15.6_virt-operator:<version>-registry.tar.zst
+│   │   │── rpms/
+│   │   │   └── rpm-repo
+│   │   │       ├── addrepo0
+│   │   │       │   ├── nvidia-container-toolkit-<version>.rpm
+│   │   │       │   ├── nvidia-container-toolkit-base-<version>.rpm
+│   │   │       │   ├── libnvidia-container1-<version>.rpm
+│   │   │       │   └── libnvidia-container-tools-<version>.rpm
+│   │   │       ├── repodata
+│   │   │       │   ├── ...
+│   │   │       └── zypper-success
+│   │   └── kubernetes/
+│   │       ├── rke2_installer.sh
+│   │       ├── registries.yaml
+│   │       ├── server.yaml
+│   │       ├── images/
+│   │       │   ├── rke2-images-cilium.linux-amd64.tar.zst
+│   │       │   └── rke2-images-core.linux-amd64.tar.zst
+│   │       ├── install/
+│   │       │   ├── rke2.linux-amd64.tar.gz
+│   │       │   └── sha256sum-amd64.txt
+│   │       └── manifests/
+│   │           ├── dl-manifest-1.yaml
+│   │           └── kubevirt.yaml
+│   ├── createrepo.log
+│   ├── eib-build.log
+│   ├── embedded-registry.log
+│   ├── helm
+│   │   └── kubevirt
+│   │       └── kubevirt-0.4.0.tgz
+│   ├── helm-pull.log
+│   ├── helm-template.log
+│   ├── iso-build.log
+│   ├── iso-build.sh
+│   ├── iso-extract
+│   │   └── ...
+│   ├── iso-extract.log
+│   ├── iso-extract.sh
+│   ├── modify-raw-image.sh
+│   ├── network-config.log
+│   ├── podman-image-build.log
+│   ├── podman-system-service.log
+│   ├── prepare-resolver-base-tarball-image.log
+│   ├── prepare-resolver-base-tarball-image.sh
+│   ├── raw-build.log
+│   ├── raw-extract
+│   │   └── ...
+│   └── resolver-image-build
+│       └──...
+└── cache
+    └── ...
+----
+
+Se a compilação falhar, `eib-build.log` é o primeiro log que contém informações. A partir daí, ele o direcionará para o componente que falhou para depuração.
+
+Neste ponto, você deve ter uma imagem pronta para uso que irá:
+
+1. Implantar o SUSE Linux Micro {version-operatingsystem}
+2. Configurar a senha de root
+3. Instale o pacote `nvidia-container-toolkit`
+4. Configure um registro de contêiner incorporado para servir conteúdo localmente
+5. Instale o RKE2 de nó único
+6. Configure a rede estática
+7. Instale o KubeVirt
+8. Implante um manifesto fornecido pelo usuário
+
+[#quickstart-eib-image-debug]
+== Depuração do processo de criação de imagem
+
+Se o processo de criação de imagem falhar, consulte o {link-eib-debugging}[guia de depuração upstream].
+
+[#quickstart-eib-image-test]
+== Testando sua imagem recém-criada
+
+Para obter instruções sobre como testar a imagem CRB recém-criada, consulte o {link-eib-testing}[guia de teste de imagem upstream].

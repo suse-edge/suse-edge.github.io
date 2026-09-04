@@ -1,0 +1,65 @@
+[#troubleshooting-edge-networking]
+== 故障排除 Edge 网络 (NMC)
+:revdate: 2025-06-17
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+NMC 被注入到 SL Micro EIB 镜像中，以便在引导时通过 combustion 配置 Edge 主机的网络。它也作为检查过程的一部分在 Metal3 工作流中执行。当主机首次引导或在 Metal3 检查过程中可能会出现问题。
+
+.常见问题
+
+* *主机首次无法正常引导*:格式错误的网络定义文件可能导致 combustion 阶段失败，随后主机会进入 root shell。
+* *文件未正确生成*:确保网络文件符合 https://nmstate.io/examples.html[NMState] 格式。
+* *网络接口未正确配置*:确保 MAC 地址与主机上使用的接口匹配。
+* *接口名称不匹配*:SL Micro 默认启用 https://documentation.suse.com/smart/network/html/network-interface-predictable-naming/index.html[网络接口的可预测命名方案]，因此不再有 `eth0`，而是使用诸如 `enp2s0` 之类的其他命名方案。
+
+.日志
+
+* *Combustion 日志*:由于 nmc 在 combustion 阶段使用，请在正在配置的主机上使用 `journalctl -u combustion` 检查 combustion 日志。
+ifeval::["{flavor}" == "telco"]
+* *NetworkManager 日志*:在 Metal^3^ 部署工作流中，nmc 是 IPA 执行的一部分，并且作为 NetworkManager 服务的一个依赖项，使用 systemd 的 ExecStartPre 功能来执行。以 `journalctl -u NetworkManager` 身份检查 IPA 主机上的 NetworkManager 日志（请参阅 <<troubleshooting-directed-network-provisioning,故障排除定向网络配置>> 一节，了解如何访问使用 IPA 引导的主机）。
+endif::[]
+
+.故障排除步骤
+
+. *验证 yaml 语法*: nmc 配置文件是 yaml 文件，请使用 `yamllint` 或类似工具检查语法是否正确。
+. *手动运行 nmc*:由于 nmc 是 EIB 容器的一部分，若要调试任何问题，可以使用本地 podman 命令。
+.. 创建一个临时文件夹来存储 nmc 文件。
++
+[,bash]
+----
+mkdir -p ${HOME}/tmp/foo
+----
+
+.. 将 nmc 文件保存在该位置。
++
+[,bash]
+----
+❯ tree --noreport ${HOME}/tmp/foo
+/Users/johndoe/tmp/foo
+├── host1.example.com.yaml
+└── host2.example.com.yaml
+----
+.. 运行以 nmc 为入口点并带有 generate 命令的 EIB 容器，以执行 nmc 在 combustion 阶段会执行的相同任务：
++
+[,bash,subs="attributes"]
+----
+podman run -it --rm -v $\{HOME\}/tmp/foo:/tmp/foo:Z --entrypoint=/usr/bin/nmc registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} generate --config-dir /tmp/foo --output-dir /tmp/foo/
+
+[2025-06-04T11:58:37Z INFO  nmc::generate_conf] Generating config from "/tmp/foo/host2.example.com.yaml"...
+[2025-06-04T11:58:37Z INFO  nmc::generate_conf] Generating config from "/tmp/foo/host1.example.com.yaml"...
+[2025-06-04T11:58:37Z INFO  nmc] Successfully generated and stored network config
+----
+
+.. 观察在临时文件夹中生成的日志和文件。
+

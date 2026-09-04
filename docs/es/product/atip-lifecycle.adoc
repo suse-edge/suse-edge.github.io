@@ -1,0 +1,311 @@
+[#atip-lifecycle]
+= Acciones del ciclo de vida
+:revdate: 2025-10-17
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Esta sección cubre las acciones de gestión del ciclo de vida para clústeres desplegados a través de SUSE Telco Cloud.
+
+[#load-balancer-exclusion]
+== Exclusión del equilibrador de carga
+Existen muchas acciones del ciclo de vida que requieren que los nodos sean vaciados. Durante el proceso de vaciado, todos los pods se moverán a otros nodos del clúster. Una vez finalizado el proceso de vaciado, el nodo no aloja ningún servicio y, por tanto, no debería recibir tráfico dirigido a él. Los equilibradores de carga, como MetalLB, pueden ser informados de esto aplicando una etiqueta al nodo:
+
+
+[,yaml]
+----
+node.kubernetes.io/exclude-from-external-load-balancers: "true"
+----
+Para obtener más detalles, consulte: https://kubernetes.io/docs/reference/labels-annotations-taints/#node-kubernetes-io-exclude-from-external-load-balancers[Documentación de Kubernetes].
+
+Para ver las etiquetas en todos vuestros nodos de un clúster, podéis ejecutar:
+[,shell]
+----
+kubectl get nodes -o json | jq -r '.items[].metadata | .name, .labels'
+----
+
+En el caso de actualizaciones de clústeres descendentes, esto se puede automatizar añadiendo una anotación al RKE2ControlPlane en el clúster de gestión:
+
+[,yaml]
+----
+rke2.controlplane.cluster.x-k8s.io/load-balancer-exclusion="true"
+----
+
+Esto crea inmediatamente una anotación en todos los objetos de máquina del clúster de gestión para ese RKE2ControlPlane.
+[,yaml]
+----
+pre-drain.delete.hook.machine.cluster.x-k8s.io/rke2-lb-exclusion: ""
+----
+Con esta anotación en los objetos de máquina, cualquier nodo del clúster descendente que esté programado para ser vaciado recibirá la etiqueta de nodo mencionada anteriormente antes de que comience el proceso de vaciado. La etiqueta se eliminará del nodo una vez que esté disponible y listo de nuevo.
+
+== Actualizaciones del clúster de gestión
+
+La actualización del clúster de gestión se describe en la documentación del `Day 2` <<day2-mgmt-cluster,clúster de gestión>>.
+
+[#atip-lifecycle-downstream]
+== Actualizaciones de clústeres descendentes
+
+La actualización de los clústeres descendentes implica actualizar varios componentes. Las siguientes secciones cubren el proceso de actualización para cada uno de los componentes.
+
+*Actualización del sistema operativo*
+
+Para este proceso, consultad la siguiente <<eib-edge-image-connected,referencia>> para crear la nueva imagen con una nueva versión del sistema operativo.
+Con esta nueva imagen generada por `EIB`, la siguiente fase de aprovisionamiento utiliza la nueva versión del sistema operativo proporcionada.
+En el siguiente paso, se utiliza la nueva imagen para actualizar los nodos.
+
+*Actualización del clúster RKE2*
+
+Los cambios necesarios para actualizar el clúster `RKE2` mediante el flujo de trabajo automatizado son los siguientes:
+
+* Cambiad el bloque `RKE2ControlPlane` en el `capi-provisioning-example.yaml` que se muestra en la siguiente <<single-node-provision,sección>>:
+
+  ** Especificad la `rolloutStrategy` deseada.
+  ** Cambiad la versión del clúster `RKE2` a la nueva versión sustituyendo `$\{RKE2_NEW_VERSION\}`.
+  ** Decida si se debe implementar un controlador de entrada en el clúster descendente:
+  *** [Opción 0]: No despleguéis ningún controlador de entrada
+  *** [Opción 1]: Desplegad solo `Traefik`
+  *** [Opción 2]: Desplegad tanto `Ingress-NGINX` como `Traefik` (para su uso en escenarios complejos de migración de entrada)
+
+[NOTE]
+====
+El proveedor de entrada `Traefik` integrado en RKE2/K3s es el único controlador de entrada admitido en la versión `{product} {version}`, siendo todavía posible ejecutar temporalmente `Ingress-NGINX` junto con `Traefik` para admitir escenarios complejos de migración de entrada, pero solo después de que los clústeres de gestión y/o descendentes `{product}` se hayan actualizado a la versión `{version}` y durante el tiempo necesario para realizar dicha migración. Dado que `Traefik` aún no es el controlador de entrada predeterminado en RKE2 (lo será a partir de RKE2 v1.36), debe «solicitarse» explícitamente desde el archivo de configuración del servidor RKE2.
+
+La guía de migración de https://docs.rke2.io/reference/ingress_migration[Ingress NGINX a Traefik] de RKE2 proporciona detalles sobre las rutas de migración de ingress disponibles una vez que el controlador de ingress `Traefik` sustituya al `Ingress-NGINX` discontinuado.
+====
+
+[,yaml]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  version: ${RKE2_NEW_VERSION}
+  replicas: 1
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  serverConfig:
+    cni: cilium
+  #===========================================================================
+  # Uncomment the following lines if selecting [Option 0]: Do not deploy
+  # any ingress controller
+  #===========================================================================
+    #disableComponents:
+    #  pluginComponents:
+    #  - "rke2-ingress-nginx"
+  #---------------------------------------------------------------------------
+  rolloutStrategy:
+    rollingUpdate:
+      maxSurge: 0
+  registrationMethod: "control-plane-endpoint"
+  agentConfig:
+    format: ignition
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+          - name: rke2-preinstall.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-preinstall
+              Wants=network-online.target
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+              ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStartPost=/bin/sh -c "umount /mnt"
+              [Install]
+              WantedBy=multi-user.target
+          # rke2-ingress-deployment.service unit
+          - name: rke2-ingress-deployment.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-ingress-deployment
+              Wants=rke2-preinstall.service
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              #===============================================================================================================================
+              # Leave one (and only one) of the two following ExecStart lines uncommented, depending on the desired ingress-controller(s):
+              #   [Option 1]: Deploy only "Traefik"
+              #   [Option 2]: Deploy both "Ingress-NGINX" and "Traefik"
+              #
+              # Keep both commented ONLY in case of seleting [Option 0]: "Do not deploy any ingress controller"
+              #===============================================================================================================================
+              #ExecStart=/bin/sh -c "echo \"ingress-controller: traefik\" >> /etc/rancher/rke2/config.yaml"                       # [Option 1]
+              ExecStart=/bin/sh -c "echo -e \"ingress-controller:\n- ingress-nginx\n- traefik\" >> /etc/rancher/rke2/config.yaml" # [Option 2]
+              #-------------------------------------------------------------------------------------------------------------------------------
+              [Install]
+              WantedBy=multi-user.target
+        storage:
+          directories:
+          - path: /var/lib/rancher/rke2/server/manifests
+            overwrite: true
+          files:
+          #############################################################################
+          # if [Option 2]: "Deploy both `Ingress-NGINX` and `Traefik`" is selected
+          #############################################################################
+          - path: /var/lib/rancher/rke2/server/manifests/rke2-ingress-nginx-config.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChartConfig
+                metadata:
+                  name: rke2-ingress-nginx
+                  namespace: kube-system
+                spec:
+                  valuesContent: |-
+                    controller:
+                      hostPort:
+                        enabled: false  # not needed when exposing through a type:LoadBalancer service
+                      config:
+                        use-forwarded-headers: "true"
+                        enable-real-ip: "true"
+                      publishService:
+                        enabled: true
+                      service:
+                        enabled: true
+                        type: LoadBalancer
+                        externalTrafficPolicy: Local
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
+          #############################################################################
+          # if [Option 1]: "Deploy only `Traefik`" OR  [Option 2]: "Deploy both
+          #`Ingress-NGINX` and `Traefik`" is selected
+          #############################################################################
+          - path: /var/lib/rancher/rke2/server/manifests/rke2-traefik-config.yaml
+            overwrite: true
+            contents:
+              inline: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChartConfig
+                metadata:
+                  name: rke2-traefik
+                  namespace: kube-system
+                spec:
+                  valuesContent: |-
+                    ingressClass:
+                      isDefaultClass: false  # Assumes [Option 2]; set to true if [Option 1]: "only deploying `Traefik`"
+                    ports:
+                      web:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 80
+                      websecure:
+                        hostPort: null    # disallow hostPort
+                        exposedPort: 443
+                    service:
+                      enabled: true
+                      type: LoadBalancer
+                      spec:
+                        externalTrafficPolicy: Local
+                        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+                    providers:
+                      kubernetesIngressNginx:  # this provider allows Traefik to "understand" most of the Ingress-NGINX annotations
+                        enabled: true
+                        ingressClass: "rke2-ingress-nginx-migration"
+                        controllerClass: "rke2.​cattle.​io/ingress-nginx-migration"
+            mode: 0644
+            user:
+              name: root
+            group:
+              name: root
+    kubelet:
+      extraArgs:
+      - provider-id=metal3://BAREMETALHOST_UUID
+    nodeName: "localhost.localdomain"
+----
+
+* Cambiad el bloque `Metal3MachineTemplate` en el `capi-provisioning-example.yaml` que se muestra en la siguiente <<single-node-provision,sección>>:
+
+  ** Cambiad el nombre de la imagen y la suma de comprobación por la nueva versión generada en el paso anterior.
+  ** Añadid la directiva `nodeReuse` a `true` para evitar la creación de un nuevo nodo.
+  ** Añadid la directiva `automatedCleaningMode` a `metadata` para habilitar la limpieza automatizada del nodo.
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: single-node-cluster-controlplane
+  namespace: default
+spec:
+  nodeReuse: True
+  template:
+    spec:
+      automatedCleaningMode: metadata
+      dataTemplate:
+        name: single-node-cluster-controlplane-template
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+      image:
+        checksum: http://imagecache.local:8080/${NEW_IMAGE_GENERATED}.sha256
+        checksumType: sha256
+        format: raw
+        url: http://imagecache.local:8080/${NEW_IMAGE_GENERATED}.raw
+----
+
+Antes de aplicar el archivo `capi-provisioning-example.yaml`, siempre es una buena práctica informar a los equilibradores de carga externos (p. ej., MetalLB) de que los nodos se están vaciando para que no dirijan tráfico a los nodos en este estado. Como se menciona en la sección <<load-balancer-exclusion>>, podéis automatizar esto anotando el RKE2ControlPlane en el clúster de gestión. En este ejemplo, se anota un objeto RKE2ControlPlane llamado multinode-cluster:
+
+[,shell]
+----
+kubectl annotate  RKE2ControlPlane/multinode-cluster  rke2.controlplane.cluster.x-k8s.io/load-balancer-exclusion="true"
+----
+
+Verificad que los objetos de máquina se hayan anotado: 
+
+[,yaml]
+----
+pre-drain.delete.hook.machine.cluster.x-k8s.io/rke2-lb-exclusion: ""
+----
+Obtened las anotaciones de todos vuestros objetos de máquina:
+
+[,shell]
+----
+kubectl get machines -o json | jq -r '.items[].metadata | .name, .annotations'
+----
+
+[NOTE]
+====
+Sin estas anotaciones, los usuarios podrían experimentar tiempos de respuesta más largos en los servicios, ya que los equilibradores de carga no detectan los nodos vaciados.
+====
+
+Tras realizar estos cambios, el archivo `capi-provisioning-example.yaml` puede aplicarse al clúster mediante el siguiente comando:
+
+[,shell]
+----
+kubectl apply -f capi-provisioning-example.yaml
+----
+

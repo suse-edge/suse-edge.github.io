@@ -1,0 +1,96 @@
+[#atip-concept-architecture]
+= Conceito e arquitetura
+:revdate: 2026-05-27
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+O SUSE Telco Cloud é uma plataforma projetada para hospedar aplicativos modernos, nativos de nuvem, de telecomunicações em escala, do núcleo à borda.
+
+Esta página explica a arquitetura e os componentes usados no SUSE Telco Cloud.
+
+[#atip-architecture]
+== Arquitetura do SUSE Telco Cloud
+
+O diagrama a seguir mostra a arquitetura de alto nível do SUSE Telco Cloud:
+
+image::product-atip-architecture1.png[scaledwidth=100%]
+
+[#atip-components]
+== Componentes
+
+Existem dois blocos diferentes, a pilha de gerenciamento e a pilha de runtime:
+
+* *Pilha de gerenciamento*: Esta é a parte do SUSE Telco Cloud que é usada para gerenciar o provisionamento e o ciclo de vida das pilhas de runtime. Ela contém os seguintes componentes:
+  ** Gerenciamento de múltiplos clusters em ambientes de nuvem pública e privada com <<components-rancher,Rancher>>
+  ** Suporte a bare metal com <<components-metal3,Metal^3^>>, <<components-metallb,MetalLB>> e provedores de infraestrutura `CAPI` (Cluster API)
+  ** Isolamento abrangente de locatários e integrações com `IDP` (Identity Provider)
+  ** Amplo marketplace de integrações e extensões de terceiros
+  ** API neutra em relação ao fornecedor e rico ecossistema de provedores
+  ** Controle as atualizações transacionais do SUSE Linux Micro
+  ** Mecanismo GitOps para gerenciar o ciclo de vida dos clusters usando repositórios Git com <<components-fleet,Fleet>>
+
+* *Pilha de runtime*: Esta é a parte do SUSE Telco Cloud que é usada para executar as cargas de trabalho.
+  ** <<components-rke2,RKE2>> serve como a distribuição Kubernetes leve e com segurança reforçada, otimizada para ambientes de telecomunicações de borda e focados em conformidade.
+  ** (Opcional) <<components-suse-security,SUSE Security>> para habilitar recursos de segurança como verificação de vulnerabilidade de imagem, inspeção profunda de pacotes e controle automático de tráfego intra-cluster.
+  ** (Opcional) Armazenamento em blocos com <<components-suse-storage,SUSE Storage>> para permitir uma maneira simples e fácil de usar uma solução de armazenamento nativa de nuvem.
+  ** Sistema operacional otimizado com <<components-slmicro,SUSE Linux Micro>> para permitir um SO seguro, leve e imutável (sistema de arquivos transacional) para executar contêineres. O SUSE Linux Micro está disponível nas arquiteturas {aarch64} e {x86-64}, e também suporta `Real-Time Kernel` para casos de uso de Telecomunicações e borda.
+
+[#atip-deployment]
+== Modelo de Implantação
+
+O SUSE Telco Cloud segue um modelo de implantação de dois estágios: o cluster de gerenciamento é implantado usando uma imagem gerada pelo <<components-eib,Edge Image Builder>>, e os clusters downstream são provisionados via provisionamento de rede direcionado. Este capítulo fornece uma visão geral deste modelo de implantação, pois é a abordagem recomendada e suportada para ambientes SUSE Telco Cloud.
+
+=== Por que este Modelo de Implantação?
+
+O cluster de gerenciamento é uma implantação única, de local único. O Provisionamento baseado em imagem agrupa todos os componentes em uma única imagem inicializável. Dessa forma, o cluster de gerenciamento inicializará a si mesmo, exigindo complexidade operacional mínima. É a maneira mais simples e direta de colocá-lo em funcionamento.
+
+Clusters downstream, no entanto, são uma história diferente. Em ambientes de telecomunicações, eles são implantados em escala em muitos data centers e locais de borda, muitas vezes sem experiência técnica local disponível. O Provisionamento de Rede Direcionado foi projetado para isso: ele exige que os servidores de destino suportem uma interface de gerenciamento fora de banda, como o Redfish, através da qual o cluster de gerenciamento liga, inspeciona e provisiona remotamente nós bare metal sem qualquer intervenção no local.
+
+Incorporar toda a configuração específica do cluster em uma imagem de inicialização, como o Provisionamento baseado em imagem exigiria, significa que cada variação de local exige uma imagem diferente, e qualquer alteração de configuração requer a reconstrução e redistribuição de imagens em todos os locais. O Provisionamento de Rede Direcionado resolve isso mantendo a imagem do SO genérica e conduzindo toda a configuração específica do cluster, incluindo rede, Kubernetes e perfis de Telecomunicações, a partir do cluster de gerenciamento no momento do provisionamento. Os operadores simplesmente instalam em rack, ligam e conectam o hardware, e o cluster de gerenciamento cuida do resto.
+
+Essa separação também desbloqueia a integração total com GitOps. Como toda a definição do cluster downstream é expressa como manifestos da API de Cluster, ela pode ser armazenada no Git e reconciliada pelo Fleet em todos os locais, tornando as operações de provisionamento, configuração e ciclo de vida totalmente auditáveis e repetíveis sem intervenção manual.
+
+=== Implantação do Cluster de Gerenciamento
+
+Usando o <<components-eib,Edge Image Builder>> para criar uma nova imagem `ISO` com a pilha de gerenciamento incluída. Você pode então usar esta imagem `ISO` para instalar um novo cluster de gerenciamento em VMs ou bare-metal.
+
+image::product-atip-architecture2.png[scaledwidth=100%]
+
+NOTE: Para obter mais informações sobre como implantar um novo cluster de gerenciamento, consulte o <<atip-management-cluster,guia do SUSE Telco Cloud Management Cluster>>.
+
+NOTE: Para obter mais informações sobre como usar o Edge Image Builder, consulte o <<quickstart-eib,guia do Edge Image Builder>>.
+
+
+=== Implantação de um cluster downstream de nó único com perfis de Telco
+
+Assim que tivermos o cluster de gerenciamento em funcionamento, podemos usá-lo para implantar um cluster downstream de nó único com todos os recursos de Telco habilitados e configurados usando o fluxo de trabalho de provisionamento de rede direcionado.
+
+O diagrama a seguir mostra o fluxo de trabalho de alto nível para implantá-lo:
+
+image::product-atip-architecture3.png[scaledwidth=100%]
+
+NOTE: Para obter mais informações sobre como implantar um cluster downstream, consulte o <<atip-automated-provisioning,guia de provisionamento automatizado do SUSE Telco Cloud.>>
+
+NOTE: Para obter mais informações sobre os recursos do Telco, consulte o <<atip-features,guia de recursos do Telco do SUSE Telco Cloud.>>
+
+=== Implantação de um cluster de alta disponibilidade downstream
+
+Assim que tivermos o cluster de gerenciamento em funcionamento, podemos usá-lo para implantar um cluster downstream de alta disponibilidade com o `MetalLB` como balanceador de carga usando o fluxo de trabalho de provisionamento de rede direcionado.
+
+O diagrama a seguir mostra o fluxo de trabalho de alto nível para implantá-lo:
+
+image::product-atip-architecture4.png[scaledwidth=100%]
+
+NOTE: Para obter mais informações sobre como implantar um cluster downstream, consulte o <<atip-automated-provisioning,guia de provisionamento automatizado do SUSE Telco Cloud>>
+
+NOTE: Para obter mais informações sobre o `MetalLB`, consulte <<components-metallb,aqui:>>

@@ -1,0 +1,715 @@
+[#guides-clusterclass-example]
+= ClusterClassを使用してダウンストリームクラスターをデプロイする
+:revdate: 2025-05-20
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+== 概要
+
+Kubernetesクラスターのプロビジョニングは、クラスターコンポーネントの構成に関する深い専門知識を必要とする複雑なタスクです。構成が複雑になるにつれて、あるいは異なるプロバイダーの要求によってプロバイダー固有のリソース定義が多数導入されるにつれて、クラスターの作成は困難に感じられることがあります。
+幸いなことに、Kubernetes Cluster API (CAPI) は、ClusterClassによってさらに強化された、よりエレガントで宣言的なアプローチを提供します。
+この機能はテンプレート駆動型のモデルを導入しており、複雑さをカプセル化し一貫性を促進する再利用可能なクラスタークラスを定義できます。
+
+== ClusterClassとは何ですか？
+
+CAPIプロジェクトは、クラスターインスタンス化のためのテンプレートベースの手法を採用することで、Kubernetesクラスターライフサイクル管理におけるパラダイムシフトとしてClusterClass機能を導入しました。ユーザーはクラスターごとにリソースを個別に定義する代わりに、包括的で再利用可能なブループリントとして機能するClusterClassを定義します。この抽象的な表現はKubernetesクラスターの目的の状態と構成をカプセル化し、定義された仕様に準拠する複数のクラスターを迅速かつ一貫して作成できるようにします。
+この抽象化により構成の負担が軽減され、より管理しやすいデプロイメントマニフェストが実現します。 これは、ワークロードクラスターのコアコンポーネントがクラスレベルで定義されることを意味し、ユーザーはこれらのテンプレートを、クラスタープロビジョニングのために1回または複数回再利用できるKubernetesクラスターのフレーバーとして使用できます。
+ClusterClassの実装は、大規模な従来のCAPI管理に固有の課題に対処するいくつかの重要な利点をもたらします。
+
+* 複雑さとYAMLの冗長性の大幅な削減
+* 最適化されたメンテナンスおよび更新プロセス
+* デプロイメント全体における一貫性と標準化の強化
+* スケーラビリティと自動化機能の向上
+* 宣言的な管理と堅牢なバージョン管理
+
+image::clusterclass-v1beta2.png[scaledwidth=100%]
+
+
+
+== 現在のCAPIプロビジョニングファイルの例
+
+CAPRKE2（コントロールプレーンおよび起動）およびCAPM3（インフラストラクチャ）プロバイダーを活用してCluster API（CAPI）でKubernetesクラスターをデプロイするには、いくつかのカスタムリソースを定義する必要があります。
+これらのリソースは、クラスターとその基盤となるインフラストラクチャの目的の状態を定義し、CAPIがプロビジョニングと管理のライフサイクルをオーケストレーションできるようにします。
+以下のコードスニペットは、コントロールプレーンノードのみでKubernetesクラスターをインスタンス化するために設定する必要があるリソースタイプを示しています。
+
+* **クラスター**:このリソースは、ノード間の通信とサービス検出を制御するネットワークトポロジを含む、高レベルの構成をカプセル化します。さらに、コントロールプレーンの仕様と指定されたインフラストラクチャプロバイダーリソースへの重要なリンクを確立し、それによって希望するクラスタアーキテクチャと、それがプロビジョニングされる基盤となるインフラストラクチャについてCAPIに通知します。
+* **Metal3Cluster**:このリソースは、Metal3固有のインフラストラクチャレベルの属性を定義します。例えば、Kubernetes APIサーバーにアクセスするための外部エンドポイントなどがこれに該当します。
+* **RKE2ControlPlane**:RKE2ControlPlaneリソースは、クラスタのコントロールプレーンノードの特性と動作を定義します。この仕様内では、コントロールプレーンのレプリカの希望数（高可用性と耐障害性を確保するために重要）、特定のKubernetesディストリビューションバージョン（選択したRKE2リリースに準拠）、およびコントロールプレーンコンポーネントへの更新をロールアウトするための戦略といったパラメータが設定されます。さらに、このリソースはクラスター内で使用されるコンテナネットワークインタフェース（CNI）を指定し、エージェント固有の設定の注入を容易にします。多くの場合、コントロールプレーンノード上のRKE2エージェントのシームレスかつ自動化されたプロビジョニングのためにIgnitionが活用されます。
+* **Metal3MachineTemplate**:このリソースは、クラスターのコントロールプレーンノードを構成する個々のコンピューティングインスタンスを作成するためのブループリントとして機能します。
+* **Metal3DataTemplate**:Metal3MachineTemplateを補完するMetal3DataTemplateリソースを使用すると、新しくプロビジョニングされたマシンインスタンスに対して追加のメタデータを指定できます。
++
+
+[,yaml,subs="attributes"]
+----
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  name: emea-spa-cluster-3
+  namespace: emea-spa
+  labels:
+    cluster-api.cattle.io/rancher-auto-import: "true"
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks:
+        - 192.168.0.0/18
+    services:
+      cidrBlocks:
+        - 10.96.0.0/12
+  controlPlaneRef:
+    apiGroup: controlplane.cluster.x-k8s.io
+    kind: RKE2ControlPlane
+    name: emea-spa-cluster-3
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3Cluster
+    name: emea-spa-cluster-3
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3Cluster
+metadata:
+  name: emea-spa-cluster-3
+  namespace: emea-spa
+spec:
+  controlPlaneEndpoint:
+    host: 192.168.122.203
+    port: 6443
+  cloudProviderEnabled: false
+---
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: RKE2ControlPlane
+metadata:
+  name: emea-spa-cluster-3
+  namespace: emea-spa
+spec:
+  machineTemplate:
+    spec:
+      infrastructureRef:
+        apiGroup: infrastructure.cluster.x-k8s.io
+        kind: Metal3MachineTemplate
+        name: emea-spa-cluster-3
+  replicas: 1
+  version: {version-kubernetes-rke2}
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 1
+  registrationMethod: "control-plane-endpoint"
+  registrationAddress: 192.168.122.203
+  serverConfig:
+    cni: cilium
+    cniMultusEnable: true
+    tlsSan:
+      - 192.168.122.203
+      - https://192.168.122.203.sslip.io
+  agentConfig:
+    format: ignition
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        storage:
+          files:
+            - path: /var/lib/rancher/rke2/server/manifests/endpoint-copier-operator.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChart
+                  metadata:
+                    name: endpoint-copier-operator
+                    namespace: kube-system
+                  spec:
+                    chart: oci://registry.suse.com/edge/charts/endpoint-copier-operator
+                    targetNamespace: endpoint-copier-operator
+                    version: {version-endpoint-copier-operator-chart}
+                    createNamespace: true
+            - path: /var/lib/rancher/rke2/server/manifests/metallb.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChart
+                  metadata:
+                    name: metallb
+                    namespace: kube-system
+                  spec:
+                    chart: oci://registry.suse.com/edge/charts/metallb
+                    targetNamespace: metallb-system
+                    version: {version-metallb-chart}
+                    createNamespace: true
+            - path: /var/lib/rancher/rke2/server/manifests/metallb-cr.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: metallb.io/v1beta1
+                  kind: IPAddressPool
+                  metadata:
+                    name: kubernetes-vip-ip-pool
+                    namespace: metallb-system
+                  spec:
+                    addresses:
+                      - 192.168.122.203/32
+                    serviceAllocation:
+                      priority: 100
+                      namespaces:
+                        - default
+                      serviceSelectors:
+                        - matchExpressions:
+                          - {key: "serviceType", operator: In, values: [kubernetes-vip]}
+                  ---
+                  apiVersion: metallb.io/v1beta1
+                  kind: L2Advertisement
+                  metadata:
+                    name: ip-pool-l2-adv
+                    namespace: metallb-system
+                  spec:
+                    ipAddressPools:
+                      - kubernetes-vip-ip-pool
+            - path: /var/lib/rancher/rke2/server/manifests/endpoint-svc.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: v1
+                  kind: Service
+                  metadata:
+                    name: kubernetes-vip
+                    namespace: default
+                    labels:
+                      serviceType: kubernetes-vip
+                  spec:
+                    ports:
+                    - name: rke2-api
+                      port: 9345
+                      protocol: TCP
+                      targetPort: 9345
+                    - name: k8s-api
+                      port: 6443
+                      protocol: TCP
+                      targetPort: 6443
+                    type: LoadBalancer
+        systemd:
+          units:
+            - name: rke2-preinstall.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=rke2-preinstall
+                Wants=network-online.target
+                Before=rke2-install.service
+                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStartPost=/bin/sh -c "umount /mnt"
+                [Install]
+                WantedBy=multi-user.target
+    kubelet:
+      extraArgs:
+      - provider-id=metal3://BAREMETALHOST_UUID
+    nodeName: "localhost.localdomain"
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: emea-spa-cluster-3
+  namespace: emea-spa
+spec:
+  nodeReuse: True
+  template:
+    spec:
+      automatedCleaningMode: metadata
+      dataTemplate:
+        name: emea-spa-cluster-3
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+          deploy-region: emea-spa
+          cluster-type: group-3
+      image:
+        checksum: http://fileserver.local:8080/eibimage-downstream-cluster.raw.sha256
+        checksumType: sha256
+        format: raw
+        url: http://fileserver.local:8080/eibimage-downstream-cluster.raw
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3DataTemplate
+metadata:
+  name: emea-spa-cluster-3
+  namespace: emea-spa
+spec:
+  clusterName: emea-spa-cluster-3
+  metaData:
+    objectNames:
+    - key: name
+      object: machine
+    - key: local-hostname
+      object: machine
+    - key: local_hostname
+      object: machine
+
+----
+
+[NOTE]
+====
+`cluster.x-k8s.io` APIグループの`Cluster` APIオブジェクトにラベル`cluster-api.cattle.io/rancher-auto-import: "true"`を追加すると、Rancherにクラスタがインポートされます（`management.cattle.io` APIグループに対応するRancher `Cluster` APIオブジェクトが作成されます）。
+詳細については、 https://documentation.suse.com/cloudnative/cluster-api/latest/en/user/rancher-cluster-registration.html#_how_to_register_a_capi_cluster_in_rancher_using_turtles_auto_import[Cluster APIドキュメント]を参照してください。
+====
+
+== CAPIプロビジョニングファイルをClusterClassに変換する
+
+=== ClusterClass定義
+
+以下のコードは、特定の種類のKubernetesクラスターを一貫してデプロイするための宣言型テンプレートである、ClusterClassリソースを定義しています。この仕様には、一般的なインフラストラクチャとコントロールプレーンの構成が含まれており、クラスター群全体で効率的なプロビジョニングと統一されたライフサイクル管理を実現します。
+以下のClusterClassの例ではいくつかの変数が定義されており、これらはクラスターのインスタンス化プロセス中に、各クラスターインスタンスに要求された実際の値を使用して置き換えられます。
+例では以下の変数が使用されています。
+
+* `metallbHelmChartVersion`:このオプション変数は、クラスターにデプロイする`MetalLB` Helmチャートのバージョンを指定するために使用します。指定がない場合、`MetalLB` Helmチャートはデプロイされません。
+* `endpointCopierOperatorHelmChartVersion`:このオプション変数は、クラスターにデプロイする`Endpoint Copier Operator` Helmチャートのバージョンを指定するために使用します（`MetalLB` Helmチャートのバージョンも指定されている場合）。指定がない場合、`Endpoint Copier Operator` Helmチャートはデプロイされません。
+* `controlPlaneMachineTemplateImageURL`:この必須変数は、コントロールプレーンマシンをプロビジョニングするために使用するイメージのURLを指定するために使用します。
+* `controlPlaneMachineTemplateHostSelectorDeployRegion`:この必須変数は、コントロールプレーンマシン用の`deploy-region`ホストセレクター値を指定するために使用します。
+* `controlPlaneMachineTemplateHostSelectorClusterType`:この必須変数は、コントロールプレーンマシン用の`cluster-type`ホストセレクター値を指定するために使用します。
+* `controlPlaneMachineTemplateDataTemplateName`:この必須変数は、コントロールプレーンマシンに使用する`Metal3DataTemplate` APIオブジェクトの名前を指定するために使用します。
+* `controlPlaneEndpointHost`:この必須変数は、コントロールプレーンエンドポイントのホスト名またはIPアドレスを指定するために使用します。
+* `tlsSan`:この必須変数は、コントロールプレーンエンドポイントのTLSサブジェクト代替名（SAN）のリストを指定するために使用します。
+
+ClusterClass定義ファイルは、以下の4つのリソースで構成されています。
+
+* **ClusterClass**:このリソースは、コントロールプレーンテンプレートやインフラストラクチャテンプレートを含む、クラスタークラス定義全体をカプセル化します。さらに、インスタンス化プロセス中に置き換えられる変数のリストが含まれており、それらを使用するパッチも定義されています。
+* **RKE2ControlPlaneTemplate**:このリソースはコントロールプレーンテンプレートを定義し、コントロールプレーンノードの目的の設定を指定します。また、インスタンス化プロセス中に、一部のパラメーターが適切な値に置き換えられます。
+* **Metal3ClusterTemplate**:このリソースはインフラストラクチャテンプレートを定義し、基盤となるインフラストラクチャの目的の設定を指定します。これには、コントロールプレーンエンドポイントやcloudProviderEnabled（true|false）フラグなどのパラメータが含まれます。また、インスタンス化プロセス中に、一部のパラメーターが適切な値に置き換えられます。
+* **Metal3MachineTemplate**:このリソースは、コントロールプレーンノードのマシンテンプレートブループリントを定義し、インスタンス化プロセス中に適切な値に置き換えられるそれらのパラメータのプレースホルダーを提供します。
++
+
+[,yaml,subs="attributes"]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: RKE2ControlPlaneTemplate
+metadata:
+  name: example-controlplane
+  namespace: emea-spa
+spec:
+  template:
+    spec:
+      rolloutStrategy:
+        type: "RollingUpdate"
+        rollingUpdate:
+          maxSurge: 1
+      registrationMethod: "control-plane-endpoint"
+      registrationAddress: TO-BE-PATCHED-AUTOMATICALLY  # This will be replaced by the involved patch when applying the cluster instance
+      serverConfig:
+        cni: cilium
+        cniMultusEnable: true
+        tlsSan:
+        - TO-BE-PATCHED-AUTOMATICALLY    # This will be replaced by the involved patch when applying the cluster instance
+      agentConfig:
+        format: ignition
+        additionalUserData:
+          config: |          # This will be replaced by the involved patch when applying the cluster instance
+            TO-BE-PATCHED-AUTOMATICALLY
+        kubelet:
+          extraArgs:
+          - provider-id=metal3://BAREMETALHOST_UUID
+        nodeName: "localhost.localdomain"
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3ClusterTemplate
+metadata:
+  name: example-cluster-template
+  namespace: emea-spa
+spec:
+  template:
+    spec:
+      controlPlaneEndpoint:
+        host: TO-BE-PATCHED-AUTOMATICALLY  # This will be replaced by the involved patch when applying the cluster instance
+        port: 6443
+      cloudProviderEnabled: false
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: example-controlplane-machineinfrastructure
+  namespace: emea-spa
+spec:
+  nodeReuse: true
+  template:
+    spec:
+      automatedCleaningMode: metadata
+      dataTemplate:
+        name: to-be-patched-automatically  # This will be replaced by the involved patch when applying the cluster instance
+      hostSelector:
+        matchLabels:  # The labels used to identify the BMHs to select.
+          cluster-role: control-plane
+          deploy-region: TO-BE-PATCHED-AUTOMATICALLY # This will be replaced by the involved patch when applying the cluster instance
+          cluster-type: TO-BE-PATCHED-AUTOMATICALLY  # This will be replaced by the involved patch when applying the cluster instance
+      image:
+        checksum: http://TO-BE-PATCHED-AUTOMATICALLY # This will be replaced by the involved patch when applying the cluster instance
+        checksumType: sha256
+        format: raw
+        url: http://TO-BE-PATCHED-AUTOMATICALLY      # This will be replaced by the involved patch when applying the cluster instance
+---
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: ClusterClass
+metadata:
+  name: example-clusterclass
+  namespace: emea-spa
+spec:
+  infrastructure:
+    templateRef:
+      kind: Metal3ClusterTemplate
+      apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+      name: example-cluster-template
+  controlPlane:
+    templateRef:
+      kind: RKE2ControlPlaneTemplate
+      apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+      name: example-controlplane
+    machineInfrastructure:
+      templateRef:
+        kind: Metal3MachineTemplate
+        apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+        name: example-controlplane-machineinfrastructure
+  variables:
+  - name: metallbHelmChartVersion
+    required: false
+    schema:
+      openAPIV3Schema:
+        type: string
+  - name: endpointCopierOperatorHelmChartVersion
+    required: false
+    schema:
+      openAPIV3Schema:
+        type: string
+  - name: controlPlaneMachineTemplateImageURL
+    required: true
+    schema:
+      openAPIV3Schema:
+        type: string
+  - name: controlPlaneMachineTemplateHostSelectorDeployRegion
+    required: true
+    schema:
+      openAPIV3Schema:
+        type: string
+  - name: controlPlaneMachineTemplateHostSelectorClusterType
+    required: true
+    schema:
+      openAPIV3Schema:
+        type: string
+  - name: controlPlaneMachineTemplateDataTemplateName
+    required: true
+    schema:
+      openAPIV3Schema:
+        type: string
+  - name: controlPlaneEndpointHost
+    required: true
+    schema:
+      openAPIV3Schema:
+        type: string
+  - name: tlsSan
+    required: true
+    schema:
+      openAPIV3Schema:
+        type: array
+        items:
+          type: string
+  patches:
+  - name: setControlPlaneMachineTemplateImageURL
+    definitions:
+    - selector:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+        kind: Metal3MachineTemplate
+        matchResources:
+          controlPlane: true        # Added to select ControlPlane
+      jsonPatches:
+      - op: replace
+        path: "/spec/template/spec/image/url"
+        valueFrom:
+          variable: controlPlaneMachineTemplateImageURL
+      - op: replace
+        path: "/spec/template/spec/image/checksum"
+        valueFrom:
+          template: "{{ .controlPlaneMachineTemplateImageURL }}.sha256"
+  - name: setControlPlaneMachineTemplateHostSelectorDeployRegion
+    definitions:
+    - selector:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+        kind: Metal3MachineTemplate
+        matchResources:
+          controlPlane: true
+      jsonPatches:
+      - op: replace
+        path: "/spec/template/spec/hostSelector/matchLabels/deploy-region"
+        valueFrom:
+          variable: controlPlaneMachineTemplateHostSelectorDeployRegion
+  - name: setControlPlaneMachineTemplateHostSelectorClusterType
+    definitions:
+    - selector:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+        kind: Metal3MachineTemplate
+        matchResources:
+          controlPlane: true        # Added to select ControlPlane
+      jsonPatches:
+      - op: replace
+        path: "/spec/template/spec/hostSelector/matchLabels/cluster-type"
+        valueFrom:
+          variable: controlPlaneMachineTemplateHostSelectorClusterType
+  - name: setControlPlaneMachineTemplateDataTemplateName
+    definitions:
+    - selector:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+        kind: Metal3MachineTemplate
+        matchResources:
+          controlPlane: true        # Added to select ControlPlane
+      jsonPatches:
+      - op: replace
+        path: "/spec/template/spec/dataTemplate/name"
+        valueFrom:
+          variable: controlPlaneMachineTemplateDataTemplateName
+  - name: setControlPlaneEndpoint
+    definitions:
+    - selector:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+        kind: Metal3ClusterTemplate
+        matchResources:
+          infrastructureCluster: true  # Added to select InfraCluster
+      jsonPatches:
+      - op: replace
+        path: "/spec/template/spec/controlPlaneEndpoint/host"
+        valueFrom:
+          variable: controlPlaneEndpointHost
+  - name: setRegistrationAddress
+    definitions:
+    - selector:
+        apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+        kind: RKE2ControlPlaneTemplate
+        matchResources:
+          controlPlane: true        # Added to select ControlPlane
+      jsonPatches:
+      - op: replace
+        path: "/spec/template/spec/registrationAddress"
+        valueFrom:
+          variable: controlPlaneEndpointHost
+  - name: setTlsSan
+    definitions:
+    - selector:
+        apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+        kind: RKE2ControlPlaneTemplate
+        matchResources:
+          controlPlane: true        # Added to select ControlPlane
+      jsonPatches:
+      - op: replace
+        path: "/spec/template/spec/serverConfig/tlsSan"
+        valueFrom:
+          variable: tlsSan
+  - name: updateAdditionalUserData
+    definitions:
+    - selector:
+        apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+        kind: RKE2ControlPlaneTemplate
+        matchResources:
+          controlPlane: true
+      jsonPatches:
+      - op: replace
+        path: "/spec/template/spec/agentConfig/additionalUserData"
+        valueFrom:
+          template: |
+            config: |
+              variant: fcos
+              version: 1.4.0
+              {{ if .metallbHelmChartVersion }}
+              storage:
+                files:
+                - path: /var/lib/rancher/rke2/server/manifests/metallb.yaml
+                  overwrite: true
+                  contents:
+                    inline: |
+                      apiVersion: helm.cattle.io/v1
+                      kind: HelmChart
+                      metadata:
+                        name: metallb
+                        namespace: kube-system
+                      spec:
+                        chart: oci://registry.suse.com/edge/charts/metallb
+                        targetNamespace: metallb-system
+                        version: {{ .metallbHelmChartVersion }}
+                        createNamespace: true
+                {{ if .endpointCopierOperatorHelmChartVersion }}
+                - path: /var/lib/rancher/rke2/server/manifests/endpoint-copier-operator.yaml
+                  overwrite: true
+                  contents:
+                    inline: |
+                      apiVersion: helm.cattle.io/v1
+                      kind: HelmChart
+                      metadata:
+                        name: endpoint-copier-operator
+                        namespace: kube-system
+                      spec:
+                        chart: oci://registry.suse.com/edge/charts/endpoint-copier-operator
+                        targetNamespace: endpoint-copier-operator
+                        version: {{ .endpointCopierOperatorHelmChartVersion }}
+                        createNamespace: true
+                - path: /var/lib/rancher/rke2/server/manifests/metallb-cr.yaml
+                  overwrite: true
+                  contents:
+                    inline: |
+                      apiVersion: metallb.io/v1beta1
+                      kind: IPAddressPool
+                      metadata:
+                        name: kubernetes-vip-ip-pool
+                        namespace: metallb-system
+                      spec:
+                        addresses:
+                          - {{ .controlPlaneEndpointHost }}/32
+                        serviceAllocation:
+                          priority: 100
+                          namespaces:
+                            - default
+                          serviceSelectors:
+                            - matchExpressions:
+                              - {key: "serviceType", operator: In, values: [kubernetes-vip]}
+                      ---
+                      apiVersion: metallb.io/v1beta1
+                      kind: L2Advertisement
+                      metadata:
+                        name: ip-pool-l2-adv
+                        namespace: metallb-system
+                      spec:
+                        ipAddressPools:
+                          - kubernetes-vip-ip-pool
+                - path: /var/lib/rancher/rke2/server/manifests/endpoint-svc.yaml
+                  overwrite: true
+                  contents:
+                    inline: |
+                      apiVersion: v1
+                      kind: Service
+                      metadata:
+                        name: kubernetes-vip
+                        namespace: default
+                        labels:
+                          serviceType: kubernetes-vip
+                      spec:
+                        ports:
+                        - name: rke2-api
+                          port: 9345
+                          protocol: TCP
+                          targetPort: 9345
+                        - name: k8s-api
+                          port: 6443
+                          protocol: TCP
+                          targetPort: 6443
+                        type: LoadBalancer
+                {{ end }}
+              {{ end }}
+              systemd:
+                units:
+                - name: rke2-preinstall.service
+                  enabled: true
+                  contents: |
+                    [Unit]
+                    Description=rke2-preinstall
+                    Wants=network-online.target
+                    Before=rke2-install.service
+                    ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                    [Service]
+                    Type=oneshot
+                    User=root
+                    ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                    ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                    ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                    ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+                    ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                    ExecStartPost=/bin/sh -c "umount /mnt"
+                    [Install]
+                    WantedBy=multi-user.target
+----
+
+=== クラスターインスタンスの定義
+
+ClusterClassのコンテキストにおいて、クラスターインスタンスとは、定義されたClusterClassに基づいて作成された、特定の実行中のクラスターのインスタンス化を指します。
+これは、ClusterClassで指定されたブループリントから直接派生した、独自の設定、リソース、および運用状態を持つ具体的なデプロイメントを表します。
+これには、アクティブに実行されている特定のマシンセット、ネットワーク設定、および関連するKubernetesコンポーネントが含まれます。
+クラスターインスタンスを理解することは、ClusterClassフレームワークを使用してプロビジョニングされた特定のデプロイ済みクラスターのライフサイクル管理、アップグレードの実行、スケーリング操作の実行、および監視を行うために不可欠です。
+
+クラスターインスタンスを定義するには、以下の2つのリソースを定義する必要があります。
+
+* **クラスター**:このリソースは実際のクラスターインスタンスを表し、その`topology`（つまり`ClusterClass`オブジェクト）への参照、必要なKubernetesバージョン、インスタンス化するコントロールプレーンノードの数、および参照される`ClusterClass`で定義された各変数に提供される値を含みます。これらはインスタンス化プロセス中に使用されます。
+* **Metal3DataTemplate**:このリソースは、クラスター内のマシン（この例ではコントロールプレーンマシンのみ）に関する追加のメタデータを提供し、インスタンス化されたクラスターごとに自動的に作成される`Metal3MachineTemplate`オブジェクトを補完します。共通の`Metal3DataTemplate`からインスタンス化されたすべてのクラスターに対して有効な単一の`ClusterClass`リソースを定義することはできないことに注意してください。`clusterName`仕様の`Metal3DataTemplate`フィールドは、それが「属する」特定のクラスターインスタンスを参照する必要があるためです。
++
+
+[,yaml,subs="attributes"]
+----
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  name: emea-spa-cluster-3
+  namespace: emea-spa
+  labels:
+    cluster-api.cattle.io/rancher-auto-import: "true"
+spec:
+  topology:
+    classRef:
+      name: example-clusterclass
+      namespace: emea-spa
+    version: v1.35.3+rke2r3
+    controlPlane:
+      replicas: 1
+    variables:                       # Values to be replaced in the clusterclass template variables to create this specific cluster
+    - name: endpointCopierOperatorHelmChartVersion
+      value: 306.0.1+up0.3.0
+    - name: metallbHelmChartVersion
+      value: 306.0.2+up0.15.3
+    - name: controlPlaneMachineTemplateImageURL
+      value: http://fileserver.local:8080/eibimage-downstream-cluster.raw.sha256
+    - name: controlPlaneMachineTemplateHostSelectorDeployRegion
+      value: emea-spa
+    - name: controlPlaneMachineTemplateHostSelectorClusterType
+      value: group-3
+    - name: controlPlaneMachineTemplateDataTemplateName
+      value: emea-spa-cluster-3
+    - name: controlPlaneEndpointHost
+      value: 192.168.122.203
+    - name: tlsSan
+      value:
+      - 192.168.122.203
+      - https://192.168.122.203.sslip.io
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3DataTemplate
+metadata:
+  name: emea-spa-cluster-3
+  namespace: emea-spa
+spec:
+  clusterName: emea-spa-cluster-3
+  metaData:
+    objectNames:
+    - key: name
+      object: machine
+    - key: local-hostname
+      object: machine
+    - key: local_hostname
+      object: machine
+
+----
+
+[NOTE]
+====
+`cluster.x-k8s.io` APIグループの`Cluster` APIオブジェクトにラベル`cluster-api.cattle.io/rancher-auto-import: "true"`を追加すると、Rancherにクラスタがインポートされます（`management.cattle.io` APIグループに対応するRancher `Cluster` APIオブジェクトが作成されます）。
+詳細については、 https://documentation.suse.com/cloudnative/cluster-api/latest/en/user/rancher-cluster-registration.html#_how_to_register_a_capi_cluster_in_rancher_using_turtles_auto_import[Cluster APIドキュメント]を参照してください。
+====
+
+このアプローチにより処理が合理化され、ClusterClassのブループリントが定義されていれば、わずか2つのリソースを使用してクラスターをデプロイできるようになります。

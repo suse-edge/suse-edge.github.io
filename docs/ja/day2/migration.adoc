@@ -1,0 +1,267 @@
+[#day2-migration]
+= エッジ {version-edge} 移行
+:revdate: 2026-05-06
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+:toc: preamble
+:previous-edge-version: 3.5
+:static-edge-version: 3.6.0
+:static-fleet-examples-tag: release-3.6.0
+
+このセクションでは、`management` および `downstream` クラスタを `{product} {previous-edge-version}` から `{product} {static-edge-version}` へマイグレーションする方法を説明します。
+
+[IMPORTANT]
+====
+クラスタのマイグレーションは、必ず `latest Z-stream` の `{product} {previous-edge-version}` リリースから実行してください。
+
+必ず `{product} {static-edge-version}` リリースへマイグレーションしてください。マイグレーション後のアップグレードについては、<<day2-mgmt-cluster,管理>> を参照してください。
+ifeval::["{flavor}" == "edge"]
+および <<day2-downstream-clusters,ダウンストリーム>> クラスタ
+endif::[]
+セクション。
+====
+
+次の表に、さまざまな種類のクラスタとクラスタをアップグレードする方法を示します。
+
+[[Clusters-and-methods-to-upgrade-downstream-clusters]]
+.ダウンストリームクラスタの種類とアップグレード方法
+|===
+| クラスタのタイプ  | メソッド
+
+|EIBでプロビジョニングされたクラスタ
+|詳細については<<day2-migration-mgmt-fleet>>を参照してください。
+ifeval::["{flavor}" == "telco"]
+|Metal^3^でプロビジョニングされたクラスタ
+|詳細は <<atip-lifecycle-downstream,ダウンストリームクラスタのアップグレード>> を参照してください。
+endif::[]
+ifeval::["{flavor}" == "edge"]
+|Phone-homeでプロビジョニングされたクラスタ
+|Kubernetesバージョンのアップグレードについては https://ranchermanager.docs.rancher.com/{rancher-docs-version}/getting-started/installation-and-upgrade/upgrade-and-roll-back-kubernetes#upgrading-the-kubernetes-version[Kubernetesバージョンのアップグレード] を、SUC、オペレーティングシステム、その他のコンポーネントについては <<day2-downstream-clusters,ダウンストリームクラスタ群>> を参照してください。
+endif::[]
+|===
+
+[#day2-migration-mgmt]
+== 管理クラスタ
+:cluster-type: management
+
+この章の構成は次のとおりです。
+
+<<day2-migration-mgmt-prereq>> - マイグレーション開始前に完了すべき前提条件の手順。
+
+<<day2-migration-mgmt-upgrade-controller>> - `{cluster-type}` を使用して <<components-upgrade-controller>> クラスタマイグレーションを実行する方法。
+
+<<day2-migration-mgmt-fleet>> - `{cluster-type}` を使用して <<components-fleet>> クラスタマイグレーションを実行する方法。
+
+[#day2-migration-mgmt-prereq]
+=== 前提条件
+
+ifeval::["{flavor}" == "telco"]
+==== ベアメタル Operator CRDのアップグレード
+
+[NOTE]
+====
+<<components-metal3>> チャートのアップグレードが必要なCAPI/Metal3管理クラスタにのみ適用されます。
+====
+
+`Metal^3^` Helmチャートには、Helmのlink:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#method-1-let-helm-do-it-for-you[CRD]ディレクトリを活用することで、link:https://book.metal3.io/bmo/introduction.html[ベアメタル Operator (BMO)] CRDが含まれています。
+
+ただし、このアプローチには特定の制限があり、特にこのディレクトリ内のCRDをHelmを使用してアップグレードできないという点があります。詳細については、link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#some-caveats-and-explanations[Helmマニュアル]を参照してください。
+
+その結果、Metal^3^を`{product} {static-edge-version}`互換バージョンにアップグレードする前に、ユーザーは基盤となるBMO CRDを手動でアップグレードする必要があります。
+
+`Helm`がインストールされ、`kubectl`が`{cluster-type}`クラスタを指すように設定されているマシンで、以下を実行します。
+
+. BMO CRDを手動で適用します。
++
+[,bash,subs="attributes"]
+----
+helm show crds oci://registry.suse.com/edge/charts/metal3 --version {version-metal3-chart} | kubectl apply -f -
+----
+endif::[]
+
+==== Metal^3^ CA証明書設定の移行
+
+[NOTE]
+====
+TLSを使用する外部メディアサーバーに対して追加の信頼済みCAを使用するMetal^3^デプロイメントにのみ適用されます。
+====
+
+Metal^3^ Helmチャートでは、信頼済みCA証明書の設定方法が変更されました。以前は、追加のCAは`tls-ca-additional`ブール値を持つシークレット（`additionalTrustedCAs`）を介して提供されていました。新しいバージョンでは、`global.trustedCAs`値によって参照される完全なCAバンドルを含むConfigMapが使用されます。
+
+Metal^3^に対して追加の信頼済みCAを設定している場合は、シークレットベースのアプローチからConfigMapベースのアプローチに移行する必要があります。
+
+. 既存のシークレットからCAバンドルを含むConfigMapを作成します。
++
+古いシークレットから証明書を抽出します。
++
+[,shell]
+----
+kubectl get secret tls-ca-additional -n metal3-system -o jsonpath='{.data}' | \
+  jq -r 'to_entries[] | .value' | base64 -d > ca-bundle.pem
+----
++
+*オプション - システムCAバンドルを含める:*
+Metal^3^のデプロイメントでパブリックCAも信頼する必要がある場合（HTTPS経由で外部リソースにアクセスする場合など）、カスタムCAに加えてシステムCAバンドルを含める必要があります。コンテナイメージからシステムCAバンドルを抽出し、カスタムCAの先頭に追加します。
++
+[,shell]
+----
+# Extract system CAs from a container image (using podman or docker)
+podman run --rm registry.suse.com/bci/bci-base:latest cat /etc/ssl/certs/ca-certificates.crt > system-cas.pem
+
+# Combine system CAs with your custom CAs
+cat system-cas.pem ca-bundle.pem > combined-ca-bundle.pem
+mv combined-ca-bundle.pem ca-bundle.pem
+----
++
+[IMPORTANT]
+====
+システムCAバンドルを含める場合、それを最新の状態に保つ責任はユーザーにあります。コンテナイメージ内のシステムCAは、CA証明書の期限切れや失効に伴い、時間の経過とともに古くなる可能性があります。更新されたコンテナイメージからシステムCAバンドルを再抽出して、定期的に更新する必要があります。
+====
++
+最終的なCAバンドルを使用してConfigMapを作成します。
++
+[,shell]
+----
+kubectl create configmap tls-ca-bundle -n metal3-system --from-file=ca-bundle.pem=ca-bundle.pem
+----
+
+. 新しいConfigMap参照を使用するようにMetal^3^ Helm値を更新します。
++
+変更前:
++
+[,yaml]
+----
+global:
+  additionalTrustedCAs: true
+----
++
+宛先:
++
+[,yaml]
+----
+global:
+  trustedCAs: tls-ca-bundle
+----
+
+. 新しい構成でMetal^3^ Helmチャートをアップグレードした後、古いシークレットを削除できます。
++
+[,shell]
+----
+kubectl delete secret tls-ca-additional -n metal3-system
+----
+
+[#day2-migration-mgmt-upgrade-controller]
+=== Upgrade Controller
+
+[IMPORTANT]
+====
+`Upgrade Controller`は現在、*非エアギャップ(された)管理*クラスターに対する`{product}`リリース移行のみをサポートしています。
+====
+
+このセクションでは、以下のトピックについて説明します。
+
+<<day2-migration-mgmt-upgrade-controller-prereq>> - `Upgrade Controller`に固有の前提条件。
+
+<<day2-migration-mgmt-upgrade-controller-migration>> - `Upgrade Controller`を使用して`{cluster-type}`クラスターを新しい`{product}`バージョンに移行する手順。
+
+[#day2-migration-mgmt-upgrade-controller-prereq]
+==== 前提条件
+
+===== {product} {version} Upgrade Controller
+
+`Upgrade Controller`を使用する前に、目的の`{product}`リリースへの移行が可能なバージョンで実行されていることを確認する必要があります。
+
+これには次の操作を行います。
+
+. 以前の`Upgrade Controller`リリースから`{product}`が既にデプロイされている場合は、そのチャートをアップグレードしてください。
++
+[,bash,subs="attributes"]
+----
+helm upgrade upgrade-controller -n upgrade-controller-system oci://registry.suse.com/edge/charts/upgrade-controller --version {version-upgrade-controller-chart}
+----
+
+. `Upgrade Controller`がデプロイされて*いない*場合は、<<components-upgrade-controller-installation>>に従ってください。
+
+[#day2-migration-mgmt-upgrade-controller-migration]
+==== 移行手順
+
+`Upgrade Controller`を使用した`{cluster-type}`クラスターの移行は、基本的にアップグレードの実行と似ています。
+
+唯一の違いは、`UpgradePlan`で`{static-edge-version}`リリースバージョンを*指定する必要がある*点です。
+
+[,yaml,subs="attributes"]
+----
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
+metadata:
+  name: upgrade-plan-mgmt
+  # Change to the namespace of your Upgrade Controller
+  namespace: CHANGE_ME
+spec:
+  releaseVersion: {static-edge-version}
+----
+
+上記の`UpgradePlan`を使用して移行を行う方法については、<<{cluster-type}-day2-upgrade-controller,Upgrade Controller アップグレード処理>>を参照してください。
+
+[#day2-migration-mgmt-fleet]
+=== Fleet
+
+[NOTE]
+====
+可能な限り、移行には<<day2-migration-mgmt-upgrade-controller>>を使用してください。
+
+`Upgrade Controller`でカバーされていないユースケースについてのみ、このセクションを参照してください。
+====
+
+`Fleet`を使用した`{cluster-type}`クラスターの移行は、基本的にアップグレードの実行と似ています。
+
+*主な*違いは以下の通りです。
+
+. Fleetは、`suse-edge/fleet-examples`リポジトリのlink:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}]リリースから*使用する必要があります*。
+
+. アップグレードが予定されているチャートは、`{product} {static-edge-version}`リリースと互換性のあるバージョンに*アップグレードする必要があります*。`{product} {static-edge-version}`コンポーネントのリストについては、<<release-notes-3-6-0>>を参照してください。
+
+[IMPORTANT]
+====
+`{product} {static-edge-version}`移行を確実に成功させるため、ユーザーは上記で概説した点に従うことが重要です。
+====
+
+ifeval::["{flavor}" == "edge"]
+上記の点を考慮し、移行を実行するために必要な手順の包括的なガイドについては、`{cluster-type}`クラスタ<<{cluster-type}-day2-fleet, Fleet>>のドキュメントに従ってください。
+endif::[]
+
+[#day2-migration-downstream]
+== ダウンストリームクラスタ
+:cluster-type: downstream
+
+<<day2-migration-downstream-fleet>> - `{cluster-type}` を使用して <<components-fleet>> クラスタマイグレーションを実行する方法。
+
+[#day2-migration-downstream-fleet]
+=== Fleet
+
+`{cluster-type}`を使用した`Fleet`クラスタの移行は、基本的にアップグレードの実行と似ています。
+
+*主な*違いは以下の通りです。
+
+. Fleetは、`suse-edge/fleet-examples`リポジトリのlink:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}]リリースから*使用する必要があります*。
+
+. アップグレードが予定されているチャートは、`{product} {static-edge-version}`リリースと互換性のあるバージョンに*アップグレードする必要があります*。`{product} {static-edge-version}`コンポーネントのリストについては、<<release-notes-3-6-0>>を参照してください。
+
+[IMPORTANT]
+====
+`{product} {static-edge-version}`移行を確実に成功させるため、ユーザーは上記で概説した点に従うことが重要です。
+====
+
+ifeval::["{flavor}" == "edge"]
+上記の点を考慮し、移行を実行するために必要な手順の包括的なガイドについては、`{cluster-type}`クラスタ<<{cluster-type}-day2-fleet, Fleet>>のドキュメントに従ってください。
+endif::[]

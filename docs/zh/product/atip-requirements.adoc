@@ -1,0 +1,364 @@
+[#atip-requirements]
+= 要求和假设
+:revdate: 2025-08-25
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+[#atip-hardware]
+== 硬件
+
+SUSE Telco Cloud 的硬件要求如下：
+
+* **管理群集**：管理群集包含 `SUSE Linux Micro`、`RKE2`、`SUSE Rancher Prime`、`Metal^3^` 等组件，用于管理多个下游集群。根据要管理的下游集群数量，服务器的硬件要求可能会有所不同。
+  ** 服务器（`VM` 或 `bare-metal`）的最低要求为：
+     *** RAM：最低 8 GB（我们建议至少 16 GB）
+     *** CPU：最低 2 个（我们建议至少 4 个处理器）
+
+* **下游集群**：下游集群是为运行电信工作负载而部署的集群。需要特定要求才能启用某些电信功能，例如 `SR-IOV`、`CPU Performance Optimization` 等。
+  ** SR-IOV：要以直通模式将 VF（虚拟功能）附加到 CNF/VNF，NIC 必须支持 SR-IOV，并且必须在 BIOS 中启用 VT-d/AMD-Vi。
+  ** CPU 处理器：要运行特定的电信工作负载，应调整 CPU 处理器型号，以启用此参考 <<atip-features,表>> 中提供的大多数功能。
+  ** 使用虚拟媒体进行安装的固件要求：
++
+|===
+| 服务器硬件 | BMC 型号 | 管理
+
+| Dell 硬件
+| 第 15 代
+| iDRAC9
+
+| Supermicro 硬件
+| 01.00.25
+| Supermicro SMC - redfish
+
+| HPE 硬件
+| 1.50
+| iLO6
+|===
+
+[#atip-network]
+== 网络
+
+作为网络架构的参考，下图显示了电信环境的典型网络架构：
+
+image::product-atip-requirements1.png[scaledwidth=100%]
+
+网络架构基于以下组件：
+
+* **管理网络**：此网络用于管理下游集群节点。它用于带外管理。通常，此网络也连接到单独的管理交换机，但也可以使用 VLAN 将其连接到同一服务交换机以隔离流量。
+* **控制平面网络**：此网络用于下游集群节点与其上运行的服务之间的通信。此网络还用于节点与外部服务（如 `DHCP` 或 `DNS` 服务器）之间的通信。在某些情况下，对于已连接的环境，交换机/路由器可以通过 Internet 处理流量。
+* **其他网络**：在某些情况下，节点可以出于特定目的连接到其他网络。
+
+[NOTE]
+====
+要使用定向网络配置工作流，管理集群必须具备与下游集群服务器基板管理控制器 (BMC) 的网络连接，以便实现主机准备和配置的自动化。
+====
+
+[#atip-ports]
+== 端口要求
+
+为了正常运行，SUSE Telco Cloud 部署要求管理节点和下游 Kubernetes 集群节点上的多个端口可达。
+
+[NOTE]
+====
+确切列表取决于所部署的可选组件和所选的部署选项（例如 CNI 插件）。
+====
+
+=== 管理节点
+
+下表列出了运行管理集群的节点中开放的端口：
+
+[NOTE]
+====
+有关 CNI 插件相关的端口，请参阅 <<cni-specific-port-requirements,CNI 特定端口要求>>。
+====
+
+
+.管理节点的入站网络规则
+[#table-inbound-network-rules-for-management-nodes]
+|===
+| 协议 | 端口 | 源 | 说明
+
+| TCP
+| 22
+| 任何需要 SSH 访问的源
+| 对管理集群节点的 SSH 访问
+
+| TCP
+| 80
+| 执行外部 TLS 终止的负载均衡器/代理
+| 使用外部 TLS 终止时的 Rancher UI/API
+
+| TCP
+| 443
+| 任何需要 TLS 访问 Rancher UI/API 的源
+| Rancher 代理，Rancher UI/API
+
+| TCP
+| 2379
+| RKE2（管理集群）服务器节点
+| `etcd` 客户端端口
+
+| TCP
+| 2380
+| RKE2（管理集群）服务器节点
+| `etcd` 对等端口
+
+| TCP
+| 6180
+| 任何先前由 `Metal^3^/ironic` 指示从该开放端口（非 TLS）拉取 IPA^(2)^ RAM 磁盘镜像的 BMC^(1)^
+| `Ironic` httpd 非 TLS Web 服务器，用于提供基于虚拟媒体引导的 IPA^(2)^ ISO 映像 +
+ +
+ 如果启用了此端口，则不会打开功能等效但启用了 TLS 的端口（见下文）
+
+| TCP
+| 6185
+| 任何先前由 `Metal^3^/ironic` 指示从该开放端口（TLS）拉取 IPA^(2)^ RAM 磁盘镜像的 BMC^(1)^
+| `Ironic` httpd 启用 TLS 的 Web 服务器，用于提供基于虚拟媒体引导的 IPA^(2)^ ISO 映像 +
+ +
+ 如果启用了此端口，则不会打开功能等效但禁用了 TLS 的端口（见上文）
+
+| TCP
+| 6385
+| 任何在“已注册” `BareMetalHost` 实例中部署并运行的 `Metal^3^/ironic` IPA^(1)^ RAM 磁盘镜像
+| Ironic API
+
+| TCP
+| 6443
+| 任何管理集群节点；任何（管理集群之外的）外部 Kubernetes 客户端
+| Kubernetes API
+
+| TCP
+| 6545
+| 任何管理集群节点
+| 从符合 OCI 标准的注册表（Hauler）拉取制品
+
+| TCP
+| 9345
+| RKE2 服务器和代理节点（管理集群）
+| 用于节点注册的 RKE2 supervisor API（在所有 RKE2 服务器节点中开放的端口）
+
+| TCP
+| 10250
+| 任何管理集群节点
+| `kubelet` 指标
+
+| TCP/UDP/SCTP
+| 30000-32767
+| 任何（管理集群之外的）外部源通过 `spec.type: NodePort` 或 `spec.type: LoadBalancer` https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types[服务 API 对象] 访问暴露在主网络上的服务
+| 可用的 `NodePort` 端口范围
+|===
+^(1)^ BMC：基板管理控制器 +
+^(2)^ IPA：Ironic Python Agent 
+
+=== 下游节点
+
+在 SUSE Telco Cloud 中，在任何（下游）服务器成为运行中的下游 Kubernetes 集群的一部分（或其自身运行单节点下游 Kubernetes 集群）之前，必须经历一些 https://github.com/metal3-io/baremetal-operator/blob/main/docs/baremetalhost-states.md[裸机主机配置状态]。
+
+* 刚声明的下游服务器的基板管理控制器 (BMC) 必须可以通过带外网络访问。BMC 会收到（来自管理集群上运行的 ironic 服务）关于要采取的初始步骤的指令：
+. 拉取并加载 BMC 提供的 `virtual media` 中指定的 IPA ramdisk 镜像。
+. 开启服务器电源。
+
+预期 BMC 会开放以下端口（具体端口可能因硬件而异）：
+
+.基板管理控制器的入站网络规则
+[#table-inbound-network-rules-for-baseboard-management-controllers]
+|===
+| 协议 | 端口 | 源 | 说明
+
+| TCP
+| 80
+| Ironic conductor（来自管理集群）
+| Redfish API 访问 (HTTP)
+
+| TCP
+| 443
+| Ironic conductor（来自管理集群）
+| Redfish API 访问 (HTTPS)
+|===
+
+* 一旦加载到 BMC `virtual media` 上的 IPA ramdisk 镜像被用于启动下游服务器镜像，硬件检查阶段即开始。下表列出了正在运行的 IPA ramdisk 镜像所暴露的端口：
+
+.下游节点的入站网络规则 - `Metal^3^/Ironic` 配置阶段
+[#table-inbound-network-rules-for-downstream-nodes-provisioning-phase]
+|===
+| 协议 | 端口 | 源 | 说明
+
+| TCP
+| 22
+| 任何需要 SSH 访问 IPA ramdisk 镜像的源
+| 对正在进行检查的下游集群节点的 SSH 访问
+
+| TCP
+| 9999
+| Ironic conductor（来自管理集群）
+| 针对正在运行的 ramdisk 镜像的 Ironic 命令
+|===
+
+* 一旦裸机主机被正确配置并加入了下游 Kubernetes 集群，它将暴露以下端口：
+
+[NOTE]
+====
+有关 CNI 插件相关的端口，请参阅 <<cni-specific-port-requirements,CNI 特定端口要求>>。
+====
+
+.下游节点的入站网络规则
+[#table-inbound-network-rules-for-downstream-nodes]
+|===
+| 协议 | 端口 | 源 | 说明
+
+| TCP
+| 22
+| 任何需要 SSH 访问的源
+| 对下游集群节点的 SSH 访问
+
+| TCP
+| 80
+| 执行外部 TLS 终止的负载均衡器/代理
+| 使用外部 TLS 终止时的 Rancher UI/API
+
+| TCP
+| 443
+| 任何需要 TLS 访问 Rancher UI/API 的源
+| Rancher 代理，Rancher UI/API
+
+| TCP
+| 2379
+| RKE2（下游集群）服务器节点
+| `etcd` 客户端端口
+
+| TCP
+| 2380
+| RKE2（下游集群）服务器节点
+| `etcd` 对等端口
+
+| TCP
+| 6443
+| 任何下游集群节点；任何外部（下游集群之外的）Kubernetes 客户端。
+| Kubernetes API
+
+| TCP
+| 9345
+| RKE2 服务器和代理节点（下游集群）
+| 用于节点注册的 RKE2 supervisor API（在所有 RKE2 服务器节点中开放的端口）
+
+| TCP
+| 10250
+| 任何下游集群节点
+| `kubelet` 指标
+
+| TCP
+| 10255
+| 任何下游集群节点
+| `kubelet` 只读访问
+
+| TCP/UDP/SCTP
+| 30000-32767
+| 任何通过 `spec.type: NodePort` 或 `spec.type: LoadBalancer` https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types[Service API 对象] 访问暴露在主网络上的服务的外部（下游集群之外的）源
+| 可用的 `NodePort` 端口范围
+|===
+
+[#cni-specific-port-requirements]
+=== CNI 特定端口要求
+
+每种受支持的 CNI 变体都有其自己的一套端口要求。有关更多详细信息，请参阅 RKE2 文档中的 https://docs.rke2.io/install/requirements#cni-specific-inbound-network-rules[CNI 特定入站网络规则]。
+
+当 `cilium` 被设置为默认/主 CNI 插件时，如果配置了 `cilium-operator` 工作负载以在部署它的 Kubernetes 集群之外暴露指标，则会额外暴露以下 TCP 端口。这确保了在 Kubernetes 集群外运行的外部 `Prometheus` 服务器实例仍然可以收集这些指标。
+
+[NOTE]
+====
+这是通过 rke2-cilium Helm chart 部署 `cilium` 时的默认选项。
+====
+
+.管理/下游节点的入站网络规则 - 已启用来自 `cilium-operator` 的外部指标暴露
+[#table-inbound-network-rules-for-management-downstream-nodes-external-metrics-cilium-operator]
+|===
+| 协议 | 端口 | 源 | 说明
+
+| TCP
+| 9963
+| 外部（Kubernetes 集群之外的）指标收集器
+| cilium-operator 指标暴露
+|===
+
+
+[#atip-services]
+== 服务（DHCP、DNS 等）
+
+根据部署环境的类型，可能需要一些外部服务，如 `DHCP`、`DNS` 等：
+
+* **已连接环境**：在这种情况下，节点将连接到互联网（通过路由 L3 协议），外部服务将由客户提供。
+* **断开连接 / 隔离环境**：在这种情况下，节点将没有互联网 IP 连接，并且需要额外的服务来在本地镜像定向网络配置工作流所需的内容。
+* **文件服务器**：文件服务器用于存储在定向网络配置工作流期间要在下游集群节点上配置的操作系统镜像。`Metal^3^` Helm chart 可以部署一个媒体服务器来存储操作系统镜像——请查看以下 xref:metal3-media-server[章节]，但也可以使用现有的本地 Web 服务器。
+
+[#atip-systemd-services]
+== 禁用 systemd 服务
+
+对于电信工作负载，禁用或正确配置在节点上运行的某些服务非常重要，以避免对在节点上运行的工作负载性能（延迟）产生任何影响。
+
+* `rebootmgr` 是一项服务，允许在系统有待处理更新时配置重启策略。
+对于电信工作负载，禁用或正确配置 `rebootmgr` 服务非常重要，以避免在系统调度更新时重启节点，从而避免对在节点上运行的服务产生任何影响。
+
+[NOTE]
+====
+有关 `rebootmgr` 的更多信息，请参阅 https://github.com/SUSE/rebootmgr[rebootmgr GitHub 储存库]。
+====
+
+通过运行以下命令验证正在使用的策略：
+
+[,shell]
+----
+cat /etc/rebootmgr.conf
+[rebootmgr]
+window-start=03:30
+window-duration=1h30m
+strategy=best-effort
+lock-group=default
+----
+
+您可以通过运行以下命令来禁用它：
+
+[,shell]
+----
+sed -i 's/strategy=best-effort/strategy=off/g' /etc/rebootmgr.conf
+----
+
+或者使用 `rebootmgrctl` 命令：
+
+[,shell]
+----
+rebootmgrctl strategy off
+----
+
+[NOTE]
+====
+此设置 `rebootmgr` 策略的配置可以使用定向网络配置工作流自动完成。有关更多信息，请查看 <<atip-automated-provisioning,自动化配置文档>>。
+====
+
+* `transactional-update` 是一项允许由系统控制自动更新的服务。对于电信工作负载，禁用自动更新以避免对节点上运行的服务产生任何影响非常重要。
+
+要禁用自动更新，您可以运行：
+
+[,shell]
+----
+systemctl --now disable transactional-update.timer
+systemctl --now disable transactional-update-cleanup.timer
+----
+
+* `fstrim` 是一项允许每周自动修剪文件系统的服务。对于电信工作负载，禁用自动修剪以避免对节点上运行的服务产生任何影响非常重要。
+
+要禁用自动修剪，您可以运行：
+
+[,shell]
+----
+systemctl --now disable fstrim.timer
+----

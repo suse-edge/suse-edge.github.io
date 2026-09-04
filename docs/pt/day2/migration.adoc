@@ -1,0 +1,267 @@
+[#day2-migration]
+= Migração Edge {version-edge}
+:revdate: 2026-05-06
+:revnumber: 3.6
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+:toc: preamble
+:previous-edge-version: 3.5
+:static-edge-version: 3.6.0
+:static-fleet-examples-tag: release-3.6.0
+
+Esta seção explica como migrar seus clusters `management` e `downstream` de `{product} {previous-edge-version}` para `{product} {static-edge-version}`.
+
+[IMPORTANT]
+====
+Sempre realize migrações de cluster a partir da `latest Z-stream` release do `{product} {previous-edge-version}`.
+
+Sempre migre para a `{product} {static-edge-version}` release. Para upgrades pós-migração subsequentes, consulte as <<day2-mgmt-cluster, management>>
+ifeval::["{flavor}" == "edge"]
+e <<day2-downstream-clusters, cluster downstream>>
+endif::[]
+seções.
+====
+
+A tabela a seguir lista os diferentes tipos de clusters e os métodos para fazer upgrade dos clusters:
+
+[[Clusters-and-methods-to-upgrade-downstream-clusters]]
+.Clusters e métodos para fazer upgrade de clusters downstream
+|===
+| Tipo de cluster  | Método
+
+|Clusters provisionados por EIB
+|Consulte <<day2-migration-mgmt-fleet>> para obter os detalhes.
+ifeval::["{flavor}" == "telco"]
+|Clusters provisionados por Metal^3^
+|Consulte <<atip-lifecycle-downstream, atualizações de cluster downstream>> para obter detalhes.
+endif::[]
+ifeval::["{flavor}" == "edge"]
+|Clusters provisionados por phone-home
+|Consulte https://ranchermanager.docs.rancher.com/{rancher-docs-version}/getting-started/installation-and-upgrade/upgrade-and-roll-back-kubernetes#upgrading-the-kubernetes-version[Atualizando a versão do Kubernetes] para fazer upgrade da versão do Kubernetes e <<day2-downstream-clusters, Clusters downstream>> para SUC, sistema operacional e outros componentes.
+endif::[]
+|===
+
+[#day2-migration-mgmt]
+== Cluster de gerenciamento
+:cluster-type: management
+
+Esta seção abrange os seguintes tópicos:
+
+<<day2-migration-mgmt-prereq>> - etapas de pré-requisito a serem concluídas antes de iniciar a migração.
+
+<<day2-migration-mgmt-upgrade-controller>> - como fazer uma migração de cluster `{cluster-type}` usando o <<components-upgrade-controller>>.
+
+<<day2-migration-mgmt-fleet>> - como fazer uma migração de cluster `{cluster-type}` usando <<components-fleet>>.
+
+[#day2-migration-mgmt-prereq]
+=== Pré-requisitos
+
+ifeval::["{flavor}" == "telco"]
+==== Atualize os CRDs do Bare Metal Operator
+
+[NOTE]
+====
+Aplica-se apenas a clusters de gerenciamento CAPI/Metal3 que exigem uma atualização de gráfico <<components-metal3>>.
+====
+
+O gráfico Helm `Metal^3^` inclui os CRDs link:https://book.metal3.io/bmo/introduction.html[Bare Metal Operator (BMO)] aproveitando o diretório link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#method-1-let-helm-do-it-for-you[CRD] do Helm.
+
+No entanto, essa abordagem tem certas limitações, particularmente a incapacidade de atualizar CRDs neste diretório usando o Helm. Para obter mais informações, consulte a link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#some-caveats-and-explanations[documentação do Helm].
+
+Como resultado, antes de atualizar o Metal^3^ para uma versão compatível com `{product} {static-edge-version}`, os usuários devem atualizar manualmente os CRDs do BMO subjacentes.
+
+Em uma máquina com `Helm` instalado e `kubectl` configurado para apontar para o seu cluster `{cluster-type}`:
+
+. Aplique manualmente os CRDs do BMO:
++
+[,bash,subs="attributes"]
+----
+helm show crds oci://registry.suse.com/edge/charts/metal3 --version {version-metal3-chart} | kubectl apply -f -
+----
+endif::[]
+
+==== Migrar a configuração do certificado de CA do Metal^3^
+
+[NOTE]
+====
+Aplica-se apenas a implantações do Metal^3^ que usam CAs confiáveis adicionais para servidores de mídia externos com TLS.
+====
+
+O gráfico Helm do Metal^3^ mudou a forma como os certificados de CA confiáveis são configurados. Anteriormente, as CAs adicionais eram fornecidas por meio de um Secret (`tls-ca-additional`) com o sinalizador booleano `additionalTrustedCAs`. A nova versão usa um ConfigMap contendo o pacote de CA completo referenciado pelo valor `global.trustedCAs`.
+
+Se você configurou CAs confiáveis adicionais para o Metal^3^, você precisa migrar da abordagem baseada em Secret para a abordagem baseada em ConfigMap:
+
+. Crie um ConfigMap contendo seu pacote de CA a partir do Secret existente:
++
+Extraia os certificados do Secret antigo:
++
+[,shell]
+----
+kubectl get secret tls-ca-additional -n metal3-system -o jsonpath='{.data}' | \
+  jq -r 'to_entries[] | .value' | base64 -d > ca-bundle.pem
+----
++
+*Opcional - Inclua o pacote de CA do sistema:*
+Se sua implantação do Metal^3^ também precisar confiar em CAs públicas (por exemplo, ao acessar recursos externos via HTTPS), você precisará incluir o pacote de CA do sistema além de suas CAs personalizadas. Extraia o pacote de CA do sistema de uma imagem de contêiner e adicione-o antes de suas CAs personalizadas:
++
+[,shell]
+----
+# Extract system CAs from a container image (using podman or docker)
+podman run --rm registry.suse.com/bci/bci-base:latest cat /etc/ssl/certs/ca-certificates.crt > system-cas.pem
+
+# Combine system CAs with your custom CAs
+cat system-cas.pem ca-bundle.pem > combined-ca-bundle.pem
+mv combined-ca-bundle.pem ca-bundle.pem
+----
++
+[IMPORTANT]
+====
+Se você incluir o pacote de CA do sistema, torna-se sua responsabilidade mantê-lo atualizado. As CAs do sistema na imagem do contêiner podem ficar obsoletas com o tempo, à medida que os certificados de CA expiram ou são revogados. Você deve atualizar periodicamente o pacote de CA do sistema extraindo-o novamente de uma imagem de contêiner atualizada.
+====
++
+Crie o ConfigMap com o pacote de CA final:
++
+[,shell]
+----
+kubectl create configmap tls-ca-bundle -n metal3-system --from-file=ca-bundle.pem=ca-bundle.pem
+----
+
+. Atualize seus valores de Helm do Metal^3^ para usar a nova referência do ConfigMap:
++
+Altere de:
++
+[,yaml]
+----
+global:
+  additionalTrustedCAs: true
+----
++
+Para:
++
+[,yaml]
+----
+global:
+  trustedCAs: tls-ca-bundle
+----
+
+. Após atualizar o gráfico Helm do Metal^3^ com a nova configuração, você pode excluir o Secret antigo:
++
+[,shell]
+----
+kubectl delete secret tls-ca-additional -n metal3-system
+----
+
+[#day2-migration-mgmt-upgrade-controller]
+=== Upgrade Controller
+
+[IMPORTANT]
+====
+O `Upgrade Controller` atualmente suporta migrações de versão `{product}` apenas para clusters de gerenciamento *que não são air-gapped*.
+====
+
+Os tópicos a seguir são abordados como parte desta seção:
+
+<<day2-migration-mgmt-upgrade-controller-prereq>> - pré-requisitos específicos para o `Upgrade Controller`.
+
+<<day2-migration-mgmt-upgrade-controller-migration>> - etapas para migrar um cluster `{cluster-type}` para uma nova versão `{product}` usando o `Upgrade Controller`.
+
+[#day2-migration-mgmt-upgrade-controller-prereq]
+==== Pré-requisitos
+
+===== {product} {version} Upgrade Controller
+
+Antes de usar o `Upgrade Controller`, você deve primeiro garantir que ele esteja executando uma versão capaz de migrar para a versão `{product}` desejada.
+
+Para fazer isso:
+
+. Se você já tiver o `Upgrade Controller` implantado a partir de uma versão `{product}` anterior, atualize seu gráfico:
++
+[,bash,subs="attributes"]
+----
+helm upgrade upgrade-controller -n upgrade-controller-system oci://registry.suse.com/edge/charts/upgrade-controller --version {version-upgrade-controller-chart}
+----
+
+. Se você *não* tiver `Upgrade Controller` implantado, siga <<components-upgrade-controller-installation>>.
+
+[#day2-migration-mgmt-upgrade-controller-migration]
+==== Etapas de migração
+
+Realizar uma migração de cluster `{cluster-type}` com o `Upgrade Controller` é fundamentalmente semelhante à execução de um upgrade.
+
+A única diferença é que seu `UpgradePlan` *deve* especificar a versão de lançamento `{static-edge-version}`:
+
+[,yaml,subs="attributes"]
+----
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
+metadata:
+  name: upgrade-plan-mgmt
+  # Change to the namespace of your Upgrade Controller
+  namespace: CHANGE_ME
+spec:
+  releaseVersion: {static-edge-version}
+----
+
+Para obter informações sobre como usar o `UpgradePlan` acima para realizar uma migração, consulte <<{cluster-type}-day2-upgrade-controller,processo de upgrade do Upgrade Controller>>.
+
+[#day2-migration-mgmt-fleet]
+=== Fleet
+
+[NOTE]
+====
+Sempre que possível, use o <<day2-migration-mgmt-upgrade-controller>> para migração.
+
+Consulte esta seção apenas para casos de uso não cobertos pelo `Upgrade Controller`.
+====
+
+Realizar uma migração de cluster `{cluster-type}` com `Fleet` é fundamentalmente semelhante à execução de um upgrade.
+
+As *principais* diferenças são:
+
+. As frotas *devem ser usadas* a partir da versão link:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}] do repositório `suse-edge/fleet-examples`.
+
+. Os gráficos agendados para um upgrade *devem* ser atualizados para versões compatíveis com a versão `{product} {static-edge-version}`. Para obter uma lista dos componentes `{product} {static-edge-version}`, consulte <<release-notes-3-6-0>>.
+
+[IMPORTANT]
+====
+Para garantir uma migração `{product} {static-edge-version}` bem-sucedida, é importante que os usuários cumpram os pontos descritos acima.
+====
+
+ifeval::["{flavor}" == "edge"]
+Considerando os pontos acima, os usuários podem seguir a documentação do <<{cluster-type}-day2-fleet, Fleet>> do cluster `{cluster-type}` para obter um guia abrangente sobre as etapas necessárias para realizar uma migração.
+endif::[]
+
+[#day2-migration-downstream]
+== Clusters downstream
+:cluster-type: downstream
+
+<<day2-migration-downstream-fleet>> - como fazer uma migração de cluster `{cluster-type}` usando <<components-fleet>>.
+
+[#day2-migration-downstream-fleet]
+=== Fleet
+
+Realizar uma migração de cluster `{cluster-type}` com `Fleet` é fundamentalmente semelhante à execução de um upgrade.
+
+As *principais* diferenças são:
+
+. As Fleet *devem ser usadas* a partir da versão link:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}] do repositório `suse-edge/fleet-examples`.
+
+. Os gráficos agendados para um upgrade *devem* ser atualizados para versões compatíveis com a versão `{product} {static-edge-version}`. Para obter uma lista dos componentes `{product} {static-edge-version}`, consulte <<release-notes-3-6-0>>.
+
+[IMPORTANT]
+====
+Para garantir uma migração `{product} {static-edge-version}` bem-sucedida, é importante que os usuários cumpram os pontos descritos acima.
+====
+
+ifeval::["{flavor}" == "edge"]
+Considerando os pontos acima, os usuários podem seguir a documentação do <<{cluster-type}-day2-fleet, Fleet>> do cluster `{cluster-type}` para obter um guia abrangente sobre as etapas necessárias para realizar uma migração.
+endif::[]

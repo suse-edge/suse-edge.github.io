@@ -1,0 +1,255 @@
+= Flujo de trabajo de GitHub de SUSE Edge Engineering: Mejores prácticas
+:revdate: 2025-07-29
+:revnumber: 3.6
+:page-revdate: {revdate}
+
+Existen múltiples formas de utilizar los flujos de trabajo de Git y GitHub, cómo crear PR/MR, aplicar cherry-pick a commits en una rama específica, etc.
+
+Este documento explica cómo lo hace el equipo de ingeniería de SUSE Edge.
+
+== Configurad vuestro usuario y correo electrónico
+
+[,shell]
+----
+$ git config --global user.name "FIRST_NAME LAST_NAME"
+$ git config --global user.email "MY_NAME@example.com"
+----
+
+Esto se puede hacer individualmente por repositorio sin el flag `--global`.
+
+== Bifurcar el repositorio
+
+Idealmente, no enviaréis cambios a las ramas en los repositorios de suse-edge/, sino que bifurcaréis el repositorio en la interfaz de usuario de GitHub y _haréis lo vuestro_ allí.
+
+[NOTE]
+====
+No necesitáis usar el mismo nombre para vuestra bifurcación si no queréis.
+====
+
+== Configurar correctamente el origen/sentido ascendente
+
+Una vez que hayáis bifurcado el repositorio, es hora de clonarlo en vuestra estación de trabajo y configurar los remotos de origen/sentido ascendente:
+
+* Clonar el repositorio
+
+[,shell]
+----
+$ git clone git@github.com:e-minguez/suse-edge-charts.git
+----
+
+Esto creará el remoto «origin»:
+
+[,shell]
+----
+$ git remote -v
+origin  git@github.com:e-minguez/suse-edge-charts.git (fetch)
+origin  git@github.com:e-minguez/suse-edge-charts.git (push)
+----
+
+* Añadir el repositorio de sentido ascendente
+
+[,shell]
+----
+$ git remote add upstream git@github.com:suse-edge/charts.git
+----
+
+Opcionalmente, desactivad la URL de envío para no enviar cambios directamente a él:
+
+[,shell]
+----
+$ git remote set-url --push upstream ""
+----
+
+Deberá tener el siguiente aspecto:
+
+[,shell]
+----
+$ git remote -v
+origin  git@github.com:e-minguez/suse-edge-charts.git (fetch)
+origin  git@github.com:e-minguez/suse-edge-charts.git (push)
+upstream        git@github.com:suse-edge/charts.git (fetch)
+upstream         (push)
+----
+
+== Firmar los commits
+
+Algunos repositorios requieren firmar los commits para reconocer que habéis leído y aceptado las normas y la licencia del repositorio/proyecto.
+
+Al realizar el commit de los cambios, simplemente añadid el flag `-s` o `--signoff` al comando de commit de la siguiente manera:
+
+[,shell]
+----
+$ git commit --signoff --message 'This is my commit message'
+----
+
+Si habéis creado un commit al que le falta la línea signed-off-by, podéis modificar vuestros commits:
+
+[,shell]
+----
+git commit --amend --signoff
+----
+
+Si ya habéis enviado vuestros cambios a GitHub, tendréis que forzar el envío de vuestra rama después de esto con `git push -f`.
+
+== Verificación de la firma del commit
+
+Podéis firmar las confirmaciones para dar a otras personas confianza sobre el origen de un cambio que habéis realizado. Si una confirmación o etiqueta tiene una firma GPG, SSH o S/MIME que es criptográficamente verificable, GitHub marca la confirmación o etiqueta como "Verificada" o "Parcialmente verificada".
+
+El proceso implica generar una clave GPG, utilizar una clave SSH o una clave X.509. Consultad la documentación de https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification[GitHub] para obtener más información sobre cómo configurarlo.
+
+== Mantened vuestra rama principal sincronizada
+
+Si habéis estado trabajando en una rama específica y queréis obtener las últimas actualizaciones de la rama principal del repositorio de sentido ascendente:
+
+[,shell]
+----
+$ git switch main
+$ git pull --rebase upstream/main
+----
+
+== Cread una rama para trabajar en una funcionalidad/corrección/algo
+
+[,shell]
+----
+$ git switch main
+$ git pull --rebase upstream/main
+$ git checkout -b myawesomebranch
+----
+
+Esto creará una nueva rama localmente con el contenido de la principal.
+
+== Enviad los cambios de vuestra rama local a GitHub
+
+[,shell]
+----
+$ git add <files>
+$ git commit -av
+# Review the changes, add a meaningful commit message and save it
+$ git push origin/myawesomebranch
+----
+
+== Cread una PR
+
+Tras el mensaje de git push anterior, se mostrará una URL de GitHub. Seguidla y cread la PR. Comprobad dos veces el contenido, las ramas, los repositorios de origen/destino y la lista de cambios.
+
+== Rebasad vuestra rama
+
+Puede ocurrir que el contenido de la rama principal del repositorio de sentido ascendente haya cambiado. Tendréis que actualizar vuestra rama principal y rebasar la rama en la que habéis estado trabajando.
+
+[,shell]
+----
+$ git pull --rebase upstream/main
+$ git push --force-with-lease
+----
+
+____
+Pueden surgir posibles problemas con `--force-with-lease`.
+____
+
+== Aplicad cherry-pick a las confirmaciones
+
+Cuando se hayan fusionado cambios, por ejemplo, en la rama principal y queráis aplicar cherry-pick a esas confirmaciones en otra rama (por ejemplo, release-3.3), el proceso debería ser:
+
+* Obtened todas las ramas:
+
+----
+$ git fetch --all
+----
+
+* Obtened el/los ID de confirmación que queréis aplicar mediante cherry-pick (desde la rama principal):
+
+----
+$ git log main --oneline
+----
+
+O bien
+
+----
+$ git log main --graph --oneline --all
+----
+
+* Cread una rama donde aterrice el proceso de cherry-pick:
+
+----
+$ git checkout -b cherry-pick-of-fix-293 upstream/release-3.3
+----
+
+* Aplicad el cherry-pick a la(s) confirmación(es):
+
+----
+$ git cherry-pick -x <commit-id(s)>
+----
+
+Observad la salida y ved si hay conflictos. Si los hay, ¡buena suerte arreglándolos! :)
+
+* Revisad el registro de git por si acaso:
+
+----
+$ git log
+----
+
+* Enviad los cambios
+
+----
+$ git push origin cherry-pick-of-fix-293
+----
+
+* Cread la PR
+
+Tras el mensaje de git push anterior, se mostrará una URL de GitHub. Seguidla y cread la PR. Comprobad dos veces el contenido, las ramas, los repositorios de origen/destino y la lista de cambios.
+
+== Incorporad los comentarios de una PR
+
+La mayoría de las veces, una PR requerirá algunos cambios. Para incorporar dichos comentarios hay varias formas, pero la recomendación general es reelaborar la confirmación localmente y enviarla con los comentarios.
+
+* Verificad que seguís en la rama de la PR:
+
+----
+$ git branch
+$ git status
+----
+
+* Añadid los cambios a los archivos necesarios y añadid los archivos al área de preparación:
+
+----
+$ git add path/to/my/file
+----
+
+Si solo queréis añadir cambios a la última confirmación sin cambiar el mensaje:
+
+----
+$ git commit --amend --no-edit
+----
+
+Entonces forzad el envío de la rama (véase más abajo)
+
+Si queréis combinar varias confirmaciones pequeñas que abordan los comentarios en una sola confirmación limpia, o combinarlas con confirmaciones anteriores en vuestra PR:
+
+* Contad cuántas confirmaciones queréis combinar/reescribir (p. ej., N).
+
+----
+$ git log --oneliner
+----
+
+Entonces:
+
+----
+$ git rebase -i HEAD~N
+----
+
+Esto abrirá un editor donde podréis combinar, corregir, reescribir, etc., las confirmaciones
+
+* Guardad y cerrad el editor
+
+* Forzad el envío de la rama. Esto debe ser _forzado_ porque la rama remota ahora difiere de la rama local:
+
+----
+$ git push --force-with-lease origin myawesomebranch
+----
+
+[NOTE]
+====
+Consultad https://git-scm.com/book/en/v2/Git-Tools-Rewriting-History[la documentación oficial de Git para obtener más información]
+
+Si estáis intentando solucionar un problema de Github, no olvidéis vincular la PR a un problema añadiendo «Closes #XXX» o «Fixes #XXX» al mensaje de confirmación. Consultad https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue#linking-a-pull-request-to-an-issue-using-a-keyword[Vincular una solicitud de extracción a un problema mediante una palabra clave] para obtener más información sobre esta funcionalidad.
+====
