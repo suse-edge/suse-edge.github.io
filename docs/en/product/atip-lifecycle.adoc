@@ -77,7 +77,8 @@ The changes required to upgrade the `RKE2` cluster using the automated workflow 
 
 * Change the block `RKE2ControlPlane` in the `capi-provisioning-example.yaml` shown in the following <<single-node-provision,section>>:
 
-  ** Specify the desired `rolloutStrategy`.
+  ** Specify the desired `rolloutStrategy`
+  *** Note that in a multi-node `RKE2` cluster with at least 3 control plane nodes, setting the `RKE2ControlPlane.spec.rolloutStrategy.type` field to `"RollingUpdate"` and the `rolloutStrategy.rollingUpdate.maxSurge` to `0` ensures no extra nodes being created/needed during the upgrade when the related `Metal3MachineTemplate.spec.nodeReuse` is also set to `True` (as explained below).
   ** Change the version of the `RKE2` cluster to the new version replacing `$\{RKE2_NEW_VERSION\}`.
   ** Decide if an ingress controller is to be deployed in the downstream cluster:
   *** [Option 0]: Do not deploy any ingress controller
@@ -98,21 +99,26 @@ once the `Traefik` ingress controller replaces the discontinued `Ingress-NGINX`.
 apiVersion: controlplane.cluster.x-k8s.io/v1beta2
 kind: RKE2ControlPlane
 metadata:
-  name: single-node-cluster
+  name: multinode-cluster
   namespace: default
 spec:
   infrastructureRef:
     apiGroup: infrastructure.cluster.x-k8s.io
     kind: Metal3MachineTemplate
-    name: single-node-cluster-controlplane
+    name: multinode-cluster-controlplane
   version: ${RKE2_NEW_VERSION}
-  replicas: 1
+  replicas: 3
   rolloutStrategy:
     type: "RollingUpdate"
     rollingUpdate:
       maxSurge: 0
   serverConfig:
     cni: cilium
+    tlsSan:
+      - ${EDGE_VIP_ADDRESS_IPV4}
+      - ${EDGE_VIP_ADDRESS_IPV6}
+      - https://${EDGE_VIP_ADDRESS_IPV4}.sslip.io
+      - https://${EDGE_VIP_ADDRESS_IPV6}.sslip.io
   #===========================================================================
   # Uncomment the following lines if selecting [Option 0]: Do not deploy
   # any ingress controller
@@ -125,6 +131,7 @@ spec:
     rollingUpdate:
       maxSurge: 0
   registrationMethod: "control-plane-endpoint"
+  registrationAddress: ${EDGE_VIP_ADDRESS}
   agentConfig:
     format: ignition
     additionalUserData:
@@ -182,6 +189,86 @@ spec:
           - path: /var/lib/rancher/rke2/server/manifests
             overwrite: true
           files:
+            - path: /var/lib/rancher/rke2/server/manifests/endpoint-copier-operator.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChart
+                  metadata:
+                    name: endpoint-copier-operator
+                    namespace: kube-system
+                  spec:
+                    chart: oci://registry.suse.com/edge/charts/endpoint-copier-operator
+                    targetNamespace: endpoint-copier-operator
+                    version: {version-endpoint-copier-operator-chart}
+                    createNamespace: true
+            - path: /var/lib/rancher/rke2/server/manifests/metallb.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChart
+                  metadata:
+                    name: metallb
+                    namespace: kube-system
+                  spec:
+                    chart: oci://registry.suse.com/edge/charts/metallb
+                    targetNamespace: metallb-system
+                    version: {version-metallb-chart}
+                    createNamespace: true
+            - path: /var/lib/rancher/rke2/server/manifests/metallb-cr.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: metallb.io/v1beta1
+                  kind: IPAddressPool
+                  metadata:
+                    name: kubernetes-vip-ip-pool
+                    namespace: metallb-system
+                  spec:
+                    addresses:
+                      - ${EDGE_VIP_ADDRESS_IPV4}/32
+                      - ${EDGE_VIP_ADDRESS_IPV6}/128
+                    serviceAllocation:
+                      priority: 100
+                      namespaces:
+                        - default
+                      serviceSelectors:
+                        - matchExpressions:
+                          - {key: "serviceType", operator: In, values: [kubernetes-vip]}
+                  ---
+                  apiVersion: metallb.io/v1beta1
+                  kind: L2Advertisement
+                  metadata:
+                    name: ip-pool-l2-adv
+                    namespace: metallb-system
+                  spec:
+                    ipAddressPools:
+                      - kubernetes-vip-ip-pool
+            - path: /var/lib/rancher/rke2/server/manifests/endpoint-svc.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: v1
+                  kind: Service
+                  metadata:
+                    name: kubernetes-vip
+                    namespace: default
+                    labels:
+                      serviceType: kubernetes-vip
+                  spec:
+                    ipFamilyPolicy: PreferDualStack
+                    ports:
+                    - name: rke2-api
+                      port: 9345
+                      protocol: TCP
+                      targetPort: 9345
+                    - name: k8s-api
+                      port: 6443
+                      protocol: TCP
+                      targetPort: 6443
+                    type: LoadBalancer
           #############################################################################    
           # if [Option 2]: "Deploy both `Ingress-NGINX` and `Traefik`" is selected
           #############################################################################
@@ -270,7 +357,7 @@ spec:
 apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
 kind: Metal3MachineTemplate
 metadata:
-  name: single-node-cluster-controlplane
+  name: multinode-cluster-controlplane
   namespace: default
 spec:
   nodeReuse: True
@@ -278,7 +365,7 @@ spec:
     spec:
       automatedCleaningMode: metadata
       dataTemplate:
-        name: single-node-cluster-controlplane-template
+        name: multinode-cluster-controlplane-template
       hostSelector:
         matchLabels:
           cluster-role: control-plane
