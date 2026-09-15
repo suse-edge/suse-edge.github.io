@@ -68,16 +68,6 @@ def parse_args() -> argparse.Namespace:
         help="Local Factory repository. Required with --factory-ref.",
     )
     parser.add_argument(
-        "--container-engine",
-        choices=("podman", "docker"),
-        help="Container engine for --container-image. Defaults to podman, then docker.",
-    )
-    parser.add_argument(
-        "--skip-pull",
-        action="store_true",
-        help="Do not refresh --container-image; use the cached image.",
-    )
-    parser.add_argument(
         "--release-date",
         type=common.iso_date,
         help="Release date in YYYY-MM-DD form. Updates revdate attributes when supplied.",
@@ -255,9 +245,7 @@ def main() -> int:
     temp_dir: tempfile.TemporaryDirectory[str] | None = None
     try:
         if args.container_image:
-            temp_dir = common.extract_manifest_container(
-                args.container_image, args.container_engine, args.skip_pull
-            )
+            temp_dir = common.extract_manifest_container(args.container_image)
             manifest_dir = Path(temp_dir.name)
             source_label = args.container_image
         elif args.manifest_url:

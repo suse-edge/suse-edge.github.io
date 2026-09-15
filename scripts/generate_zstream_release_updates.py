@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import difflib
 import re
-import shutil
 import subprocess
 import sys
 import tarfile
@@ -125,16 +124,6 @@ def parse_args() -> argparse.Namespace:
         help="Local Factory repository. Required with --factory-ref.",
     )
     parser.add_argument(
-        "--container-engine",
-        choices=("podman", "docker"),
-        help="Container engine for --container-image. Defaults to podman, then docker.",
-    )
-    parser.add_argument(
-        "--skip-pull",
-        action="store_true",
-        help="Do not pull a missing --container-image.",
-    )
-    parser.add_argument(
         "--release-date",
         type=iso_date,
         help="Release date in YYYY-MM-DD form. Updates revdate attributes when supplied.",
@@ -160,54 +149,32 @@ def load_yaml(path: Path) -> Any:
         return yaml.safe_load(handle)
 
 
-def find_container_engine(requested: str | None) -> str:
-    candidates = [requested] if requested else ["podman", "docker"]
-    for candidate in candidates:
-        if candidate and shutil.which(candidate):
-            return candidate
-    raise RuntimeError(f"could not find container engine: {requested or 'podman or docker'}")
-
-
-def ensure_container_image(image: str, engine: str, skip_pull: bool) -> None:
-    if not skip_pull:
-        print(f"Pulling release manifest image: {image}", file=sys.stderr)
-        subprocess.check_call([engine, "pull", image])
-        return
-
-    if subprocess.call(
-        [engine, "image", "inspect", image],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    ) != 0:
-        raise RuntimeError(f"container image is not available locally: {image}")
-
-
-def extract_manifest_container(
-    image: str, requested_engine: str | None, skip_pull: bool
-) -> tempfile.TemporaryDirectory[str]:
-    temp_dir = tempfile.TemporaryDirectory(prefix="edge-docs-release-manifest-")
-    engine = find_container_engine(requested_engine)
-    container_id = ""
+def extract_manifest_container(image: str) -> tempfile.TemporaryDirectory[str]:
+    """Fetch manifest files from OCI using the shared ORAS implementation."""
     try:
-        ensure_container_image(image, engine, skip_pull)
-        container_id = subprocess.check_output(
-            [engine, "create", image], text=True, stderr=subprocess.STDOUT
-        ).strip()
+        import versions_update
+    except ImportError as exc:
+        raise RuntimeError(
+            "OCI image input requires the dependencies documented in scripts/README.md"
+        ) from exc
+
+    temp_dir = tempfile.TemporaryDirectory(prefix="edge-docs-release-manifest-")
+    try:
+        manifest_data, _ = versions_update.fetch_release_manifest(image)
         for filename in REQUIRED_MANIFEST_FILES:
-            subprocess.check_call(
-                [engine, "cp", f"{container_id}:/{filename}", str(Path(temp_dir.name) / filename)]
+            key = filename.removesuffix(".yaml")
+            if key not in manifest_data:
+                raise RuntimeError(f"{filename} not found in {image}")
+            destination = Path(temp_dir.name) / filename
+            destination.write_text(
+                yaml.safe_dump(manifest_data[key], sort_keys=False), encoding="utf-8"
             )
-    except subprocess.CalledProcessError as exc:
+        validate_manifest_dir(Path(temp_dir.name))
+    except Exception as exc:
         temp_dir.cleanup()
-        output = exc.output.strip() if isinstance(exc.output, str) else str(exc)
-        raise RuntimeError(f"failed to extract release manifest files from {image}: {output}") from exc
-    finally:
-        if container_id:
-            subprocess.call(
-                [engine, "rm", "-f", container_id],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+        raise RuntimeError(
+            f"failed to fetch release manifest files from {image}: {exc}"
+        ) from exc
     return temp_dir
 
 
@@ -456,6 +423,7 @@ def build_release_data(manifest_dir: Path) -> ReleaseData:
 
     attributes: dict[str, str] = {
         "version-edge-registry": release_family,
+        "version-release-manifest": release_version,
         "version-kubernetes-k3s": k3s_version,
         "version-kubernetes-rke2": rke2_version,
         "version-operatingsystem": operating_system_version,
@@ -851,9 +819,7 @@ def main() -> int:
     temp_dir: tempfile.TemporaryDirectory[str] | None = None
     try:
         if args.container_image:
-            temp_dir = extract_manifest_container(
-                args.container_image, args.container_engine, args.skip_pull
-            )
+            temp_dir = extract_manifest_container(args.container_image)
             manifest_dir = Path(temp_dir.name)
             source_label = args.container_image
         elif args.manifest_url:

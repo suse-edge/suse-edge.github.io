@@ -18,12 +18,12 @@ known issues, ambiguous image choices, and additions/removals from curated
 image examples for manual review. Migration documentation also keeps pointing
 at the initial `x.y.0` release and is not changed for z-stream releases.
 
-PyYAML is the only Python dependency. `--container-image` also requires Podman
-or Docker. Container tags are pulled on every run so mutable OBS test tags are
-refreshed; use `--skip-pull` only when intentionally using a cached image.
+The scripts use the same ORAS-based OCI implementation as `versions_update.py`,
+so `--container-image` does not require Podman or Docker. Image references are
+fetched from the registry on every run, including when a mutable OBS tag is used.
 
 ```bash
-python3 -m pip install PyYAML
+python3 -m pip install --upgrade 'oras>=0.2.41' requests pyyaml jinja2
 
 # Preview changes from the release manifest image.
 ./scripts/generate_zstream_release_updates.py \
