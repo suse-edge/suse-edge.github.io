@@ -389,9 +389,24 @@ def main():
         except Exception as e:
             print(f"  ⚠ Warning: Could not derive IPA version from release_images.yaml: {e}")
             manifest_data['version_ipa'] = ''
+        try:
+            manifest_data['version_capi_provider_metal3'] = get_image_tag_from_release_images(
+                release_images, 'cluster-api-provider-metal3'
+            )
+        except Exception as e:
+            print(f"  ⚠ Warning: Could not derive CAPM3 version from release_images.yaml: {e}")
+            manifest_data['version_capi_provider_metal3'] = ''
+        try:
+            kubevirt_tag = get_image_tag_from_release_images(release_images, 'virt-operator')
+            manifest_data['version_kubevirt'] = kubevirt_tag.lstrip('v').split('-', 1)[0]
+        except Exception as e:
+            print(f"  ⚠ Warning: Could not derive KubeVirt version from release_images.yaml: {e}")
+            manifest_data['version_kubevirt'] = ''
     else:
-        print("⚠ Warning: release_images.yaml not found, skipping IPA version")
+        print("⚠ Warning: release_images.yaml not found, skipping image versions")
         manifest_data['version_ipa'] = ''
+        manifest_data['version_capi_provider_metal3'] = ''
+        manifest_data['version_kubevirt'] = ''
 
     if rancher_version:
         print(f"Fetching Rancher image list from https://prime.ribs.rancher.io/rancher/v{rancher_version}/rancher-images.txt")
