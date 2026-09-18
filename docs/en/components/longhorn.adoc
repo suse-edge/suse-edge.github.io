@@ -1,6 +1,6 @@
 [#components-suse-storage]
 = https://www.suse.com/products/rancher/storage/[SUSE Storage]
-:revdate: 2025-05-20
+:revdate: 2026-09-17
 :revnumber: 3.7
 :page-revdate: {revdate}
 :experimental:
@@ -58,6 +58,9 @@ For additional help installing open-iscsi, refer to the {link-longhorn-iscsi}[of
 There are several ways to install SUSE Storage on your Kubernetes clusters.
 This guide will follow through the Helm installation, however feel free to follow the {link-longhorn-installation}[official documentation] if another approach is desired.
 
+Starting with {product} 3.7, the V2 Data Engine is recommended for new volumes.
+Before enabling it, prepare the required block devices and review <<guides-suse-storage-v2-data-engine>>.
+
 . Log into the Rancher Application Collection:
 +
 [,shell]
@@ -77,7 +80,10 @@ helm install longhorn oci://dp.apps.rancher.io/charts/suse-storage \
   --set privateRegistry.registryUrl=dp.apps.rancher.io \
   --set privateRegistry.registryUser=$APPS.RANCHER.IO_USERNAME \
   --set privateRegistry.registryPasswd=$APPS.RANCHER.IO_ACCESS_TOKEN \
-  --set privateRegistry.registrySecret=application-collection
+  --set privateRegistry.registrySecret=application-collection \
+  --set defaultSettings.v1DataEngine=false \
+  --set defaultSettings.v2DataEngine=true \
+  --set persistence.dataEngine=v2
 ----
 +
 . Confirm that the deployment succeeded:
@@ -117,7 +123,8 @@ longhorn-ui-6bcc65d4bd-rwf97                        1/1     Running   0         
 SUSE Storage utilizes Kubernetes resources called `StorageClass` in order to automatically provision `PersistentVolume` objects for pods.
 Think of `StorageClass` as a way for administrators to describe the _classes_ or _profiles_ of storage they offer.
 
-Let's create a `StorageClass` with some default options:
+The following example creates a V2 `StorageClass`.
+The V2 Data Engine and a schedulable block disk must already be configured as described in <<guides-suse-storage-v2-data-engine>>.
 
 [,shell]
 ----
@@ -125,10 +132,11 @@ kubectl apply -f - <<EOF
 kind: StorageClass
 apiVersion: storage.k8s.io/v1
 metadata:
-  name: longhorn-example
+  name: longhorn-v2-example
 provisioner: driver.longhorn.io
 allowVolumeExpansion: true
 parameters:
+  dataEngine: "v2"
   numberOfReplicas: "3"
   staleReplicaTimeout: "2880" # 48 hours in minutes
   fromBackup: ""
@@ -153,7 +161,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: longhorn-example
+  storageClassName: longhorn-v2-example
   resources:
     requests:
       storage: 2Gi
@@ -201,11 +209,11 @@ In this example, the result should look something like this:
 localhost:~ # kubectl get storageclass
 NAME                 PROVISIONER          RECLAIMPOLICY   VOLUMEBINDINGMODE   ALLOWVOLUMEEXPANSION   AGE
 longhorn (default)   driver.longhorn.io   Delete          Immediate           true                   12m
-longhorn-example     driver.longhorn.io   Delete          Immediate           true                   24s
+longhorn-v2-example  driver.longhorn.io   Delete          Immediate           true                   24s
 
 localhost:~ # kubectl get pvc -n longhorn-system
 NAME                STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS       AGE
-longhorn-volv-pvc   Bound    pvc-f663a92e-ac32-49ae-b8e5-8a6cc29a7d1e   2Gi        RWO            longhorn-example   54s
+longhorn-volv-pvc   Bound    pvc-f663a92e-ac32-49ae-b8e5-8a6cc29a7d1e   2Gi        RWO            longhorn-v2-example   54s
 
 localhost:~ # kubectl get pods -n longhorn-system
 NAME                                                READY   STATUS    RESTARTS      AGE
@@ -318,6 +326,7 @@ EOF
 ====
 Customizing any of the Helm chart values is possible via a separate file provided under `helm.charts[].valuesFile`.
 Refer to the {link-eib-building-images-k8s}[upstream documentation] for details.
+To use the V2 Data Engine, include the V2 values and ensure that the required raw block devices are prepared and registered as described in <<guides-suse-storage-v2-data-engine>>.
 ====
 
 Let's build the image:
