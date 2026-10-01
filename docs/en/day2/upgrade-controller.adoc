@@ -53,6 +53,7 @@ apiVersion: lifecycle.suse.com/v1alpha1
 kind: UpgradePlan
 metadata:
   name: upgrade-plan-mgmt
+  namespace: upgrade-controller-system  # replaces it if the upgrade controller has been deployed in a different namespace
 spec:
   # Version retrieved from release notes
   releaseVersion: 3.X.Y
@@ -74,74 +75,56 @@ For information on how to track the `upgrade process`, refer to <<components-upg
 ====
 
 === Post-Upgrade Steps
-`{product}` upgrades from latest `{previous-edge-version}` z-stream to `{static-edge-version}` can require some final manual steps to be performed after the `Upgrade Controller` has completed the upgrade process. Those are related to the replacement of Ingress-NGINX with Traefik as the single supported ingress controller in `{product}` from `{version}` release.
+`{product}` upgrades from latest `{previous-edge-version}` z-stream to `{static-edge-version}` require a final manual steps to be performed after the `Upgrade Controller` has completed the upgrade process, related to some Helm parameters changes in the `rke2-traefik` Helm chart included in `{product}` `{static-edge-version}` release.
 
+* apply the following changes in the `helmchartconfigs.helm.cattle.io/rke2-traefik` API object in `kube-system` namespace (or, in case that API object does not exist, apply them in the `helmcharts.helm.cattle.io/rke2-traefik` API object):
 [NOTE]
 ====
-The `Traefik` ingress provider integrated into RKE2/K3s is the only ingress controller supported in `{product} {version}` release, being still possible to temporarily run `Ingress-NGINX` alongside `Traefik` in order to support complex ingress migration scenarios, but only after `{product}` Management and/or Downstream clusters have been upgraded to version `{version}` and for the time required to perform that migration.
-
-RKE2 https://docs.rke2.io/reference/ingress_migration[Ingress NGINX to Traefik Migration] guide provides details on the ingress migration paths available
-once the `Traefik` ingress controller replaces the discontinued `Ingress-NGINX`.
+Use the `HelmChartConfig` (or `HelmChart`) manifests to apply these changes as shown below, to assure the `Upgrade Controller` will keep them in future Management cluster upgrades.
 ====
-
-In case the just upgraded Management cluster was not running the `Traefik` ingress controller (but the default Ingress-NGINX one) before triggering the upgrade, it is now then needed to manually deploy `Traefik`.
-
-First we are going to assure the deployed ingress-NGINX instance is properly configured (e.g., to avoid unnecessary hostPort collisions between the pods from the
-two ingress controllers):
 
 [,shell]
 ----
-kubectl apply -f - <<- EOF
+# You can use `kubectl edit', `kubectl patch` or `kubectl apply` commands to apply the changes indicated below
 apiVersion: helm.cattle.io/v1
 kind: HelmChartConfig
 metadata:
-  name: rke2-ingress-nginx
+  name: rke2-traefik
   namespace: kube-system
 spec:
+  failurePolicy: reinstall
   valuesContent: |-
-    controller:
-      hostPort:
-        enabled: false  # not needed when exposing through a type:LoadBalancer service
-      config:
-        use-forwarded-headers: "true"
-        enable-real-ip: "true"
-      publishService:
-        enabled: true
-      service:
-        enabled: true
-        type: LoadBalancer
+    ingressClass:
+      isDefaultClass: true
+    ports:
+      web:
+        hostPort: null
+        exposedPort: 80
+      websecure:
+        hostPort: null
+        exposedPort: 443
+    service:
+      enabled: true
+      # type: LoadBalancer              # CHANGE_1: This Helm parameter has been REMOVED
+      # ipFamilyPolicy: PreferDualStack # CHANGE_2: This Helm parameter has been REMOVED
+      spec:
+        type: LoadBalancer              # CHANGE_3: NEW Helm parameter replacing the old/removed one (above)
+        ipFamilyPolicy: PreferDualStack # CHANGE_4: NEW Helm parameter replacing the old/removed one (above)
         externalTrafficPolicy: Local
+        allocateLoadBalancerNodePorts: false
+    providers:
+      kubernetesIngressNGINX:           # CHANGE_5: NEW Helm parameter replacing the old/removed "KubernetesIngressNginx"
+        enabled: true
+        ingressClass: "rke2-ingress-nginx-migration"
+        controllerClass: "rke2.​cattle.​io/ingress-nginx-migration"
 EOF
 ----
 
-Now we can proceed with the deployment of `Traefik`, through the installation of both `rke2-traefik-crd` and `rke2-traefik` Helm charts.
-[NOTE]
-====
-Deploy these Helm chats through `HelmChart` manifests, as shown below, to assure the `Upgrade Controller` will take care of also upgrading these Helm charts
-in future Management cluster upgrades.
-====
+Or, in case the `helmchartconfigs.helm.cattle.io/rke2-traefik` API object in the `kube-system` namespace does not exist:
 
 [,shell]
 ----
-kubectl apply -f - <<- EOF
-apiVersion: helm.cattle.io/v1
-kind: HelmChart
-metadata:
-  name: rke2-traefik-crd
-  namespace: kube-system
-spec:
-  chart: rke2-traefik-crd
-  version: {rke2-traefik-crd Helm chart version}
-  repo: https://rke2-charts.rancher.io
-  bootstrap: false
-  failurePolicy: reinstall
-  backOffLimit: 20
-  targetNamespace: kube-system
-  set:
-    global.cattle.systemDefaultRegistry: registry.rancher.com
-    global.rke2DataDir: /var/lib/rancher/rke2
-    global.systemDefaultRegistry: registry.rancher.com
----
+# You can use `kubectl edit', `kubectl patch` or `kubectl apply` commands to apply the changes indicated below
 apiVersion: helm.cattle.io/v1
 kind: HelmChart
 metadata:
@@ -161,64 +144,31 @@ spec:
     global.systemDefaultRegistry: registry.rancher.com
   valuesContent: |-
     ingressClass:
-      isDefaultClass: false  # if traefik deployed alongside ingress-nginx
+      isDefaultClass: true
     ports:
       web:
-        hostPort: null    # disallow hostPort
+        hostPort: null
         exposedPort: 80
       websecure:
-        hostPort: null    # disallow hostPort
+        hostPort: null
         exposedPort: 443
     service:
       enabled: true
-      type: LoadBalancer
+      # type: LoadBalancer              # CHANGE_1: This Helm parameter has been REMOVED
+      # ipFamilyPolicy: PreferDualStack # CHANGE_2: This Helm parameter has been REMOVED
       spec:
+        type: LoadBalancer              # CHANGE_3: NEW Helm parameter replacing the old/removed one (above)
+        ipFamilyPolicy: PreferDualStack # CHANGE_4: NEW Helm parameter replacing the old/removed one (above)
         externalTrafficPolicy: Local
-        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+        allocateLoadBalancerNodePorts: false
     providers:
-      kubernetesIngressNginx:  # this provider allows traefik to "understand" most of the ingress-nginx annotations
+      kubernetesIngressNGINX:           # CHANGE_5: NEW Helm parameter replacing the old/removed "KubernetesIngressNginx"
         enabled: true
         ingressClass: "rke2-ingress-nginx-migration"
         controllerClass: "rke2.​cattle.​io/ingress-nginx-migration"
 EOF
 ----
 
-The `{rke2-traefik-crd Helm chart version}` and `{rke2-traefik-crd Helm chart version}` are the ones dictated by the RKE2/k3s version
-we have upgraded to.
-
-In the last step, we finally create the MetalLB required objects to expose the `Traefik` service through a LoadBalancer type service:
-
-[,shell]
-----
-kubectl apply -f - <<- EOF
-apiVersion: metallb.io/v1beta1
-kind: IPAddressPool
-metadata:
-  name: ingress-ippool-traefik
-  namespace: metallb-system
-spec:
-  addresses:
-  - {EXTERNAL_IP_FOR_TRAEFIK_SERVICE}/32
-  serviceAllocation:
-    priority: 100
-    serviceSelectors:
-    - matchExpressions:
-      - {key: app.kubernetes.io/name, operator: In, values: [rke2-traefik]}
----
-apiVersion: metallb.io/v1beta1
-kind: L2Advertisement
-metadata:
-  name: ingress-l2-adv-traefik
-  namespace: metallb-system
-spec:
-  ipAddressPools:
-  - ingress-ippool-traefik
-EOF
-----
-
-Now both `Traefik` and `Ingress-NGINX` are running side by side, allowing you to safely perform the necessary migration of your ingresses from one to the other.
-
-[IMPORTANT]
-====
-Once all ingresses have been migrated and you no longer need `Ingress-NGINX`, make sure to uninstall it and clean up all related resources to avoid any unnecessary resource consumption on your cluster.
-====
+The `{rke2-traefik Helm chart version}` shown above is the one provided by the RKE2/k3s release used in the `{product}`
+ `{static-edge-version}` release to upgrade to (you can get it from the corresponding https://github.com/rancher/rke2/releases/[RKE2 release page] 
+ / https://github.com/k3s-io/k3s/releases/[k3s release page]).
