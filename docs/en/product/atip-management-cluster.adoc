@@ -723,7 +723,6 @@ The `kubernetes/config` folder contains the following files:
 cni:
 - multus
 - cilium
-ingress-controller: traefik
 write-kubeconfig-mode: '0644'
 selinux: true
 system-default-registry: registry.rancher.com
@@ -734,18 +733,9 @@ system-default-registry: registry.rancher.com
 This is an optional file to define certain Kubernetes customization, like the CNI plug-ins to be used or many options you can check in the https://docs.rke2.io/install/configuration[official documentation].
 ====
 
-[WARNING]
-====
-The `Traefik` ingress provider integrated into RKE2/K3s is the only ingress controller supported in `{product} {version}` release, being still possible to temporarily run `Ingress-NGINX` alongside `Traefik` in order to support complex ingress migration scenarios, but only after `{product}` Management and/or Downstream clusters have been upgraded to version `{version}` and for the time required to perform that migration. Since `Traefik` is not yet the default ingress controller in RKE2 (it will be
-from RKE2 v1.36 onwards), it must be explicitly "requested" from the RKE2 server configuration file, resulting in the need to include the `kubernetes/config/server.yaml` file in  all the EIB self-install iso images generated to provision `{product} {version}` Management clusters' nodes.
-
-RKE2 https://docs.rke2.io/reference/ingress_migration[Ingress NGINX to Traefik Migration] guide provides details on the ingress migration paths available
-once the `Traefik` ingress controller replaces the discontinued `Ingress-NGINX`.
-====
-
 The `os-files/var/lib/rancher/rke2/server/manifests` folder contains the following file:
 
-- `rke2-ingress-config.yaml`: contains the configuration to create the `Ingress` service for the management cluster (no modifications needed).
+- `rke2-ingress-config.yaml`: contains the configuration to create the (Traefik based) `Ingress` service for the management cluster (no modifications needed except for the `.providers` stanza: to be removed in case of not deploying/not planning to deploy `Ingress` API objects containing `ingress-nginx` annotations in its `.metadata` stanza).
 +
 [,yaml]
 ----
@@ -767,12 +757,12 @@ spec:
         exposedPort: 443
     service:
       enabled: true
-      type: LoadBalancer
       spec:
+        type: LoadBalancer
         externalTrafficPolicy: Local
-        allocateLoadBalancerNodePorts: false  # k8s GA from 1.24; supported by MetalLB
+        allocateLoadBalancerNodePorts: false
     providers:
-      kubernetesIngressNginx:  # this provider allows traefik to "understand" most of the ingress-nginx annotations
+      kubernetesIngressNGINX:  # this provider allows traefik to "understand" most of the ingress-nginx annotations
         enabled: true
         ingressClass: "rke2-ingress-nginx-migration"
         controllerClass: "rke2.​cattle.​io/ingress-nginx-migration"
@@ -811,7 +801,7 @@ spec:
     - ingress-ippool
 ----
 
-- `ingress-ippool.yaml`: contains the configuration to create the MetalLB `IPAddressPool` object for the `rke2-traefik` component. The `$\{INGRESS_VIP\}` has to be set properly to define the exposed IP address reserved to be used to reach the (internal) `rke2-traefik` service.
+- `ingress-ippool.yaml`: contains the configuration to create the MetalLB `IPAddressPool` object for the `rke2-traefik` component. The `$\{INGRESS_VIP\}` must be set to the external (Virtual) IP address reserved for the `rke2-traefik` LoadBalancer service.
 +
 [,yaml]
 ----
