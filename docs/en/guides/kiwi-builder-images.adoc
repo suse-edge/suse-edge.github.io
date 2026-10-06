@@ -163,3 +163,188 @@ $ podman rm kiwi-builder
 $ ls ./SL-Micro.*
 (...)
 ----
+
+== Building an OpenSCAP hardened image
+
+You can build a security-hardened image using OpenSCAP and the SCAP Security Guide (SSG) directly during the Kiwi build process. This ensures that the generated SUSE Linux Micro system boots with security compliance already applied and remediated.
+
+Standard compliance baselines can sometimes conflict with edge or Kubernetes requirements, such as disabling IPv4/IPv6 forwarding or running firewall services that interfere with container network interfaces (CNIs). To prevent disruption, you can optionally provide a tailoring file to unselect specific rules or customize configuration parameters.
+
+To build an OpenSCAP-hardened image with optional tailoring:
+
+. Extract the default Kiwi definition files:
++
+Create a working directory and copy the default definition files and scripts from the Kiwi builder container:
++
+[,console,subs="attributes"]
+----
+# mkdir ~/mydefs
+# podman create --name kiwi-builder registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder}
+# podman cp kiwi-builder:/micro-sdk/defs/. ~/mydefs/
+# podman rm kiwi-builder
+----
+
+. Add OpenSCAP packages to the Kiwi definition:
++
+Edit `~/mydefs/SL-Micro.kiwi` (or `~/mydefs/SL-Micro.kiwi.4096` if building for 4096-byte sector sizes) and add the `openscap-utils` and `scap-security-guide` packages inside the `<packages type="image">` section:
++
+[,xml]
+----
+<package name="openscap-utils"/>
+<package name="scap-security-guide"/>
+----
++
+* `openscap-utils`: Provides the `oscap` command-line scanner and the `autotailor` profile customization tool.
+* `scap-security-guide`: Provides the security policy datastreams (including `/usr/share/xml/scap/ssg/content/ssg-slmicro6-ds.xml`).
+
+. Add OpenSCAP hardening logic to `config.sh`:
++
+Append the following hardening routine to `~/mydefs/config.sh`. Kiwi runs `config.sh` inside the chrooted target system before creating the final image:
++
+[,bash]
+----
+#======================================
+# Apply OpenSCAP Hardening with Tailoring
+#======================================
+if [ -f /usr/share/xml/scap/ssg/content/ssg-slmicro6-ds.xml ]; then
+    echo "** Preparing OpenSCAP Hardening..."
+    
+    DATASTREAM="/usr/share/xml/scap/ssg/content/ssg-slmicro6-ds.xml"
+    BASE_PROFILE="xccdf_org.ssgproject.content_profile_general"
+    PROFILE_ID="${BASE_PROFILE}"
+    TAILORING_FLAGS=""
+    TAILORING_ARG=""
+    
+    # Check if tailoring configurations exist (copied in from host's micro-sdk/defs/root/etc/)
+    if [ -f /etc/scap-tailoring.txt ]; then
+        echo "** Tailoring configuration found at /etc/scap-tailoring.txt"
+        
+        # Read the lines, ignore comments and empty lines
+        TAILORING_FLAGS=$(grep -v '^#' /etc/scap-tailoring.txt | grep -v '^$' | tr '\n' ' ')
+        
+        if [ -n "${TAILORING_FLAGS}" ]; then
+            echo "** Generating tailored profile using autotailor..."
+            PROFILE_ID="xccdf_org.ssgproject.content_profile_general_tailored"
+            
+            # We temporarily disable exit-on-error for autotailor / xmllint
+            set +e
+            
+            # Run autotailor to generate tailoring XML
+            autotailor ${TAILORING_FLAGS} \
+                --output /tmp/ssg-slmicro6-tailored-ds.xml \
+                --new-profile-id "${PROFILE_ID}" \
+                "${DATASTREAM}" "${BASE_PROFILE}"
+            
+            # Format and check tailoring XML (workaround for older OpenSCAP versions)
+            if [ -f /tmp/ssg-slmicro6-tailored-ds.xml ]; then
+                xmllint --format /tmp/ssg-slmicro6-tailored-ds.xml > /tmp/ssg-slmicro6-tailored-ds-formatted.xml
+                TAILORING_ARG="--tailoring-file /tmp/ssg-slmicro6-tailored-ds-formatted.xml"
+            else
+                echo "WARNING: autotailor failed to generate tailoring file. Falling back to base profile."
+                PROFILE_ID="${BASE_PROFILE}"
+                TAILORING_ARG=""
+            fi
+            
+            set -e
+        fi
+    fi
+
+    echo "** Applying OpenSCAP Hardening Profile: ${PROFILE_ID}..."
+    set +e
+    if [ -n "${TAILORING_ARG}" ]; then
+        oscap xccdf eval --remediate \
+            --profile "${PROFILE_ID}" \
+            ${TAILORING_ARG} \
+            "${DATASTREAM}"
+    else
+        # Fallback to standard command skipping the dangerous authorized local users rule
+        oscap xccdf eval --remediate \
+            --profile "${PROFILE_ID}" \
+            --skip-rule xccdf_org.ssgproject.content_rule_accounts_authorized_local_users \
+            "${DATASTREAM}"
+    fi
+    set -e
+    echo "** OpenSCAP Hardening completed."
+    
+    # Clean up temporary tailoring files
+    rm -f /tmp/ssg-slmicro6-tailored-ds.xml /tmp/ssg-slmicro6-tailored-ds-formatted.xml
+    rm -f /etc/scap-tailoring.txt
+fi
+----
++
+This script checks for the presence of the SCAP Security Guide datastream:
++
+* If `/etc/scap-tailoring.txt` is present, `autotailor` creates a tailored profile XML (`xccdf_org.ssgproject.content_profile_general_tailored`), and `oscap` evaluates and remediates using that tailored profile.
+* If no tailoring file is found, `oscap` applies the base profile (`xccdf_org.ssgproject.content_profile_general`) while skipping `accounts_authorized_local_users` to avoid locking out or deleting local accounts.
+* Temporary tailoring XML artifacts and `/etc/scap-tailoring.txt` are deleted at the end of the process.
+
+. (Optional) Provide a tailoring configuration:
++
+Kiwi copies any files in a `root/` subdirectory in the definitions directory into the root (`/`) of the image filesystem.
++
+Create the overlay directory:
++
+[,console]
+----
+# mkdir -p ~/mydefs/root/etc
+----
++
+Create `~/mydefs/root/etc/scap-tailoring.txt` and specify any rules to unselect or variables to customize. For example:
++
+[,text]
+----
+--unselect banner_etc_issue
+--unselect banner_etc_issue_net
+--unselect grub2_ipv6_disable_argument
+--unselect grub2_password
+--unselect kernel_module_sctp_disabled
+--unselect kernel_module_vfat_disabled
+--unselect package_dhcp_client_removed
+--unselect package_firewalld_installed
+--unselect package_rpcbind_removed
+--unselect service_firewalld_enabled
+--unselect sshd_enable_warning_banner
+--unselect sysctl_net_ipv4_ip_forward
+--unselect sysctl_net_ipv6_conf_all_forwarding
+--unselect xccdf_org.ssgproject.content_rule_accounts_authorized_local_users
+-v sysctl_net_ipv4_conf_all_forwarding_value=1
+-v sysctl_net_ipv4_conf_all_rp_filter_value=2
+-v sysctl_net_ipv4_conf_default_rp_filter_value=2
+-v sysctl_net_ipv6_conf_all_accept_ra_value=2
+-v sysctl_net_ipv6_conf_all_forwarding_value=1
+-v sysctl_net_ipv6_conf_default_accept_ra_value=2
+----
++
+* `--unselect`: Deselects rules that may conflict with edge or Kubernetes cluster networking (such as keeping IP forwarding enabled, keeping DHCP, or avoiding firewall service conflicts).
+* `-v`: Overrides default profile variables (such as enabling packet forwarding).
++
+[NOTE]
+====
+If `~/mydefs/root/etc/scap-tailoring.txt` is not provided, Kiwi builds the image using the base hardening profile without tailoring.
+====
+
+. Build the hardened image:
++
+Ensure the output directory is clean:
++
+[,console]
+----
+# rm -f ~/output/*
+----
++
+Run the Kiwi builder container with the custom definition directory mapped to `/micro-sdk/defs/`:
++
+[,console,subs="attributes"]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output -v ~/mydefs/:/micro-sdk/defs/ \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image
+----
++
+To build a specific profile, append `-p <profile_name>` (for example, `-p Default-SelfInstall` or `-p Base`):
++
+[,console,subs="attributes"]
+----
+# podman run --privileged -v /etc/zypp/repos.d:/micro-sdk/repos/ -v ~/output:/tmp/output -v ~/mydefs/:/micro-sdk/defs/ \
+    -it registry.suse.com/edge/{version-edge-registry}/kiwi-builder:{version-kiwi-builder} build-image -p Default-SelfInstall
+----
+
