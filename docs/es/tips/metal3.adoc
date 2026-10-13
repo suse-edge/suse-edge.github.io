@@ -1,0 +1,234 @@
+[#tips-metal3]
+= *Metal^3^*
+:revdate: 2025-10-07
+:revnumber: 3,4
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+:imagesdir: ../images/
+
+== Ironic
+
+=== Nombres de red predecibles
+
+Debido a un xref:../components/metal3.adoc#known-issues-metal3[problema conocido], si está intentando configurar nombres predecibles para los dispositivos de red del SO de destino y termina con errores, al ver que los nombres de dispositivo descubiertos tienen un patrón de nomenclatura diferente, entonces tiene un par de opciones:
+
+_Opción 1:_ Utilice dos secretos de configuración de red, uno para la fase de inspección/aprovisionamiento y otro para el SO desplegado.
+
+Se recomienda crear dos secretos diferentes con la configuración de red, uno para ser utilizado con IPA utilizando los nombres de dispositivo tal como IPA los descubrirá y utilizará como `preprovisioningNetworkDataName` en la definición `BareMetalHost`, y otro secreto con los nombres de dispositivo tal como SL Micro los descubrirá y utilizará como `networkData.name` en la definición `BareMetalHost`:
+
+*_Ejemplo de creación de dos secretos, uno para ser utilizado por IPA y otro para ser utilizado por el sistema operativo de destino_*
+
+* Secreto del SO de destino (SL Micro):
+
+----
+apiVersion: v1
+kind: Secret                                                                                                                                                               metadata:
+  name: controlplane-0-networkdata-os
+type: Opaque
+stringData:
+  networkData: |
+    interfaces:
+    - name: enp1s0
+      type: ethernet
+      state: up
+      mac-address: "00:f3:65:8a:a3:b0"
+      ipv4:
+        address:
+        - ip:  192.168.125.200
+          prefix-length: 24
+        enabled: true
+        dhcp: false                                                                                                                                     dns-resolver:
+      config:
+        server:
+        - 192.168.125.1
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-address: 192.168.125.1
+        next-hop-interface: enp1s0
+----
+
+* Secreto de ironic (IPA):
+
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: controlplane-0-networkdata-ipa
+type: Opaque
+stringData:
+  networkData: |
+    interfaces:
+    - name: enp1s0np0
+      type: ethernet
+      state: up
+      mac-address: "00:f3:65:8a:a3:b0"
+      ipv4:
+        address:
+        - ip:  192.168.125.200
+          prefix-length: 24
+        enabled: true
+        dhcp: false
+    dns-resolver:
+      config:
+        server:
+        - 192.168.125.1
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-address: 192.168.125.1
+        next-hop-interface: enp1s0np0
+----
+
+* Aplicar en el equipo sin sistema operativo:
+
+----
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: controlplane-0
+  labels:
+    cluster-role: control-plane
+spec:
+  preprovisioningNetworkDataName: controlplane-0-networkdata-ipa
+  networkData:
+    name: controlplane-0-networkdata-os
+...
+
+----
+
+_Opción 2:_ Alternativamente, puede utilizar UUID como identificadores.
+
+Cómo obtener los UUID que necesita:
+
+1. En su máquina OpenSUSE o SLES, instale nmc:
+`zypper in nm-configurator`
+
+2. luego ejecute directamente:
+`nmc generate --config-dir /path/to/your/config --output-dir /where/you/want/it`
+ahora, en los archivos de salida, debería tener los UUID que puede utilizar en su configuración.
+
+3. Alternativamente, si no utiliza OpenSUSE o SLES, puede utilizar nmc a través de la imagen de contenedor de Edge Image Builder:
+`podman run -it --rm -v $(pwd):/path/to/your/config:Z --entrypoint=/usr/bin/nmc registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} generate --confi
+g-dir /path/to/your/config --output-dir /where/you/want/it`
+
+== `BareMetalHost`Selección de  y asociación de clúster
+
+Una vez creado un objeto de clúster Metalˆ3ˆ y sus objetos asociados correspondientes, se lleva a cabo un proceso para elegir qué `BareMetalHost` formará parte del clúster.
+Este proceso conecta un `BareMetalHost` con un `Metal3MachineTemplate` específico utilizando https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/[etiquetas de Kubernetes] y selectores estándar.
+
+Como ejemplo, cada `BareMetalHost` está etiquetado para identificar sus propiedades y el clúster previsto (p. ej., su rol de clúster, el nombre del clúster, la ubicación, etc.):
+
+----
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode1
+  labels:
+    cluster-role: control-plane
+    cluster: foobar
+    location: madrid
+    datacenter: xyz
+<snip>
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode2
+  labels:
+    cluster-role: worker
+    cluster: foobar
+    location: madrid
+    datacenter: xyz
+<snip>
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode3
+  labels:
+    cluster-role: worker
+    cluster: foobar2
+    location: madrid
+    datacenter: xyz
+<snip>
+...
+----
+
+Entonces, el objeto `Metal3MachineTemplate` utiliza el campo https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector[`spec.hostSelector`] para coincidir con el `BareMetalHost` deseado.
+
+Se pueden utilizar tanto https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector-matchLabels[`matchLabels`] (para una coincidencia exacta de clave-valor) como https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector-matchExpressions[`matchExpressions`] (para reglas más complejas):
+
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: foobar-cluster-controlplane
+  namespace: mynamespace
+spec:
+  template:
+    spec:
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+          cluster: foobar
+<snip>
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: foobar-cluster-worker
+  namespace: mynamespace
+spec:
+  template:
+    spec:
+      hostSelector:
+        matchExpressions:
+          - { key: cluster-role, operator: In, values: [worker] }
+          - { key: cluster, operator: In, values: [foobar] }
+<snip>
+----
+
+[NOTE]
+====
+Los espacios de nombres de Kubernetes también se pueden utilizar para organizar mejor los diferentes objetos.
+====
+
+== Limpiar las entradas de arranque EFI antiguas
+
+A veces, el https://en.wikipedia.org/wiki/UEFI#UEFI_booting[gestor de arranque UEFI] contiene múltiples entradas para sistemas operativos antiguos que probablemente ya no sean necesarios (especialmente para hosts que se vuelven a aprovisionar varias veces).
+Podéis limpiar esas entradas antiguas siguiendo cualquiera de los siguientes procedimientos:
+
+* Eliminadlas directamente en la interfaz de configuración de la BIOS/EFI (el procedimiento exacto dependerá del hardware).
+* Ejecutad la shell UEFI https://uefi.org/sites/default/files/resources/UEFI_Shell_2_2.pdf[`bcfg`] como:
++
+----
+# List the entries
+bcfg boot dump -b
+# Delete entry number X
+bcfg boot rm X
+# X is the number associated the entry to remove. For example, if the entry is "Boot0002 foobar", then X is 2.
+----
+
+* Utilizad `efibootmgr` en un sistema Linux como:
++
+----
+# List the entries
+efibootmgr -v
+# Delete entry number X
+efibootmgr -b X -B 
+----
+
+El proceso puede dejar archivos huérfanos en la partición del sistema EFI (ESP), que normalmente se encuentran en subdirectorios nombrados por el proveedor (p. ej., `EFI/opensuse` o `EFI/Microsoft`).
+Aunque estos archivos suelen ser inofensivos, deben eliminarse si consumen un espacio excesivo, ya que pueden impedir la instalación de un nuevo SO o una actualización del gestor de arranque.
+La eliminación puede requerir montar explícitamente la ESP, que normalmente se monta como `/boot/efi/EFI` en sistemas Linux.

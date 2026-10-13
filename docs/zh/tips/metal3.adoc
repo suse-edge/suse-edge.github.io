@@ -1,0 +1,234 @@
+[#tips-metal3]
+= *Metal^3^*
+:revdate: 2025-10-07
+:revnumber: 3.4
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+:imagesdir: ../images/
+
+== Ironic
+
+=== 可预测的网络名称
+
+由于存在 xref:../components/metal3.adoc#known-issues-metal3[已知问题]，如果您尝试为目标操作系统网络设备配置可预测名称，但最终出现错误，并发现所发现的设备名称具有不同的命名模式，那么您有几种选择：
+
+_选项 1：_使用两个网络配置密钥，一个用于检查/配置阶段，另一个用于已部署的操作系统。
+
+建议创建两个不同的网络配置密钥：一个供 IPA 使用，其将使用所发现的设备名称作为 `preprovisioningNetworkDataName` 应用于 `BareMetalHost` 定义；另一个供 SL Micro 使用，其将使用所发现的设备名称作为 `networkData.name` 应用于 `BareMetalHost` 定义：
+
+*_创建两个密钥的示例，一个供 IPA 使用，另一个供目标操作系统使用_*
+
+* 目标操作系统 (SL Micro) 密钥：
+
+----
+apiVersion: v1
+kind: Secret                                                                                                                                                               metadata:
+  name: controlplane-0-networkdata-os
+type: Opaque
+stringData:
+  networkData: |
+    interfaces:
+    - name: enp1s0
+      type: ethernet
+      state: up
+      mac-address: "00:f3:65:8a:a3:b0"
+      ipv4:
+        address:
+        - ip:  192.168.125.200
+          prefix-length: 24
+        enabled: true
+        dhcp: false                                                                                                                                     dns-resolver:
+      config:
+        server:
+        - 192.168.125.1
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-address: 192.168.125.1
+        next-hop-interface: enp1s0
+----
+
+* ironic (IPA) 密钥：
+
+----
+apiVersion: v1
+kind: Secret
+metadata:
+  name: controlplane-0-networkdata-ipa
+type: Opaque
+stringData:
+  networkData: |
+    interfaces:
+    - name: enp1s0np0
+      type: ethernet
+      state: up
+      mac-address: "00:f3:65:8a:a3:b0"
+      ipv4:
+        address:
+        - ip:  192.168.125.200
+          prefix-length: 24
+        enabled: true
+        dhcp: false
+    dns-resolver:
+      config:
+        server:
+        - 192.168.125.1
+    routes:
+      config:
+      - destination: 0.0.0.0/0
+        next-hop-address: 192.168.125.1
+        next-hop-interface: enp1s0np0
+----
+
+* 应用于裸机主机：
+
+----
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: controlplane-0
+  labels:
+    cluster-role: control-plane
+spec:
+  preprovisioningNetworkDataName: controlplane-0-networkdata-ipa
+  networkData:
+    name: controlplane-0-networkdata-os
+...
+
+----
+
+_选项 2：_或者，您可以使用 UUID 作为标识符。
+
+如何获取您需要的 UUID：
+
+1. 在您的 OpenSUSE 或 SLES 机器上安装 nmc： +
+`zypper in nm-configurator`
+
+2. 然后直接运行： +
+`nmc generate --config-dir /path/to/your/config --output-dir /where/you/want/it` +
+现在，您应该可以在输出文件中找到可在配置中使用的 UUID。
+
+3. 或者，如果您不使用 OpenSUSE 或 SLES，则可以通过 Edge Image Builder 容器镜像使用 nmc： +
+`podman run -it --rm -v $(pwd):/path/to/your/config:Z --entrypoint=/usr/bin/nmc registry.suse.com/edge/{version-edge-registry}/edge-image-builder:{version-eib} generate --confi
+g-dir /path/to/your/config --output-dir /where/you/want/it`
+
+== `BareMetalHost` 选择和集群关联
+
+一旦创建了 Metalˆ3ˆ 集群对象及其相应的关联对象，就会执行一个处理来选择哪些 `BareMetalHost` 将成为集群的一部分。
+此处理使用标准的 https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/[Kubernetes 标签] 和选择器将 `BareMetalHost` 与特定的 `Metal3MachineTemplate` 连接起来。
+
+例如，每个 `BareMetalHost` 都被标记以识别其属性和预期的集群（例如，其集群角色、集群名称、位置等）：
+
+----
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode1
+  labels:
+    cluster-role: control-plane
+    cluster: foobar
+    location: madrid
+    datacenter: xyz
+<snip>
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode2
+  labels:
+    cluster-role: worker
+    cluster: foobar
+    location: madrid
+    datacenter: xyz
+<snip>
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode3
+  labels:
+    cluster-role: worker
+    cluster: foobar2
+    location: madrid
+    datacenter: xyz
+<snip>
+...
+----
+
+然后，`Metal3MachineTemplate` 对象使用 https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector[`spec.hostSelector`] 字段来匹配所需的 `BareMetalHost`。
+
+https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector-matchLabels[`matchLabels`]（用于精确的键值匹配）和 https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector-matchExpressions[`matchExpressions`]（用于更复杂的规则）均可使用：
+
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: foobar-cluster-controlplane
+  namespace: mynamespace
+spec:
+  template:
+    spec:
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+          cluster: foobar
+<snip>
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: foobar-cluster-worker
+  namespace: mynamespace
+spec:
+  template:
+    spec:
+      hostSelector:
+        matchExpressions:
+          - { key: cluster-role, operator: In, values: [worker] }
+          - { key: cluster, operator: In, values: [foobar] }
+<snip>
+----
+
+[NOTE]
+====
+Kubernetes 名称空间也可用于更好地组织不同的对象。
+====
+
+== 清理旧的 EFI 引导条目
+
+有时， https://en.wikipedia.org/wiki/UEFI#UEFI_booting[UEFI 引导管理器]会包含多个不再需要的旧操作系统条目（特别是对于多次重新配置的主机）。
+您可以按照以下任一程序清理这些旧条目：
+
+* 直接在 BIOS/EFI 设置界面上删除它们（具体步骤取决于硬件）。
+* 运行 UEFI https://uefi.org/sites/default/files/resources/UEFI_Shell_2_2.pdf[`bcfg`] 外壳，命令如下：
++
+----
+# List the entries
+bcfg boot dump -b
+# Delete entry number X
+bcfg boot rm X
+# X is the number associated the entry to remove. For example, if the entry is "Boot0002 foobar", then X is 2.
+----
+
+* 在 Linux 系统上使用 `efibootmgr`，命令如下：
++
+----
+# List the entries
+efibootmgr -v
+# Delete entry number X
+efibootmgr -b X -B 
+----
+
+该处理可能会在 EFI 系统分区 (ESP) 上留下孤立文件，这些文件通常位于以供应商命名的子目录下（例如 `EFI/opensuse` 或 `EFI/Microsoft`）。
+虽然这些文件通常无害，但如果它们占用了过多空间，则应将其删除，因为这可能会妨碍新操作系统或引导管理器的更新。
+删除可能需要显式挂载 ESP，在 Linux 系统上通常挂载为 `/boot/efi/EFI`。

@@ -1,0 +1,267 @@
+= Crear un paquete (RPM o imagen de contenedor) utilizando OBS (openSUSE Build Service)
+:revdate: 2024-03-06
+:revnumber: 3,4
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+== openSUSE Build Service
+
+El https://build.opensuse.org[openSUSE Build Service] es la instancia pública del https://openbuildservice.org/[Open Build Service] utilizada para el desarrollo de la distribución openSUSE y para ofrecer paquetes desde la misma fuente para Fedora, Debian, Ubuntu, SUSE Linux Enterprise y otras distribuciones.
+
+Este servicio también es capaz de crear imágenes de contenedor, utilizando una configuración `Dockerfile` o KIWI.
+
+Cualquiera puede crear una cuenta de IdP de SUSE para poder utilizar este servicio.
+
+Una imagen de contenedor publicada estará disponible en https://registry.opensuse.org[registry.opensuse.org] y un paquete publicado estará disponible en https://download.opensuse.org[download.opensuse.org]
+
+== Requisitos previos
+
+Para utilizar OBS, primero necesita una cuenta de IdP (https://idp-portal.suse.com/univention/self-service/#page=createaccount[regístrese aquí]) y debe iniciar sesión en https://build.opensuse.org[build.opensuse.org]
+
+También necesitará el comando `osc` (para openSUSE Commander), ya que esta guía rápida lo hará mediante la CLI, pero la mayoría de las cosas se pueden hacer en la interfaz web si lo prefiere.
+
+Para instalar `osc`:
+
+[.tabs]
+SUSE::
++
+[,bash]
+----
+zypper install osc
+----
++
+MacOS::
++
+[,bash]
+----
+brew install osc
+----
++
+PIP::
++
+[,bash]
+----
+pip install osc
+----
+
+
+== Crear y configurar un proyecto
+
+Vamos a crear un proyecto en su espacio de nombres personal; esto abrirá su editor para configurarlo de inmediato.
+
+[,bash]
+----
+osc meta prj -e "home:$USERNAME:$PROJECTNAME"
+----
+
+[NOTE]
+====
+Si desea utilizar la raíz de su proyecto personal, simplemente especifique `home:$USERNAME` aquí y en los pasos siguientes.
+====
+
+En el editor, ahora puede completar los metadatos para que se parezcan a esto:
+
+
+[,xml]
+----
+<project name="home:$USERNAME">
+  <title/>
+  <description/>
+  <person userid="$USERNAME" role="maintainer"/>
+  <!--
+    If you want to build RPM packages you need a block like this one, here for
+    SLE-15 SP5 replace accordingly to the distribution you want to target
+  -->
+  <repository name="sp5">
+    <path project="SUSE:SLE-15-SP5:Update" repository="standard"/>
+    <path project="SUSE:SLE-15-SP5:GA" repository="standard"/>
+    <arch>x86_64</arch>
+    <arch>aarch64</arch>
+  </repository>
+  <!-- If you want to build container images you need a block akin to this one -->
+  <repository name="containers">
+    <!--
+        This defines the available source images for the build (here any from
+        registry.suse.com)
+    -->
+    <path project="SUSE:Registry" repository="standard"/>
+    <!--
+        This defines package repositories available during build, I am
+        refering to the one above here so I can use the RPM packages published
+        in this project for the container images of the project
+    -->
+    <path project="home:$USERNAME:$PROJECTNAME" repository="sp4"/>
+    <!-- This is the list of architecture you want to build for -->
+    <arch>x86_64</arch>
+    <arch>aarch64</arch>
+  </repository>
+</project>
+----
+
+Si desea crear contenedores, también debe ajustar la configuración del proyecto:
+
+[,bash]
+----
+osc meta prjconf -e "home:$USERNAME:$PROJECTNAME"
+----
+
+La configuración es diferente según si desea utilizar el sistema de compilación KIWI o Dockerfile:
+
+[.tabs]
+Dockerfile::
++
+[,shell]
+----
+%if "%_repository" == "containers"
+Type: docker
+Repotype: none
+Patterntype: none
+BuildEngine: podman
+%endif
+----
++
+KIWI::
++
+[,shell]
+----
+%if "%_repository" == "containers"
+Type: kiwi
+Repotype: none
+Patterntype: none
+%endif
+----
+
+
+[NOTE]
+====
+Si desea crear contenedores utilizando tanto KIWI como `Dockerfiles` en el mismo proyecto, necesita dos repositorios en los metadatos de su proyecto (con nombres diferentes) y ambos fragmentos en la configuración del proyecto (uno para cada repositorio).
+====
+
+
+== Crear un paquete
+
+Para crear un paquete en su proyecto, utilice el siguiente comando:
+
+[,bash]
+----
+osc meta pkg -e home:$USERNAME:$PROJECTNAME $PACKAGENAME
+----
+
+Allí obtendrá otro archivo XML para editar; solo tiene que establecer un título y una descripción aquí.
+
+Ahora puedes extraer el directorio para empezar a añadir tus archivos:
+
+[,bash]
+----
+osc co home:$USERNAME:$PROJECTNAME/$PACKAGENAME
+----
+
+Ahora entra en el directorio y, cuando todo esté listo, podrás añadir tus archivos y realizar la confirmación utilizando:
+
+[,bash]
+----
+osc add <files>...
+osc ci
+----
+
+Ahora veamos las especificidades de los paquetes RPM y de contenedor.
+
+=== Paquete RPM:
+
+Un paquete RPM se define por la presencia de un archivo spec. No entraré en los detalles de ese archivo, ya que esto va mucho más allá del alcance de esta guía rápida; por favor, consulte https://en.opensuse.org/Portal:Packaging para obtener más detalles sobre el empaquetado.
+
+Sin embargo, entraré en más detalles sobre los archivos especiales `_service` y `_constraints` que pueden cambiar el comportamiento de OBS.
+
+El archivo `_service` permite definir automatizaciones que se ejecutarán en momentos determinados; para los paquetes RPM, estas suelen activarse manualmente.
+Entonces es posible automatizar la obtención de un repositorio git en un tarball, actualizar la versión del archivo spec desde la información de git, incluir dependencias de go o rust, etc...Puedes obtener más información sobre lo que es posible aquí https://en.opensuse.org/openSUSE:Build_Service_Concept_SourceService .
+
+Aquí tienes uno para un proyecto rust, por ejemplo:
+
+[,xml]
+----
+<services>
+  <service name="tar_scm" mode="manual">
+    <param name="scm">git</param>
+    <param name="url">https://github.com/project-akri/akri</param>
+    <param name="filename">akri</param>
+    <param name="versionformat">@PARENT_TAG@</param>
+    <param name="versionrewrite-pattern">v(.*)</param>
+    <param name="revision">v0.10.4</param>
+  </service>
+  <service name="recompress" mode="manual">
+    <param name="file">*.tar</param>
+    <param name="compression">xz</param>
+  </service>
+  <service name="set_version" mode="manual" />
+  <service name="cargo_vendor" mode="manual">
+    <param name="srcdir">akri</param>
+    <param name="compression">xz</param>
+  </service>
+</services>
+----
+
+El archivo `_constraints` permite definir «restricciones» sobre el constructor seleccionado por OBS, como por ejemplo el tamaño del disco; si tu compilación se queja de no tener suficiente espacio, este es el archivo que deberías editar/crear.
+Consulta aquí la guía completa: https://openbuildservice.org/help/manuals/obs-user-guide/cha.obs.build_job_constraints.html
+
+### Imagen de contenedor
+
+Puedes construir una imagen de contenedor de dos formas diferentes: puedes usar un `Dockerfile` o una configuración de KIWI.
+
+Cada método tiene sus propias ventajas e inconvenientes.
+Kiwi permite utilizar el gestor de paquetes del sistema anfitrión/de compilación, por lo que puede construir imágenes base y derivar imágenes que no contengan un gestor de paquetes, como `opensuse/busybox`. Con Dockerfile, es prácticamente obligatorio utilizar una imagen base completa como `opensuse/tumbleweed`.
+
+No entraré en detalles sobre cómo funciona un Dockerfile o una compilación de kiwi, solo hablaré de la interacción con OBS.
+
+En primer lugar, el servicio `kiwi_metainfo_helper` que puedes añadir como servicio de origen en tiempo de compilación permite sustituir marcadores de posición en tiempo de compilación para utilizarlos en tu Dockerfile o configuración de kiwi. Puedes encontrar una lista de los marcadores de posición aquí: https://build.opensuse.org/package/view_file/openSUSE:Factory/obs-service-kiwi_metainfo_helper/README
+
+Otro servicio útil es el servicio `replace_using_package_version`, que permite sustituir un marcador de posición por la versión de un paquete RPM.
+Por ejemplo, si tengo el paquete `foobar` en la versión `1.2.3` en un repositorio RPM disponible, puedo utilizar este servicio para etiquetar automáticamente una imagen que tenga este paquete instalado. Aquí reemplazaría `%PKG_VERSION%` por `1.2`.
+
+[,xml]
+----
+<services>
+  <service mode="buildtime" name="kiwi_metainfo_helper"/>
+  <service mode="buildtime" name="replace_using_package_version">
+    <param name="file">Dockerfile</param>
+    <param name="regex">%PKG_VERSION%</param>
+    <param name="parse-version">minor</param>
+    <param name="package">foobar</param>
+  </service>
+</services>
+----
+
+Ahora tienes que indicar a OBS el nombre y la etiqueta de tu imagen:
+
+[.tabs]
+Dockerfile::
+Puedes utilizar una o varias `BuildTag` como comentarios en tu `Dockerfile` de esta forma:
++
+[,shell]
+----
+#!BuildTag: foo/bar:latest foo/bar:%PKG_VERSION%.%RELEASE%
+#!BuildTag: foo/bar:tag foo/bar:anothertag
+----
++
+Kiwi::
+En la configuración de kiwi, para especificar las etiquetas de tu imagen, utilizas el elemento `containerconfig`, de esta forma:
++
+[,xml]
+----
+<preferences>
+  <type image="docker">
+   <containerconfig
+     name="foo/bar"
+     tag="latest"
+     additionaltags="atag,anothertag,%PKG_VERSION%.%RELEASE">
+     ...
+----
+

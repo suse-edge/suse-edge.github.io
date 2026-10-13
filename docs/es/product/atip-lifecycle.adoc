@@ -1,0 +1,134 @@
+[#atip-lifecycle]
+== Acciones del ciclo de vida
+:revdate: 2025-10-17
+:revnumber: 3,4
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Esta sección cubre las acciones de gestión del ciclo de vida para clústeres desplegados a través de SUSE Telco Cloud.
+
+=== Actualizaciones del clúster de gestión
+
+La actualización del clúster de gestión se describe en la documentación del `Day 2` <<day2-mgmt-cluster,clúster de gestión>>.
+
+[#atip-lifecycle-downstream]
+=== Actualizaciones de clústeres descendentes
+
+La actualización de los clústeres descendentes implica actualizar varios componentes. Las siguientes secciones cubren el proceso de actualización para cada uno de los componentes.
+
+*Actualización del sistema operativo*
+
+Para este proceso, consultad la siguiente <<eib-edge-image-connected,referencia>> para crear la nueva imagen con una nueva versión del sistema operativo.
+Con esta nueva imagen generada por `EIB`, la siguiente fase de aprovisionamiento utiliza la nueva versión del sistema operativo proporcionada.
+En el siguiente paso, se utiliza la nueva imagen para actualizar los nodos.
+
+*Actualización del clúster RKE2*
+
+Los cambios necesarios para actualizar el clúster `RKE2` mediante el flujo de trabajo automatizado son los siguientes:
+
+* Cambiad el bloque `RKE2ControlPlane` en el `capi-provisioning-example.yaml` que se muestra en la siguiente <<single-node-provision,sección>>:
+
+  ** Especificad la `rolloutStrategy` deseada.
+  ** Cambiad la versión del clúster `RKE2` a la nueva versión sustituyendo `$\{RKE2_NEW_VERSION\}`.
+
+[,yaml]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  version: ${RKE2_NEW_VERSION}
+  replicas: 1
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  serverConfig:
+    cni: cilium
+  rolloutStrategy:
+    rollingUpdate:
+      maxSurge: 0
+  registrationMethod: "control-plane-endpoint"
+  agentConfig:
+    format: ignition
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+            - name: rke2-preinstall.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=rke2-preinstall
+                Wants=network-online.target
+                Before=rke2-install.service
+                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStartPost=/bin/sh -c "umount /mnt"
+                [Install]
+                WantedBy=multi-user.target
+    kubelet:
+      extraArgs:
+        - provider-id=metal3://BAREMETALHOST_UUID
+    nodeName: "localhost.localdomain"
+----
+
+* Cambiad el bloque `Metal3MachineTemplate` en el `capi-provisioning-example.yaml` que se muestra en la siguiente <<single-node-provision,sección>>:
+
+  ** Cambiad el nombre de la imagen y la suma de comprobación por la nueva versión generada en el paso anterior.
+  ** Añadid la directiva `nodeReuse` a `true` para evitar la creación de un nuevo nodo.
+  ** Añadid la directiva `automatedCleaningMode` a `metadata` para habilitar la limpieza automatizada del nodo.
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: single-node-cluster-controlplane
+  namespace: default
+spec:
+  nodeReuse: True
+  template:
+    spec:
+      automatedCleaningMode: metadata
+      dataTemplate:
+        name: single-node-cluster-controlplane-template
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+      image:
+        checksum: http://imagecache.local:8080/${NEW_IMAGE_GENERATED}.sha256
+        checksumType: sha256
+        format: raw
+        url: http://imagecache.local:8080/${NEW_IMAGE_GENERATED}.raw
+----
+
+Tras realizar estos cambios, el archivo `capi-provisioning-example.yaml` puede aplicarse al clúster mediante el siguiente comando:
+
+[,shell]
+----
+kubectl apply -f capi-provisioning-example.yaml
+----
+

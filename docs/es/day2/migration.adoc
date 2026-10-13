@@ -1,0 +1,184 @@
+[#day2-migration]
+= Migración edge {version-edge}
+:revdate: 2025-09-30
+:revnumber: 3,4
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+:toc: preamble
+:previous-edge-version: 3.3
+:static-edge-version: 3.4.0
+:static-fleet-examples-tag: release-3.4.0
+
+Esta sección explica cómo migrar sus clústeres `management` y `downstream` de `Edge {previous-edge-version}` a `Edge {static-edge-version}`.
+
+[IMPORTANT]
+====
+Realice siempre las migraciones de clúster desde la `latest Z-stream` release de `Edge {previous-edge-version}`.
+
+Migre siempre a la `Edge {static-edge-version}` release. Para actualizaciones posteriores a la migración, consulte las secciones de clúster <<day2-mgmt-cluster,de gestión>> y <<day2-downstream-clusters,de sentido descendente>>.
+====
+
+La siguiente tabla enumera los diferentes tipos de clústeres y los métodos para actualizarlos:
+
+[[Clusters-and-methods-to-upgrade-downstream-clusters]]
+.Clústeres y métodos para actualizar clústeres en sentido descendente
+|===
+| Tipo de clúster  | Método
+
+|Clústeres aprovisionados por EIB
+|Consulte el <<day2-migration-mgmt-fleet>> para obtener más información.
+
+|Clústeres aprovisionados por Metal^3^
+|Consulte <<atip-lifecycle-downstream, Actualizaciones de clúster descendente>> para obtener más detalles.
+
+|Clústeres aprovisionados por Phone-home
+|Consulte https://ranchermanager.docs.rancher.com/{rancher-docs-version}/getting-started/installation-and-upgrade/upgrade-and-roll-back-kubernetes#upgrading-the-kubernetes-version[Actualización de la versión de Kubernetes] para la actualización de la versión de Kubernetes y <<day2-downstream-clusters,Clústeres en sentido descendente>> para SUC, el sistema operativo y otros componentes.
+|===
+
+[#day2-migration-mgmt]
+== Clúster de gestión
+:cluster-type: management
+
+Esta sección cubre los temas siguientes:
+
+<<day2-migration-mgmt-prereq>> - pasos previos necesarios antes de comenzar la migración.
+
+<<day2-migration-mgmt-upgrade-controller>> - cómo realizar una migración de clúster `{cluster-type}` utilizando <<components-upgrade-controller>>.
+
+<<day2-migration-mgmt-fleet>> - cómo realizar una migración de clúster `{cluster-type}` utilizando <<components-fleet>>.
+
+[#day2-migration-mgmt-prereq]
+=== Requisitos previos
+
+==== Actualice los CRD del Bare Metal Operator
+
+[NOTE]
+====
+Se aplica solo a clústeres que requieren una actualización del gráfico <<components-metal3>>.
+====
+
+El gráfico de Helm `Metal^3^` incluye los CRD de link:https://book.metal3.io/bmo/introduction.html[Bare Metal Operator (BMO)] aprovechando el directorio link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#method-1-let-helm-do-it-for-you[CRD] de Helm.
+
+Sin embargo, este enfoque tiene ciertas limitaciones, en particular la imposibilidad de actualizar los CRD en este directorio mediante Helm. Para obtener más información, consulte la link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#some-caveats-and-explanations[documentación de Helm].
+
+Como resultado, antes de actualizar Metal^3^ a una versión compatible con `Edge {static-edge-version}`, los usuarios deben actualizar manualmente los CRD de BMO subyacentes.
+
+En una máquina con `Helm` instalado y `kubectl` configurado para apuntar a su clúster `{cluster-type}`:
+
+. Aplique manualmente los CRD de BMO:
++
+[,bash,subs="attributes"]
+----
+helm show crds oci://registry.suse.com/edge/charts/metal3 --version {version-metal3-chart} | kubectl apply -f -
+----
+
+[#day2-migration-mgmt-upgrade-controller]
+=== Upgrade Controller
+
+[IMPORTANT]
+====
+`Upgrade Controller` actualmente admite migraciones de Edge release solo para clústeres *de gestión que no están en un entorno aislado*.
+====
+
+Los siguientes temas se tratan como parte de esta sección:
+
+<<day2-migration-mgmt-upgrade-controller-prereq>>: requisitos previos específicos para `Upgrade Controller`.
+
+<<day2-migration-mgmt-upgrade-controller-migration>>: pasos para migrar un clúster `{cluster-type}` a una nueva versión de Edge utilizando `Upgrade Controller`.
+
+[#day2-migration-mgmt-upgrade-controller-prereq]
+==== Requisitos previos
+
+===== Edge {version-edge} Upgrade Controller
+
+Antes de utilizar `Upgrade Controller`, debe asegurarse primero de que está ejecutando una versión capaz de migrar a la versión de Edge deseada.
+
+Para realizar esta operación:
+
+. Si ya tiene `Upgrade Controller` desplegado desde una versión de Edge anterior, actualice su gráfico:
++
+[,bash,subs="attributes"]
+----
+helm upgrade upgrade-controller -n upgrade-controller-system oci://registry.suse.com/edge/charts/upgrade-controller --version {version-upgrade-controller-chart}
+----
+
+. Si *no* tiene `Upgrade Controller` desplegado, siga <<components-upgrade-controller-installation>>.
+
+[#day2-migration-mgmt-upgrade-controller-migration]
+==== Pasos de migración
+
+Realizar una migración de clúster `{cluster-type}` con `Upgrade Controller` es fundamentalmente similar a ejecutar una actualización.
+
+La única diferencia es que su `UpgradePlan` *debe* especificar la versión de lanzamiento `{static-edge-version}`:
+
+[,yaml,subs="attributes"]
+----
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
+metadata:
+  name: upgrade-plan-mgmt
+  # Change to the namespace of your Upgrade Controller
+  namespace: CHANGE_ME
+spec:
+  releaseVersion: {static-edge-version}
+----
+
+Para obtener información sobre cómo utilizar el `UpgradePlan` anterior para realizar una migración, consulte el <<{cluster-type}-day2-upgrade-controller,proceso de actualización del Upgrade Controller>>.
+
+[#day2-migration-mgmt-fleet]
+=== Fleet
+
+[NOTE]
+====
+Siempre que sea posible, utilice <<day2-migration-mgmt-upgrade-controller>> para la migración.
+
+Consulte esta sección solo para casos de uso no cubiertos por `Upgrade Controller`.
+====
+
+Realizar una migración de clúster `{cluster-type}` con `Fleet` es fundamentalmente similar a ejecutar una actualización.
+
+Las *diferencias clave* son que:
+
+. Las flotas *deben utilizarse* desde la versión link:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}] del repositorio `suse-edge/fleet-examples`.
+
+. Los gráficos programados para una actualización *deben* actualizarse a versiones compatibles con la `Edge {static-edge-version}` release. Para obtener una lista de los componentes `Edge {static-edge-version}`, consulte <<release-notes-3-4-0>>.
+
+[IMPORTANT]
+====
+Para garantizar una migración `Edge {static-edge-version}` exitosa, es importante que los usuarios cumplan los puntos indicados anteriormente.
+====
+
+Teniendo en cuenta los puntos anteriores, los usuarios pueden seguir la documentación de <<{cluster-type}-day2-fleet, Fleet>> del `{cluster-type}` clúster para obtener una guía completa sobre los pasos necesarios para realizar una migración.
+
+[#day2-migration-downstream]
+== Clústeres descendentes
+:cluster-type: downstream
+
+<<day2-migration-downstream-fleet>> - cómo realizar una migración de clúster `{cluster-type}` utilizando <<components-fleet>>.
+
+[#day2-migration-downstream-fleet]
+=== Fleet
+
+Realizar una migración de clúster `{cluster-type}` con `Fleet` es fundamentalmente similar a ejecutar una actualización.
+
+Las *diferencias clave* son que:
+
+. Las flotas *deben utilizarse* desde la versión link:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}] del repositorio `suse-edge/fleet-examples`.
+
+. Los gráficos programados para una actualización *deben* actualizarse a versiones compatibles con la `Edge {static-edge-version}` release. Para obtener una lista de los componentes `Edge {static-edge-version}`, consulte <<release-notes-3-4-0>>.
+
+[IMPORTANT]
+====
+Para garantizar una migración `Edge {static-edge-version}` exitosa, es importante que los usuarios cumplan los puntos indicados anteriormente.
+====
+
+Teniendo en cuenta los puntos anteriores, los usuarios pueden seguir la documentación de <<{cluster-type}-day2-fleet, Fleet>> del `{cluster-type}` clúster para obtener una guía completa sobre los pasos necesarios para realizar una migración.

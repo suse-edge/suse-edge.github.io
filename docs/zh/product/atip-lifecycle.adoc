@@ -1,0 +1,134 @@
+[#atip-lifecycle]
+== 生命周期操作
+:revdate: 2025-10-17
+:revnumber: 3.4
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+本节涵盖了通过 SUSE Telco Cloud 部署的集群的生命周期管理操作。
+
+=== 管理集群升级
+
+管理集群的升级在 `Day 2` <<day2-mgmt-cluster,管理集群>> 文档中有相关描述。
+
+[#atip-lifecycle-downstream]
+=== 下游集群升级
+
+升级下游集群涉及更新多个组件。以下章节涵盖了每个组件的升级过程。
+
+*升级操作系统*
+
+对于此过程，请查看以下 <<eib-edge-image-connected,参考>> 以使用新的操作系统版本构建新镜像。
+使用由 `EIB` 生成的新镜像，下一个配置阶段将使用所提供的新操作系统版本。
+在接下来的步骤中，新镜像将用于升级节点。
+
+*升级 RKE2 集群*
+
+使用自动化工作流升级 `RKE2` 集群所需的更改如下：
+
+* 更改以下 <<single-node-provision,部分>> 中显示的 `capi-provisioning-example.yaml` 中的块 `RKE2ControlPlane`：
+
+  ** 指定所需的 `rolloutStrategy`。
+  ** 将 `RKE2` 集群的版本更改为替换 `$\{RKE2_NEW_VERSION\}` 的新版本。
+
+[,yaml]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+kind: RKE2ControlPlane
+metadata:
+  name: single-node-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: Metal3MachineTemplate
+    name: single-node-cluster-controlplane
+  version: ${RKE2_NEW_VERSION}
+  replicas: 1
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  serverConfig:
+    cni: cilium
+  rolloutStrategy:
+    rollingUpdate:
+      maxSurge: 0
+  registrationMethod: "control-plane-endpoint"
+  agentConfig:
+    format: ignition
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+            - name: rke2-preinstall.service
+              enabled: true
+              contents: |
+                [Unit]
+                Description=rke2-preinstall
+                Wants=network-online.target
+                Before=rke2-install.service
+                ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+                [Service]
+                Type=oneshot
+                User=root
+                ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+                ExecStart=/bin/sh -c "sed -i \"s/BAREMETALHOST_UUID/$(jq -r .uuid /mnt/openstack/latest/meta_data.json)/\" /etc/rancher/rke2/config.yaml"
+                ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+                ExecStartPost=/bin/sh -c "umount /mnt"
+                [Install]
+                WantedBy=multi-user.target
+    kubelet:
+      extraArgs:
+        - provider-id=metal3://BAREMETALHOST_UUID
+    nodeName: "localhost.localdomain"
+----
+
+* 更改以下 <<single-node-provision,部分>> 中显示的 `capi-provisioning-example.yaml` 中的块 `Metal3MachineTemplate`：
+
+  ** 将镜像名称和校验和更改为上一步中生成的新版本。
+  ** 将指令 `nodeReuse` 添加到 `true` 以避免创建新节点。
+  ** 将指令 `automatedCleaningMode` 添加到 `metadata` 以启用节点的自动清理功能。
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: single-node-cluster-controlplane
+  namespace: default
+spec:
+  nodeReuse: True
+  template:
+    spec:
+      automatedCleaningMode: metadata
+      dataTemplate:
+        name: single-node-cluster-controlplane-template
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+      image:
+        checksum: http://imagecache.local:8080/${NEW_IMAGE_GENERATED}.sha256
+        checksumType: sha256
+        format: raw
+        url: http://imagecache.local:8080/${NEW_IMAGE_GENERATED}.raw
+----
+
+进行这些更改后，可以使用以下命令将 `capi-provisioning-example.yaml` 文件应用到集群：
+
+[,shell]
+----
+kubectl apply -f capi-provisioning-example.yaml
+----
+
