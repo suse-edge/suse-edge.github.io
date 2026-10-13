@@ -1,0 +1,267 @@
+= 使用 OBS (openSUSE Build Service) 创建软件包（RPM 或容器镜像）
+:revdate: 2024-03-06
+:revnumber: 3.5
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+== openSUSE Build Service
+
+https://build.opensuse.org[openSUSE Build Service] 是 https://openbuildservice.org/[Open Build Service] 的公共实例，用于开发 openSUSE 发行版，并为 Fedora、Debian、Ubuntu、SUSE Linux Enterprise 和其他发行版提供来自同一来源的软件包。
+
+此服务还能够使用 `Dockerfile` 或 KIWI 配置来构建容器镜像。
+
+任何人都可以创建 SUSE IdP 帐户以使用此服务。
+
+发布的容器镜像将在 https://registry.opensuse.org[registry.opensuse.org] 上可用，发布的软件包将在 https://download.opensuse.org[download.opensuse.org] 上可用。
+
+== 先决条件
+
+要使用 OBS，您首先需要一个 IdP 帐户 (https://idp-portal.suse.com/univention/self-service/#page=createaccount[在此注册])，并且需要登录 https://build.opensuse.org[build.opensuse.org]。
+
+您还需要 `osc`（用于 openSUSE Commander）命令，因为本快速入门将使用 CLI 方式，但如果您愿意，大多数操作也可以在 WebUI 中完成。
+
+要安装 `osc`：
+
+[.tabs]
+SUSE::
++
+[,bash]
+----
+zypper install osc
+----
++
+MacOS::
++
+[,bash]
+----
+brew install osc
+----
++
+PIP::
++
+[,bash]
+----
+pip install osc
+----
+
+
+== 创建和配置项目
+
+我们将在您的个人名称空间下创建一个项目，这将立即打开您的编辑器进行配置。
+
+[,bash]
+----
+osc meta prj -e "home:$USERNAME:$PROJECTNAME"
+----
+
+[NOTE]
+====
+如果您想使用您的项目 root，只需在此处及后续步骤中指定 `home:$USERNAME`。
+====
+
+现在，您可以在编辑器中填写元数据，使其看起来类似于：
+
+
+[,xml]
+----
+<project name="home:$USERNAME">
+  <title/>
+  <description/>
+  <person userid="$USERNAME" role="maintainer"/>
+  <!--
+    If you want to build RPM packages you need a block like this one, here for
+    SLE-15 SP5 replace accordingly to the distribution you want to target
+  -->
+  <repository name="sp5">
+    <path project="SUSE:SLE-15-SP5:Update" repository="standard"/>
+    <path project="SUSE:SLE-15-SP5:GA" repository="standard"/>
+    <arch>x86_64</arch>
+    <arch>aarch64</arch>
+  </repository>
+  <!-- If you want to build container images you need a block akin to this one -->
+  <repository name="containers">
+    <!--
+        This defines the available source images for the build (here any from
+        registry.suse.com)
+    -->
+    <path project="SUSE:Registry" repository="standard"/>
+    <!--
+        This defines package repositories available during build, I am
+        referring to the one above here so I can use the RPM packages published
+        in this project for the container images of the project
+    -->
+    <path project="home:$USERNAME:$PROJECTNAME" repository="sp4"/>
+    <!-- This is the list of architecture you want to build for -->
+    <arch>x86_64</arch>
+    <arch>aarch64</arch>
+  </repository>
+</project>
+----
+
+如果您想构建容器，还需要调整项目的配置：
+
+[,bash]
+----
+osc meta prjconf -e "home:$USERNAME:$PROJECTNAME"
+----
+
+无论您是想使用 KIWI 还是 Dockerfile 构建系统，配置都是不同的：
+
+[.tabs]
+Dockerfile::
++
+[,shell]
+----
+%if "%_repository" == "containers"
+Type: docker
+Repotype: none
+Patterntype: none
+BuildEngine: podman
+%endif
+----
++
+KIWI::
++
+[,shell]
+----
+%if "%_repository" == "containers"
+Type: kiwi
+Repotype: none
+Patterntype: none
+%endif
+----
+
+
+[NOTE]
+====
+如果您想在同一个项目中同时使用 KIWI 和 `Dockerfiles` 构建容器，则需要在项目的元数据中设置两个储存库（名称不同），并在项目的配置中包含两个代码片段（每个储存库一个）。
+====
+
+
+== 创建软件包
+
+要在您的项目中创建软件包，请使用以下命令：
+
+[,bash]
+----
+osc meta pkg -e home:$USERNAME:$PROJECTNAME $PACKAGENAME
+----
+
+您将在那里获得另一个要编辑的 XML 文件，您只需在此处设置标题和描述即可。
+
+现在您可以检出该目录以开始添加您的文件：
+
+[,bash]
+----
+osc co home:$USERNAME:$PROJECTNAME/$PACKAGENAME
+----
+
+现在进入该目录，当一切准备就绪后，您可以使用以下命令添加文件并提交：
+
+[,bash]
+----
+osc add <files>...
+osc ci
+----
+
+现在让我们看看 RPM 和容器软件包的特性
+
+=== RPM 包
+
+RPM 包由 spec 文件的存在来定义，我不会深入探讨该文件的细节，因为这超出了本快速入门的范围，请参阅 https://en.opensuse.org/Portal:Packaging 以了解有关打包的更多详细信息。
+
+不过，我将更详细地介绍可能改变 OBS 行为的 `_service` 和 `_constraints` 特殊文件。
+
+`_service` 文件允许定义在特定时间发生的自动化操作，对于 RPM 包，这些操作通常是手动触发的。
+因此，可以实现将 git 仓库自动获取为 tarball、根据 git 信息更新 specfile 版本、供应商 go 或 rust 依赖项等自动化操作...您可以在此处了解更多可能性 https://en.opensuse.org/openSUSE:Build_Service_Concept_SourceService 。
+
+例如，这是一个 rust 项目的示例：
+
+[,xml]
+----
+<services>
+  <service name="tar_scm" mode="manual">
+    <param name="scm">git</param>
+    <param name="url">https://github.com/project-akri/akri</param>
+    <param name="filename">akri</param>
+    <param name="versionformat">@PARENT_TAG@</param>
+    <param name="versionrewrite-pattern">v(.*)</param>
+    <param name="revision">v0.10.4</param>
+  </service>
+  <service name="recompress" mode="manual">
+    <param name="file">*.tar</param>
+    <param name="compression">xz</param>
+  </service>
+  <service name="set_version" mode="manual" />
+  <service name="cargo_vendor" mode="manual">
+    <param name="srcdir">akri</param>
+    <param name="compression">xz</param>
+  </service>
+</services>
+----
+
+`_constraints` 文件允许定义关于 OBS 所选构建器的“限制”，例如磁盘大小。如果您的构建提示空间不足，则应编辑/创建此文件。
+请参阅此处的完整指南： https://openbuildservice.org/help/manuals/obs-user-guide/cha.obs.build_job_constraints.html
+
+### 容器映像
+
+您可以通过两种不同的方式构建容器镜像，既可以使用 `Dockerfile`，也可以使用 KIWI 配置。
+
+每种方法都有其各自的优缺点。
+Kiwi 支持使用来自主机/构建系统的软件包管理器，因此它可以构建基础镜像以及不包含软件包管理器的派生镜像，例如 `opensuse/busybox`。使用 Dockerfile 时，实际上需要使用像 `opensuse/tumbleweed` 这样的完整基础镜像。
+
+我不会详细介绍 Dockerfile 或 kiwi 构建的工作原理，我只会说明它们与 OBS 的交互。
+
+首先，您可以添加 `kiwi_metainfo_helper` 服务作为构建时源服务，它允许替换在 Dockerfile 或 kiwi 配置中使用的构建时占位符。您可以在此处找到占位符列表： https://build.opensuse.org/package/view_file/openSUSE:Factory/obs-service-kiwi_metainfo_helper/README
+
+另一个有用的服务是 `replace_using_package_version` 服务，它允许用 RPM 包的版本替换占位符。
+例如，如果我在可用的 RPM 储存库中有版本为 `1.2.3` 的 `foobar` 包，我可以使用此服务自动标记安装了此包的镜像。此处它会将 `%PKG_VERSION%` 替换为 `1.2`。
+
+[,xml]
+----
+<services>
+  <service mode="buildtime" name="kiwi_metainfo_helper"/>
+  <service mode="buildtime" name="replace_using_package_version">
+    <param name="file">Dockerfile</param>
+    <param name="regex">%PKG_VERSION%</param>
+    <param name="parse-version">minor</param>
+    <param name="package">foobar</param>
+  </service>
+</services>
+----
+
+现在您需要告知 OBS 您镜像的名称和标签：
+
+[.tabs]
+Dockerfile::
+您可以使用一个或多个 `BuildTag` 作为 `Dockerfile` 中的注释，如下所示：
++
+[,shell]
+----
+#!BuildTag: foo/bar:latest foo/bar:%PKG_VERSION%.%RELEASE%
+#!BuildTag: foo/bar:tag foo/bar:anothertag
+----
++
+Kiwi::
+在 kiwi 配置中，要指定镜像的标签，您需要使用 `containerconfig` 元素，如下所示：
++
+[,xml]
+----
+<preferences>
+  <type image="docker">
+   <containerconfig
+     name="foo/bar"
+     tag="latest"
+     additionaltags="atag,anothertag,%PKG_VERSION%.%RELEASE">
+     ...
+----
+

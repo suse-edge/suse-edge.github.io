@@ -1,0 +1,128 @@
+[#tips-metal3]
+= *Metal^3^*
+:revdate: 2025-10-07
+:revnumber: 3.5
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+:imagesdir: ../images/
+
+== `BareMetalHost` 选择和集群关联
+
+一旦创建了 Metalˆ3ˆ 集群对象及其相应的关联对象，就会执行一个处理来选择哪些 `BareMetalHost` 将成为集群的一部分。
+此处理使用标准的 https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/[Kubernetes 标签] 和选择器将 `BareMetalHost` 与特定的 `Metal3MachineTemplate` 连接起来。
+
+例如，每个 `BareMetalHost` 都被标记以识别其属性和预期的集群（例如，其集群角色、集群名称、位置等）：
+
+----
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode1
+  labels:
+    cluster-role: control-plane
+    cluster: foobar
+    location: madrid
+    datacenter: xyz
+<snip>
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode2
+  labels:
+    cluster-role: worker
+    cluster: foobar
+    location: madrid
+    datacenter: xyz
+<snip>
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode3
+  labels:
+    cluster-role: worker
+    cluster: foobar2
+    location: madrid
+    datacenter: xyz
+<snip>
+...
+----
+
+然后，`Metal3MachineTemplate` 对象使用 https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector[`spec.hostSelector`] 字段来匹配所需的 `BareMetalHost`。
+
+https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector-matchLabels[`matchLabels`]（用于精确的键值匹配）和 https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector-matchExpressions[`matchExpressions`]（用于更复杂的规则）均可使用：
+
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: foobar-cluster-controlplane
+  namespace: mynamespace
+spec:
+  template:
+    spec:
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+          cluster: foobar
+<snip>
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: foobar-cluster-worker
+  namespace: mynamespace
+spec:
+  template:
+    spec:
+      hostSelector:
+        matchExpressions:
+          - { key: cluster-role, operator: In, values: [worker] }
+          - { key: cluster, operator: In, values: [foobar] }
+<snip>
+----
+
+[NOTE]
+====
+Kubernetes 名称空间也可用于更好地组织不同的对象。
+====
+
+== 清理旧的 EFI 引导条目
+
+有时， https://en.wikipedia.org/wiki/UEFI#UEFI_booting[UEFI 引导管理器]会包含多个不再需要的旧操作系统条目（特别是对于多次重新配置的主机）。
+您可以按照以下任一程序清理这些旧条目：
+
+* 直接在 BIOS/EFI 设置界面上删除它们（具体步骤取决于硬件）。
+* 运行 UEFI https://uefi.org/sites/default/files/resources/UEFI_Shell_2_2.pdf[`bcfg`] 外壳，命令如下：
++
+----
+# List the entries
+bcfg boot dump -b
+# Delete entry number X
+bcfg boot rm X
+# X is the number associated the entry to remove. For example, if the entry is "Boot0002 foobar", then X is 2.
+----
+
+* 在 Linux 系统上使用 `efibootmgr`，命令如下：
++
+----
+# List the entries
+efibootmgr -v
+# Delete entry number X
+efibootmgr -b X -B 
+----
+
+该处理可能会在 EFI 系统分区 (ESP) 上留下孤立文件，这些文件通常位于以供应商命名的子目录下（例如 `EFI/opensuse` 或 `EFI/Microsoft`）。
+虽然这些文件通常无害，但如果它们占用了过多空间，则应将其删除，因为这可能会妨碍新操作系统或引导管理器的更新。
+删除可能需要显式挂载 ESP，在 Linux 系统上通常挂载为 `/boot/efi/EFI`。

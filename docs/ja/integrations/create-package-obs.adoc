@@ -1,0 +1,267 @@
+= OBS (openSUSE Build Service) を使用してパッケージ (RPM またはコンテナイメージ) を作成します。
+:revdate: 2024-03-06
+:revnumber: 3.5
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+== openSUSE Build Service
+
+https://build.opensuse.org[openSUSE Build Service] は、openSUSE ディストリビューションの開発に使用され、Fedora、Debian、Ubuntu、SUSE Linux Enterprise などのディストリビューション向けに同じソースからパッケージを提供するために使用される https://openbuildservice.org/[Open Build Service] のパブリックインスタンスです。
+
+このサービスは、`Dockerfile` または KIWI 設定のいずれかを使用してコンテナイメージをビルドすることもできます。
+
+誰でも SUSE IdP アカウントを作成して、このサービスを利用できます。
+
+公開されたコンテナイメージは https://registry.opensuse.org[registry.opensuse.org] で利用可能になり、公開されたパッケージは https://download.opensuse.org[download.opensuse.org] で利用可能になります。
+
+== 前提条件
+
+OBS を使用するには、まず IdP アカウント (https://idp-portal.suse.com/univention/self-service/#page=createaccount[こちらからサインアップ]) が必要であり、 https://build.opensuse.org[build.opensuse.org] にログインする必要があります。
+
+このクイックスタートでは CLI を使用するため、`osc` (openSUSE Commander 用) コマンドも必要になりますが、必要に応じて WebUI でほとんどの操作を行うこともできます。
+
+`osc`をインストールするには:
+
+[.tabs]
+SUSE::
++
+[,bash]
+----
+zypper install osc
+----
++
+MacOS::
++
+[,bash]
+----
+brew install osc
+----
++
+PIP::
++
+[,bash]
+----
+pip install osc
+----
+
+
+== プロジェクトを作成して設定する
+
+ホームネームスペースの下にプロジェクトを作成します。これを行うと、すぐに設定するためのエディタが起動します。
+
+[,bash]
+----
+osc meta prj -e "home:$USERNAME:$PROJECTNAME"
+----
+
+[NOTE]
+====
+ホームプロジェクトのルートを使用する場合は、ここで `home:$USERNAME` を指定し、以降の手順でも同様に指定してください。
+====
+
+エディタで、以下のようなメタデータを入力できます。
+
+
+[,xml]
+----
+<project name="home:$USERNAME">
+  <title/>
+  <description/>
+  <person userid="$USERNAME" role="maintainer"/>
+  <!--
+    If you want to build RPM packages you need a block like this one, here for
+    SLE-15 SP5 replace accordingly to the distribution you want to target
+  -->
+  <repository name="sp5">
+    <path project="SUSE:SLE-15-SP5:Update" repository="standard"/>
+    <path project="SUSE:SLE-15-SP5:GA" repository="standard"/>
+    <arch>x86_64</arch>
+    <arch>aarch64</arch>
+  </repository>
+  <!-- If you want to build container images you need a block akin to this one -->
+  <repository name="containers">
+    <!--
+        This defines the available source images for the build (here any from
+        registry.suse.com)
+    -->
+    <path project="SUSE:Registry" repository="standard"/>
+    <!--
+        This defines package repositories available during build, I am
+        referring to the one above here so I can use the RPM packages published
+        in this project for the container images of the project
+    -->
+    <path project="home:$USERNAME:$PROJECTNAME" repository="sp4"/>
+    <!-- This is the list of architecture you want to build for -->
+    <arch>x86_64</arch>
+    <arch>aarch64</arch>
+  </repository>
+</project>
+----
+
+コンテナをビルドする場合は、プロジェクトの設定も調整する必要があります。
+
+[,bash]
+----
+osc meta prjconf -e "home:$USERNAME:$PROJECTNAME"
+----
+
+KIWI と Dockerfile ビルドシステムのどちらを使用するかによって、設定が異なります。
+
+[.tabs]
+docker ファイル::
++
+[,shell]
+----
+%if "%_repository" == "containers"
+Type: docker
+Repotype: none
+Patterntype: none
+BuildEngine: podman
+%endif
+----
++
+KIWI::
++
+[,shell]
+----
+%if "%_repository" == "containers"
+Type: kiwi
+Repotype: none
+Patterntype: none
+%endif
+----
+
+
+[NOTE]
+====
+同じプロジェクトで KIWI と `Dockerfiles` の両方を使用してコンテナをビルドする場合は、プロジェクトのメタデータに2つのリポジトリ (異なる名前) が必要であり、プロジェクトの設定に両方のスニペット (リポジトリごとに1つずつ) が必要です。
+====
+
+
+== パッケージを作成する
+
+プロジェクト内にパッケージを作成するには、次のコマンドを使用します。
+
+[,bash]
+----
+osc meta pkg -e home:$USERNAME:$PROJECTNAME $PACKAGENAME
+----
+
+そこで編集用の別の XML ファイルが表示されるので、タイトルと説明を設定するだけです。
+
+これでディレクトリをチェックアウトして、ファイルの追加を開始できます。
+
+[,bash]
+----
+osc co home:$USERNAME:$PROJECTNAME/$PACKAGENAME
+----
+
+ディレクトリに移動し、準備ができたら、以下のコマンドを使用してファイルを追加し、コミットできます。
+
+[,bash]
+----
+osc add <files>...
+osc ci
+----
+
+次に、RPMパッケージおよびコンテナパッケージの特性について見ていきましょう。
+
+=== RPMパッケージ：
+
+RPMパッケージはspecファイルの存在によって定義されますが、このファイルの詳細についてはこのクイックスタートの範囲外なので説明しません。パッケージングの詳細については、 https://en.opensuse.org/Portal:Packagingを参照してください。
+
+ただし、OBSの動作を変更する可能性のある`_service`および`_constraints`の特別なファイルについては、詳しく説明します。
+
+`_service`ファイルを使用すると、指定した時間に実行される自動化を定義できます。RPMパッケージの場合、これらは通常手動でトリガーされます。
+これにより、gitリポジトリからtarballを取得する、git情報からspecファイルのバージョンを更新する、goやrustの依存関係をベンダー化するなどの自動化が可能になります。...可能なことの詳細については、こちら https://en.opensuse.org/openSUSE:Build_Service_Concept_SourceServiceを参照してください。
+
+例として、rustプロジェクト用のものを以下に示します。
+
+[,xml]
+----
+<services>
+  <service name="tar_scm" mode="manual">
+    <param name="scm">git</param>
+    <param name="url">https://github.com/project-akri/akri</param>
+    <param name="filename">akri</param>
+    <param name="versionformat">@PARENT_TAG@</param>
+    <param name="versionrewrite-pattern">v(.*)</param>
+    <param name="revision">v0.10.4</param>
+  </service>
+  <service name="recompress" mode="manual">
+    <param name="file">*.tar</param>
+    <param name="compression">xz</param>
+  </service>
+  <service name="set_version" mode="manual" />
+  <service name="cargo_vendor" mode="manual">
+    <param name="srcdir">akri</param>
+    <param name="compression">xz</param>
+  </service>
+</services>
+----
+
+`_constraints`ファイルを使用すると、OBSによって選択されたビルダーに関する「制限」を定義できます。例えば、ディスクサイズなどです。ビルド時に容量不足の警告が表示される場合は、このファイルを編集/作成する必要があります。
+完全なガイドについては、こちらを参照してください: https://openbuildservice.org/help/manuals/obs-user-guide/cha.obs.build_job_constraints.html
+
+### コンテナイメージ
+
+コンテナイメージのビルドには、`Dockerfile`を使用する方法とKIWI設定を使用する方法の2通りがあります。
+
+それぞれの方法には、独自の利点と欠点があります。
+Kiwiはホスト/ビルドシステムのパッケージマネージャーの使用をサポートしているため、`opensuse/busybox`のようにパッケージマネージャーを含まないベースイメージや派生イメージをビルドできます。Dockerfileを使用する場合、`opensuse/tumbleweed`のような完全なベースイメージを使用することが事実上必須となります。
+
+Dockerfileやkiwiのビルド方法の詳細については説明しませんが、OBSとの連携について説明します。
+
+まず、ビルド時のソースサービスとして追加できる`kiwi_metainfo_helper`サービスを使用すると、Dockerfileやkiwi設定で使用するビルド時のプレースホルダーを置き換えることができます。プレースホルダーのリストは、こちらで確認できます: https://build.opensuse.org/package/view_file/openSUSE:Factory/obs-service-kiwi_metainfo_helper/README
+
+もう一つの便利なサービスは、`replace_using_package_version`サービスです。これはプレースホルダーをRPMパッケージのバージョンに置き換えることができます。
+例えば、利用可能なRPMリポジトリにバージョン`1.2.3`の`foobar`パッケージがある場合、このサービスを使用して、そのパッケージがインストールされているイメージに自動的にタグを付けることができます。ここでは、`%PKG_VERSION%`が`1.2`に置き換えられます。
+
+[,xml]
+----
+<services>
+  <service mode="buildtime" name="kiwi_metainfo_helper"/>
+  <service mode="buildtime" name="replace_using_package_version">
+    <param name="file">Dockerfile</param>
+    <param name="regex">%PKG_VERSION%</param>
+    <param name="parse-version">minor</param>
+    <param name="package">foobar</param>
+  </service>
+</services>
+----
+
+次に、OBSに対してイメージの名前とタグを伝える必要があります。
+
+[.tabs]
+docker ファイル::
+`BuildTag`を`Dockerfile`内のコメントとして、次のように1つまたは複数使用できます。
++
+[,shell]
+----
+#!BuildTag: foo/bar:latest foo/bar:%PKG_VERSION%.%RELEASE%
+#!BuildTag: foo/bar:tag foo/bar:anothertag
+----
++
+kiwi::
+kiwi設定でイメージのタグを指定するには、次のように`containerconfig`要素を使用します。
++
+[,xml]
+----
+<preferences>
+  <type image="docker">
+   <containerconfig
+     name="foo/bar"
+     tag="latest"
+     additionaltags="atag,anothertag,%PKG_VERSION%.%RELEASE">
+     ...
+----
+

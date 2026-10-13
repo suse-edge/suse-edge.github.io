@@ -1,0 +1,128 @@
+[#tips-metal3]
+= *Metal^3^*
+:revdate: 2025-10-07
+:revnumber: 3.5
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+:imagesdir: ../images/
+
+== `BareMetalHost` seleção e associação de cluster
+
+Uma vez que um objeto de cluster Metalˆ3ˆ e seus objetos associados correspondentes são criados, um processo para escolher qual `BareMetalHost` fará parte do cluster é realizado.
+Este processo conecta um `BareMetalHost` a um `Metal3MachineTemplate` específico usando https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/[rótulos do Kubernetes] e seletores padrão.
+
+Como exemplo, cada `BareMetalHost` é rotulado para identificar suas propriedades e o cluster pretendido (por exemplo, sua função de cluster, o nome do cluster, localização, etc.):
+
+----
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode1
+  labels:
+    cluster-role: control-plane
+    cluster: foobar
+    location: madrid
+    datacenter: xyz
+<snip>
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode2
+  labels:
+    cluster-role: worker
+    cluster: foobar
+    location: madrid
+    datacenter: xyz
+<snip>
+---
+apiVersion: metal3.io/v1alpha1
+kind: BareMetalHost
+metadata:
+  name: mynode3
+  labels:
+    cluster-role: worker
+    cluster: foobar2
+    location: madrid
+    datacenter: xyz
+<snip>
+...
+----
+
+Então, o objeto `Metal3MachineTemplate` usa o campo https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector[`spec.hostSelector`] para corresponder ao `BareMetalHost` desejado.
+
+Tanto https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector-matchLabels[`matchLabels`] (para correspondência exata de chave-valor) quanto https://doc.crds.dev/github.com/metal3-io/cluster-api-provider-metal3/infrastructure.cluster.x-k8s.io/Metal3MachineTemplate/{version-capi-provider-metal3}#spec-template-spec-hostSelector-matchExpressions[`matchExpressions`] (para regras mais complexas) podem ser usados:
+
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: foobar-cluster-controlplane
+  namespace: mynamespace
+spec:
+  template:
+    spec:
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+          cluster: foobar
+<snip>
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: Metal3MachineTemplate
+metadata:
+  name: foobar-cluster-worker
+  namespace: mynamespace
+spec:
+  template:
+    spec:
+      hostSelector:
+        matchExpressions:
+          - { key: cluster-role, operator: In, values: [worker] }
+          - { key: cluster, operator: In, values: [foobar] }
+<snip>
+----
+
+[NOTE]
+====
+Namespaces do Kubernetes também podem ser usados para organizar melhor os diferentes objetos.
+====
+
+== Limpar entradas de inicialização EFI antigas
+
+Às vezes, o https://en.wikipedia.org/wiki/UEFI#UEFI_booting[gerenciador de inicialização UEFI] contém múltiplas entradas para sistemas operacionais mais antigos que provavelmente não são mais necessários (especialmente para hosts sendo reprovisionados várias vezes).
+Você pode limpar essas entradas antigas seguindo qualquer um dos procedimentos a seguir:
+
+* Exclua-as diretamente na interface de configuração do BIOS/EFI (o procedimento exato dependerá do hardware).
+* Execute o shell UEFI https://uefi.org/sites/default/files/resources/UEFI_Shell_2_2.pdf[`bcfg`] como:
++
+----
+# List the entries
+bcfg boot dump -b
+# Delete entry number X
+bcfg boot rm X
+# X is the number associated the entry to remove. For example, if the entry is "Boot0002 foobar", then X is 2.
+----
+
+* Use o `efibootmgr` em um sistema Linux como:
++
+----
+# List the entries
+efibootmgr -v
+# Delete entry number X
+efibootmgr -b X -B 
+----
+
+O processo pode deixar arquivos órfãos na Partição de Sistema EFI (ESP), geralmente encontrados em subdiretórios nomeados pelo fornecedor (por exemplo, `EFI/opensuse` ou `EFI/Microsoft`).
+Embora esses arquivos sejam geralmente inofensivos, eles devem ser excluídos se consumirem espaço excessivo, pois isso pode impedir a instalação de um novo SO ou uma atualização do gerenciador de inicialização.
+A remoção pode exigir a montagem explícita da ESP, normalmente montada como `/boot/efi/EFI` em sistemas Linux.

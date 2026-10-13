@@ -1,0 +1,442 @@
+[#day2-migration]
+= Migração Edge {version-edge}
+:revdate: 2026-01-19
+:revnumber: 3.5
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+:toc: preamble
+:previous-edge-version: 3.4
+:static-edge-version: 3.5.0
+:static-fleet-examples-tag: release-3.5.0
+
+Esta seção explica como migrar seus clusters `management` e `downstream` de `Edge {previous-edge-version}` para `Edge {static-edge-version}`.
+
+[IMPORTANT]
+====
+Sempre realize migrações de cluster a partir da `latest Z-stream` release do `Edge {previous-edge-version}`.
+
+Sempre migre para a `Edge {static-edge-version}` release. Para fazer upgrades pós-migração subsequentes, consulte as seções de cluster de <<day2-mgmt-cluster, gerenciamento>> e <<day2-downstream-clusters, downstream>>.
+====
+
+A tabela a seguir lista os diferentes tipos de clusters e os métodos para fazer upgrade dos clusters:
+
+[[Clusters-and-methods-to-upgrade-downstream-clusters]]
+.Clusters e métodos para fazer upgrade de clusters downstream
+|===
+| Tipo de cluster  | Método
+
+|Clusters provisionados por EIB
+|Consulte <<day2-migration-mgmt-fleet>> para obter os detalhes.
+
+|Clusters provisionados por Metal^3^
+|Consulte <<atip-lifecycle-downstream, atualizações de cluster downstream>> para obter detalhes.
+
+|Clusters provisionados por phone-home
+|Consulte https://ranchermanager.docs.rancher.com/{rancher-docs-version}/getting-started/installation-and-upgrade/upgrade-and-roll-back-kubernetes#upgrading-the-kubernetes-version[Atualizando a versão do Kubernetes] para fazer upgrade da versão do Kubernetes e <<day2-downstream-clusters, Clusters downstream>> para SUC, sistema operacional e outros componentes.
+|===
+
+[#day2-migration-mgmt]
+== Cluster de gerenciamento
+:cluster-type: management
+
+Esta seção abrange os seguintes tópicos:
+
+<<day2-migration-mgmt-prereq>> - etapas de pré-requisito a serem concluídas antes de iniciar a migração.
+
+<<day2-migration-mgmt-upgrade-controller>> - como fazer uma migração de cluster `{cluster-type}` usando o <<components-upgrade-controller>>.
+
+<<day2-migration-mgmt-fleet>> - como fazer uma migração de cluster `{cluster-type}` usando <<components-fleet>>.
+
+[#day2-migration-mgmt-prereq]
+=== Pré-requisitos
+
+==== Atualize os CRDs do Bare Metal Operator
+
+[NOTE]
+====
+Aplica-se apenas a clusters de gerenciamento CAPI/Metal3 que exigem uma atualização de gráfico <<components-metal3>>.
+====
+
+O gráfico Helm `Metal^3^` inclui os CRDs link:https://book.metal3.io/bmo/introduction.html[Bare Metal Operator (BMO)] aproveitando o diretório link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#method-1-let-helm-do-it-for-you[CRD] do Helm.
+
+No entanto, essa abordagem tem certas limitações, particularmente a incapacidade de atualizar CRDs neste diretório usando o Helm. Para obter mais informações, consulte a link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#some-caveats-and-explanations[documentação do Helm].
+
+Como resultado, antes de fazer upgrade do Metal^3^ para uma versão compatível com `Edge {static-edge-version}`, os usuários devem fazer upgrade manualmente dos CRDs do BMO subjacentes.
+
+Em uma máquina com `Helm` instalado e `kubectl` configurado para apontar para o seu cluster `{cluster-type}`:
+
+. Aplique manualmente os CRDs do BMO:
++
+[,bash,subs="attributes"]
+----
+helm show crds oci://registry.suse.com/edge/charts/metal3 --version {version-metal3-chart} | kubectl apply -f -
+----
+
+==== Prepare-se para a Migração do SUSE Storage
+
+Ao atualizar para `Edge {static-edge-version}`, é necessário migrar do gráfico Longhorn anterior para o gráfico SUSE Storage que é mantido na https://www.suse.com/products/rancher/application-collection/[SUSE Application Collection]
+
+[NOTE]
+====
+Este procedimento aplica-se apenas a clusters de gerenciamento que exigem uma atualização do gráfico Longhorn.
+
+Você deve garantir que o cluster de gerenciamento seja primeiramente atualizado para o z-stream 3.4 mais recente, que contém a versão 1.9.2 do SUSE Storage necessária.
+====
+
+O gráfico do SUSE Storage não possui mais um gráfico Helm de CRD separado; eles são empacotados como um só, portanto, é necessário seguir algumas etapas de migração adicionais conforme descrito na https://documentation.suse.com/cloudnative/storage/1.9/en/migration/migration.html[Documentação do SUSE Storage]
+
+. Primeiro, podemos verificar a versão atual do CRD do Longhorn instalado.
++
+[,bash,subs="attributes"]
+----
+helm list --all-namespaces | grep longhorn-crd
+longhorn-crd                    longhorn-system 1               2026-01-16 02:17:16.7804359 +0000 UTC   deployed        longhorn-crd-107.1.1+up1.9.2          v1.9.2
+----
++
+
+. Agora, clonaremos o repositório rancher/charts para a versão específica do Longhorn que temos instalada atualmente.
+Para fazer isso, você deve primeiro baixar este https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/download-longhorn-crd-chart.sh[script].
++
+O script é executado da seguinte forma:
++
+[,bash,subs="attributes"]
+----
+./download-longhorn-crd-chart.sh 107.1.1+up1.9.2
+----
++
+Agora, o gráfico longhorn-crd será baixado para o diretório local `./107.1.1+up1.9.2`.
+
+. Após o download, verifique se é a versão correta abrindo o `Chart.yaml` e verificando se o `appVersion` é v1.9.2:
++
+[,bash,subs="attributes"]
+----
+cat 107.1.1+up1.9.2/Chart.yaml
+
+annotations:
+  catalog.cattle.io/certified: rancher
+  catalog.cattle.io/hidden: "true"
+  catalog.cattle.io/namespace: longhorn-system
+  catalog.cattle.io/release-name: longhorn-crd
+apiVersion: v1
+appVersion: v1.9.2
+description: Installs the CRDs for longhorn.
+name: longhorn-crd
+version: 107.1.1+up1.9.2
+----
++
+
+. Em seguida, devemos aplicar o patch da anotação `helm.sh/resource-policy` para o valor `keep` no `templates/crds.yaml` dentro do gráfico `longhorn-crd` que foi clonado. Isso garante que o Helm não exclua os CRDs quando a release for desinstalada. 
++
+Para fazer isso, baixe este https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/patch-resource-policy-annotation.sh[script] para aplicar automaticamente o patch na anotação:
++
+[,bash,subs="attributes"]
+----
+./patch-resource-policy-annotation.sh 107.1.1+up1.9.2/templates/crds.yaml
+
+Processing CRDs in '107.1.1+up1.9.2/templates/crds.yaml'...
+Creating backup: '/tmp/crds.yaml.original'
+Successfully processed the file
+Original file backed up to: '/tmp/crds.yaml.original'
+Modified file saved as: '107.1.1+up1.9.2/templates/crds.yaml'
+Found 22 CustomResourceDefinition(s)
+Added 22 helm.sh/resource-policy: keep annotation(s)
+Original file: 4575 lines, Modified file: 4597 lines
+----
++
+
+. Para verificar se os CRDs foram patchados corretamente, verifique a diferença entre o modelo original e o patchado para garantir que o valor de `keep` esteja definido para `helm.sh/resource-policy`:
++
+[,bash,subs="attributes"]
+----
+vim -d /tmp/crds.yaml.original 107.1.1+up1.9.2/templates/crds.yaml
+----
++
+
+. Em seguida, faça upgrade do release do Helm longhorn-crd usando o gráfico patchado localmente:
++
+[,bash,subs="attributes"]
+----
+helm upgrade longhorn-crd -n longhorn-system ./107.1.1+up1.9.2
+----
++
+
+. Agora, desinstale o release do Helm longhorn-crd do seu sistema. Devido ao patch aplicado, os CRDs permanecerão:
++
+[,bash,subs="attributes"]
+----
+helm uninstall longhorn-crd --namespace longhorn-system
+
+These resources were kept due to the resource policy:
+[CustomResourceDefinition] backingimagedatasources.longhorn.io
+[CustomResourceDefinition] backingimagemanagers.longhorn.io
+[CustomResourceDefinition] nodes.longhorn.io
+[CustomResourceDefinition] orphans.longhorn.io
+[CustomResourceDefinition] recurringjobs.longhorn.io
+[CustomResourceDefinition] replicas.longhorn.io
+[CustomResourceDefinition] settings.longhorn.io
+[CustomResourceDefinition] sharemanagers.longhorn.io
+[CustomResourceDefinition] snapshots.longhorn.io
+[CustomResourceDefinition] supportbundles.longhorn.io
+[CustomResourceDefinition] systembackups.longhorn.io
+[CustomResourceDefinition] systemrestores.longhorn.io
+[CustomResourceDefinition] backingimages.longhorn.io
+[CustomResourceDefinition] volumeattachments.longhorn.io
+[CustomResourceDefinition] volumes.longhorn.io
+[CustomResourceDefinition] backupbackingimages.longhorn.io
+[CustomResourceDefinition] backups.longhorn.io
+[CustomResourceDefinition] backuptargets.longhorn.io
+[CustomResourceDefinition] backupvolumes.longhorn.io
+[CustomResourceDefinition] engineimages.longhorn.io
+[CustomResourceDefinition] engines.longhorn.io
+[CustomResourceDefinition] instancemanagers.longhorn.io
+
+release "longhorn-crd" uninstalled
+----
++
+
+. Certifique-se de que o gráfico `longhorn-crd` seja desinstalado executando novamente o mesmo comando de antes: `helm list --all-namespaces | grep longhorn-crd` para verificar se `longhorn-crd` não está presente.
++
+Após isso, é necessário atualizar os rótulos de propriedade dos CRDs do Longhorn existentes para preparar o upgrade para o gráfico Helm do SUSE Storage. 
++
+Aplique este https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/migrate-crd-ownership.sh[script] para realizar a substituição.
++
+[,bash,subs="attributes"]
+----
+./migrate-crd-ownership.sh
+
+# The output will look like the following for each CRD. The most important thing to note is that each operation says "Successfully updated CRD..." at the end:
+
+Processing CRD: volumes.longhorn.io
+Warning: resource customresourcedefinitions/volumes.longhorn.io is missing the kubectl.kubernetes.io/last-applied-configuration annotation which is required by kubectl apply. kubectl apply should only be used on resources created declaratively by either kubectl create --save-config or kubectl apply. The missing annotation will be patched automatically.
+customresourcedefinition.apiextensions.k8s.io/volumes.longhorn.io configured
+Successfully updated CRD: volumes.longhorn.io
+----
++
+
+[NOTE]
+====
+As credenciais de login para o registro do Rancher Application Collection podem ser encontradas na https://apps.rancher.io/settings/access-tokens[seção de tokens de acesso das suas configurações.] (É necessário estar conectado)
+
+Além disso, documentação adicional para a Rancher Application Collection pode ser encontrada https://docs.apps.rancher.io/[aqui.]
+====
+
+. Após todos os CRDs terem sido preparados, faça login na Rancher Application Collection para que você possa puxar o Helm Chart:
++
+[,bash,subs="attributes"]
+----
+helm registry login dp.apps.rancher.io -u ${APPS.RANCHER.IO_USERNAME} -p ${APPS.RANCHER.IO_ACCESS_TOKEN}
+----
++
+
+. Em seguida, crie um https://docs.apps.rancher.io/get-started/authentication#kubernetes[docker-registry secret] para que você possa puxar as imagens de contêiner:
++
+[,bash,subs="attributes"]
+----
+kubectl create secret docker-registry rancher-app-collection \
+  --namespace longhorn-system \
+  --docker-server=dp.apps.rancher.io \
+  --docker-username="${APPS.RANCHER.IO_USERNAME}" \
+  --docker-password="${APPS.RANCHER.IO_ACCESS_TOKEN}"
+----
++
+
+. Finalmente, faça upgrade da sua instalação do Longhorn para o SUSE Storage:
++
+[,bash,subs="attributes"]
+----
+helm upgrade longhorn oci://dp.apps.rancher.io/charts/suse-storage \
+    --namespace longhorn-system \
+    --version {version-longhorn-chart} \
+    --set privateRegistry.registrySecret=rancher-app-collection
+----
++
+Você pode fornecer um arquivo `values.yaml` adicionando `-f values.yaml` ao comando de upgrade, se desejar.
+
+==== Prepare-se para fazer upgrade do Rancher Turtles
+
+[NOTE]
+====
+Aplica-se apenas a clusters de gerenciamento CAPI/Metal3 que requerem o upgrade do chart do Rancher Turtles.
+
+Você deve garantir que o cluster de gerenciamento seja primeiramente atualizado para o z-stream 3.4 mais recente, que contém a versão 0.24.3 do Rancher Turtles necessária.
+====
+
+A partir do Rancher 2.13, o Rancher Turtles é instalado por padrão; portanto, é necessário seguir algumas etapas adicionais de migração, conforme descrito na https://documentation.suse.com/cloudnative/cluster-api/v0.25/en/tutorials/migration.html[Documentação do Rancher Turtles]
+
+Antes de fazer upgrade, é necessário remover o chart rancher-turtles instalado e o rancher-turtles-airgap-resources (se instalado); quando instalado via Edge Image Builder, isso requer a remoção dos recursos `HelmChart` correspondentes:
+
+[,bash,subs="attributes"]
+----
+kubectl delete -n kube-system helmchart rancher-turtles
+kubectl delete -n kube-system helmchart rancher-turtles-airgap-resources
+----
+
+Em seguida, devemos aplicar o patch aos recursos CRD, conforme descrito na https://turtles.docs.rancher.com/turtles/next/en/tutorials/migration.html[Documentação do Rancher Turtles]
+
+[,bash]
+----
+kubectl patch crd capiproviders.turtles-capi.cattle.io --type=json -p='[{"op": "add", "path": "/metadata/annotations/meta.helm.sh~1release-namespace", "value": "cattle-turtles-system"}]'
+kubectl patch crd clusterctlconfigs.turtles-capi.cattle.io --type=json -p='[{"op": "add", "path": "/metadata/annotations/meta.helm.sh~1release-namespace", "value": "cattle-turtles-system"}]'
+----
+
+Agora siga as etapas regulares para fazer upgrade do cluster de gerenciamento para `Edge {static-edge-version}`
+
+==== Pós-upgrade do Rancher Turtles
+
+*Após* seguir as etapas abaixo para fazer upgrade para `Edge {static-edge-version}`, é necessário instalar o novo gráfico Helm `rancher-turtles-providers` - isso cria novos recursos `CAPIProvider` para substituir aqueles removidos nas etapas de pré-upgrade acima.
+
+Primeiro, devemos executar o script de migração conforme descrito na https://turtles.docs.rancher.com/turtles/next/en/tutorials/migration.html[Documentação do Rancher Turtles]
+
+```
+wget https://raw.githubusercontent.com/rancher/turtles/refs/heads/release/v0.25/scripts/migrate-providers-ownership.sh
+bash migrate-providers-ownership.sh --adopt metal3:capm3-system --adopt metal3ipam:metal3-ipam-system
+```
+
+Em seguida, o gráfico `rancher-turtles-providers` pode ser instalado.  Esta instalação do gráfico deve ser feita por meio de um recurso `HelmChart` para permitir futuros upgrades automatizados por meio do Upgrade Controller:
+
+[,shell,subs="attributes,specialchars"]
+----
+helm pull oci://registry.suse.com/edge/charts/rancher-turtles-providers --version {version-rancher-turtles-providers-chart}
+
+cat > turtles-providers-helmchart.yaml <<EOF
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  annotations:
+    edge.suse.com/repository-url: oci://registry.suse.com/edge/charts/rancher-turtles-providers
+  name: rancher-turtles-providers
+  namespace: kube-system
+spec:
+  chartContent: $(base64 -w 0 rancher-turtles-providers-{version-rancher-turtles-providers-chart}.tgz)
+  failurePolicy: reinstall
+  createNamespace: true
+  targetNamespace: cattle-turtles-system
+  version: {version-rancher-turtles-providers-chart}
+EOF
+kubectl apply -f turtles-providers-helmchart.yaml
+----
+
+Após alguns minutos, uma saída semelhante à seguinte deve ser observada:
+
+[,shell]
+----
+kubectl get capiprovider -A
+NAMESPACE                   NAME                 TYPE             PROVIDERNAME    INSTALLEDVERSION   PHASE
+capm3-system                metal3               infrastructure   metal3          v1.10.4            Ready
+cattle-capi-system          cluster-api          core             cluster-api     v1.10.6            Ready
+fleet-addon-system          fleet                addon            rancher-fleet   v0.12.0            Ready
+metal3-ipam-system          metal3ipam           ipam             metal3ipam      v1.10.4            Ready
+rke2-bootstrap-system       rke2-bootstrap       bootstrap        rke2            v0.21.1            Ready
+rke2-control-plane-system   rke2-control-plane   controlPlane     rke2            v0.21.1            Ready
+----
+
+[#day2-migration-mgmt-upgrade-controller]
+=== Upgrade Controller
+
+[IMPORTANT]
+====
+O `Upgrade Controller` atualmente suporta migrações de versão Edge apenas para clusters de gerenciamento *não air-gapped*.
+====
+
+Os tópicos a seguir são abordados como parte desta seção:
+
+<<day2-migration-mgmt-upgrade-controller-prereq>> - pré-requisitos específicos para o `Upgrade Controller`.
+
+<<day2-migration-mgmt-upgrade-controller-migration>> - etapas para migrar um cluster `{cluster-type}` para uma nova versão Edge usando o `Upgrade Controller`.
+
+[#day2-migration-mgmt-upgrade-controller-prereq]
+==== Pré-requisitos
+
+===== Edge {version-edge} Upgrade Controller
+
+Antes de usar o `Upgrade Controller`, você deve primeiro garantir que ele esteja executando uma versão capaz de migrar para a versão Edge desejada.
+
+Para fazer isso:
+
+. Se você já tiver o `Upgrade Controller` implantado a partir de uma versão Edge anterior, faça upgrade do seu gráfico:
++
+[,bash,subs="attributes"]
+----
+helm upgrade upgrade-controller -n upgrade-controller-system oci://registry.suse.com/edge/charts/upgrade-controller --version {version-upgrade-controller-chart}
+----
+
+. Se você *não* tiver `Upgrade Controller` implantado, siga <<components-upgrade-controller-installation>>.
+
+[#day2-migration-mgmt-upgrade-controller-migration]
+==== Etapas de migração
+
+Realizar uma migração de cluster `{cluster-type}` com o `Upgrade Controller` é fundamentalmente semelhante à execução de um upgrade.
+
+A única diferença é que seu `UpgradePlan` *deve* especificar a versão de lançamento `{static-edge-version}`:
+
+[,yaml,subs="attributes"]
+----
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
+metadata:
+  name: upgrade-plan-mgmt
+  # Change to the namespace of your Upgrade Controller
+  namespace: CHANGE_ME
+spec:
+  releaseVersion: {static-edge-version}
+----
+
+Para obter informações sobre como usar o `UpgradePlan` acima para realizar uma migração, consulte <<{cluster-type}-day2-upgrade-controller,processo de upgrade do Upgrade Controller>>.
+
+[#day2-migration-mgmt-fleet]
+=== Fleet
+
+[NOTE]
+====
+Sempre que possível, use o <<day2-migration-mgmt-upgrade-controller>> para migração.
+
+Consulte esta seção apenas para casos de uso não cobertos pelo `Upgrade Controller`.
+====
+
+Realizar uma migração de cluster `{cluster-type}` com `Fleet` é fundamentalmente semelhante à execução de um upgrade.
+
+As *principais* diferenças são:
+
+. As Fleet *devem ser usadas* a partir da versão link:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}] do repositório `suse-edge/fleet-examples`.
+
+. Os gráficos agendados para upgrade *devem* ser atualizados para versões compatíveis com a versão `Edge {static-edge-version}`. Para obter uma lista dos componentes `Edge {static-edge-version}`, consulte <<release-notes-3-5-0>>.
+
+[IMPORTANT]
+====
+Para garantir uma migração `Edge {static-edge-version}` bem-sucedida, é importante que os usuários cumpram os pontos descritos acima.
+====
+
+Considerando os pontos acima, os usuários podem seguir a documentação do <<{cluster-type}-day2-fleet, Fleet>> do cluster `{cluster-type}` para obter um guia abrangente sobre as etapas necessárias para realizar uma migração.
+
+[#day2-migration-downstream]
+== Clusters downstream
+:cluster-type: downstream
+
+<<day2-migration-downstream-fleet>> - como fazer uma migração de cluster `{cluster-type}` usando <<components-fleet>>.
+
+[#day2-migration-downstream-fleet]
+=== Fleet
+
+Realizar uma migração de cluster `{cluster-type}` com `Fleet` é fundamentalmente semelhante à execução de um upgrade.
+
+As *principais* diferenças são:
+
+. As Fleet *devem ser usadas* a partir da versão link:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}] do repositório `suse-edge/fleet-examples`.
+
+. Os gráficos agendados para upgrade *devem* ser atualizados para versões compatíveis com a versão `Edge {static-edge-version}`. Para obter uma lista dos componentes `Edge {static-edge-version}`, consulte <<release-notes-3-5-0>>.
+
+[IMPORTANT]
+====
+Para garantir uma migração `Edge {static-edge-version}` bem-sucedida, é importante que os usuários cumpram os pontos descritos acima.
+====
+
+Considerando os pontos acima, os usuários podem seguir a documentação do <<{cluster-type}-day2-fleet, Fleet>> do cluster `{cluster-type}` para obter um guia abrangente sobre as etapas necessárias para realizar uma migração.

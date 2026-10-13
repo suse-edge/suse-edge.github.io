@@ -1,0 +1,443 @@
+[#day2-migration]
+= 边缘 {version-edge} 迁移
+:revdate: 2026-01-19
+:revnumber: 3.5
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+:toc: preamble
+:previous-edge-version: 3.4
+:static-edge-version: 3.5.0
+:static-fleet-examples-tag: release-3.5.0
+
+本节介绍了如何将您的 `management` 和 `downstream` 集群从 `Edge {previous-edge-version}` 迁移到 `Edge {static-edge-version}`。
+
+[IMPORTANT]
+====
+请务必从 `latest Z-stream` 的 `Edge {previous-edge-version}` 版本执行集群迁移。
+
+请务必迁移到 `Edge {static-edge-version}` 版本。有关后续迁移后的升级，请参阅 <<day2-mgmt-cluster,管理>> 和 <<day2-downstream-clusters,下游>> 集群部分。
+====
+
+下表列出了不同类型的集群以及升级集群的方法：
+
+[[Clusters-and-methods-to-upgrade-downstream-clusters]]
+.集群以及升级下游集群的方法
+|===
+| 集群类型  | 方法
+
+|EIB 配置的集群
+|有关详细信息，请参见<<day2-migration-mgmt-fleet>>。
+
+|Metal^3^ 配置的集群
+|有关详细信息，请参阅 <<atip-lifecycle-downstream,下游集群升级>>。
+
+|Phone-home 配置的集群
+|有关 Kubernetes 版本升级，请参阅 https://ranchermanager.docs.rancher.com/{rancher-docs-version}/getting-started/installation-and-upgrade/upgrade-and-roll-back-kubernetes#upgrading-the-kubernetes-version[升级 Kubernetes 版本]；有关 SUC、操作系统和其他组件，请参阅 <<day2-downstream-clusters,下游集群>>。
+|===
+
+[#day2-migration-mgmt]
+== 管理群集
+:cluster-type: management
+
+
+本节包含下列主题：
+
+<<day2-migration-mgmt-prereq>> - 开始迁移前需要完成的先决条件步骤。
+
+<<day2-migration-mgmt-upgrade-controller>> - 如何使用 `{cluster-type}` 执行 <<components-upgrade-controller>> 集群迁移。
+
+<<day2-migration-mgmt-fleet>> - 如何使用 `{cluster-type}` 执行 <<components-fleet>> 集群迁移。
+
+[#day2-migration-mgmt-prereq]
+=== 先决条件
+
+==== 升级裸机操作员 CRD
+
+[NOTE]
+====
+仅适用于需要 <<components-metal3>> chart 升级的 CAPI/Metal3 管理集群。
+====
+
+`Metal^3^` Helm chart 通过利用 Helm 的 link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#method-1-let-helm-do-it-for-you[CRD] 目录包含 link:https://book.metal3.io/bmo/introduction.html[Bare Metal Operator (BMO)] CRD。
+
+然而，这种方法有一定的局限性，特别是无法使用 Helm 升级此目录中的 CRD。有关详细信息，请参见 link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#some-caveats-and-explanations[Helm 文档]。
+
+因此，在将 Metal^3^ 升级到 `Edge {static-edge-version}` 兼容版本之前，用户必须手动升级底层的 BMO CRDs。
+
+在安装了 `Helm` 且 `kubectl` 配置为指向您的 `{cluster-type}` 集群的机器上：
+
+. 手动应用 BMO CRD：
++
+[,bash,subs="attributes"]
+----
+helm show crds oci://registry.suse.com/edge/charts/metal3 --version {version-metal3-chart} | kubectl apply -f -
+----
+
+==== 准备 SUSE Storage 迁移
+
+升级到 `Edge {static-edge-version}` 时，有必要从之前的 Longhorn chart 迁移到 https://www.suse.com/products/rancher/application-collection/[SUSE Application Collection] 中维护的 SUSE Storage chart。
+
+[NOTE]
+====
+此过程仅适用于需要 Longhorn chart 升级的管理集群。
+
+您必须确保管理集群首先更新到最新的 3.4 z-stream，其中包含必要的 1.9.2 SUSE Storage 版本。
+====
+
+SUSE Storage chart 不再有单独的 CRD Helm Chart，它们被打包在一起，因此必须遵循 https://documentation.suse.com/cloudnative/storage/1.9/en/migration/migration.html[SUSE Storage 文档] 中所述的一些额外迁移步骤。
+
+. 首先，我们可以检查以查看当前安装的 Longhorn CRD 版本。
++
+[,bash,subs="attributes"]
+----
+helm list --all-namespaces | grep longhorn-crd
+longhorn-crd                    longhorn-system 1               2026-01-16 02:17:16.7804359 +0000 UTC   deployed        longhorn-crd-107.1.1+up1.9.2          v1.9.2
+----
++
+
+. 现在，我们将为我们当前安装的特定 Longhorn 版本克隆 rancher/charts 储存库。
+为此，您必须首先下载此 https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/download-longhorn-crd-chart.sh[脚本]。
++
+该脚本的执行方式如下：
++
+[,bash,subs="attributes"]
+----
+./download-longhorn-crd-chart.sh 107.1.1+up1.9.2
+----
++
+现在，longhorn-crd chart 将被下载到本地目录 `./107.1.1+up1.9.2`。
+
+. 下载完成后，通过打开 `Chart.yaml` 并验证 `appVersion` 是否为 v1.9.2 来确保它是正确的版本：
++
+[,bash,subs="attributes"]
+----
+cat 107.1.1+up1.9.2/Chart.yaml
+
+annotations:
+  catalog.cattle.io/certified: rancher
+  catalog.cattle.io/hidden: "true"
+  catalog.cattle.io/namespace: longhorn-system
+  catalog.cattle.io/release-name: longhorn-crd
+apiVersion: v1
+appVersion: v1.9.2
+description: Installs the CRDs for longhorn.
+name: longhorn-crd
+version: 107.1.1+up1.9.2
+----
++
+
+. 接下来，我们必须在克隆的 `longhorn-crd` chart 内的 `templates/crds.yaml` 中将 `helm.sh/resource-policy` 注解修补为值 `keep`。这可确保 Helm 在卸载发布时不会删除 CRDs。
++
+为此，请下载此 https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/patch-resource-policy-annotation.sh[脚本] 以自动修补该注解：
++
+[,bash,subs="attributes"]
+----
+./patch-resource-policy-annotation.sh 107.1.1+up1.9.2/templates/crds.yaml
+
+Processing CRDs in '107.1.1+up1.9.2/templates/crds.yaml'...
+Creating backup: '/tmp/crds.yaml.original'
+Successfully processed the file
+Original file backed up to: '/tmp/crds.yaml.original'
+Modified file saved as: '107.1.1+up1.9.2/templates/crds.yaml'
+Found 22 CustomResourceDefinition(s)
+Added 22 helm.sh/resource-policy: keep annotation(s)
+Original file: 4575 lines, Modified file: 4597 lines
+----
++
+
+. 要验证 CRDs 是否已正确修补，请检查原始模板与修补后模板之间的差异，以确保 `keep` 的值已针对 `helm.sh/resource-policy` 进行设置：
++
+[,bash,subs="attributes"]
+----
+vim -d /tmp/crds.yaml.original 107.1.1+up1.9.2/templates/crds.yaml
+----
++
+
+. 接下来，使用本地修补的 chart 升级 longhorn-crd Helm release：
++
+[,bash,subs="attributes"]
+----
+helm upgrade longhorn-crd -n longhorn-system ./107.1.1+up1.9.2
+----
++
+
+. 现在从您的系统中卸载 longhorn-crd Helm release。由于应用了补丁，CRDs 将保留：
++
+[,bash,subs="attributes"]
+----
+helm uninstall longhorn-crd --namespace longhorn-system
+
+These resources were kept due to the resource policy:
+[CustomResourceDefinition] backingimagedatasources.longhorn.io
+[CustomResourceDefinition] backingimagemanagers.longhorn.io
+[CustomResourceDefinition] nodes.longhorn.io
+[CustomResourceDefinition] orphans.longhorn.io
+[CustomResourceDefinition] recurringjobs.longhorn.io
+[CustomResourceDefinition] replicas.longhorn.io
+[CustomResourceDefinition] settings.longhorn.io
+[CustomResourceDefinition] sharemanagers.longhorn.io
+[CustomResourceDefinition] snapshots.longhorn.io
+[CustomResourceDefinition] supportbundles.longhorn.io
+[CustomResourceDefinition] systembackups.longhorn.io
+[CustomResourceDefinition] systemrestores.longhorn.io
+[CustomResourceDefinition] backingimages.longhorn.io
+[CustomResourceDefinition] volumeattachments.longhorn.io
+[CustomResourceDefinition] volumes.longhorn.io
+[CustomResourceDefinition] backupbackingimages.longhorn.io
+[CustomResourceDefinition] backups.longhorn.io
+[CustomResourceDefinition] backuptargets.longhorn.io
+[CustomResourceDefinition] backupvolumes.longhorn.io
+[CustomResourceDefinition] engineimages.longhorn.io
+[CustomResourceDefinition] engines.longhorn.io
+[CustomResourceDefinition] instancemanagers.longhorn.io
+
+release "longhorn-crd" uninstalled
+----
++
+
+. 通过重新运行与之前相同的命令来确保 `longhorn-crd` chart 已卸载：`helm list --all-namespaces | grep longhorn-crd` 以验证 `longhorn-crd` 不存在。
++
+在此之后，您需要更新现有 Longhorn CRDs 上的所有权标签，为升级到 SUSE Storage Helm chart 做准备。
++
+应用此 https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/migrate-crd-ownership.sh[脚本] 来执行替换。
++
+[,bash,subs="attributes"]
+----
+./migrate-crd-ownership.sh
+
+# The output will look like the following for each CRD. The most important thing to note is that each operation says "Successfully updated CRD..." at the end:
+
+Processing CRD: volumes.longhorn.io
+Warning: resource customresourcedefinitions/volumes.longhorn.io is missing the kubectl.kubernetes.io/last-applied-configuration annotation which is required by kubectl apply. kubectl apply should only be used on resources created declaratively by either kubectl create --save-config or kubectl apply. The missing annotation will be patched automatically.
+customresourcedefinition.apiextensions.k8s.io/volumes.longhorn.io configured
+Successfully updated CRD: volumes.longhorn.io
+----
++
+
+[NOTE]
+====
+Rancher Application Collection 注册表的登录凭据可以在 https://apps.rancher.io/settings/access-tokens[您的设置中的访问令牌部分] 找到。（必须登录）
+
+此外，有关 Rancher Application Collection 的更多文档可以在 https://docs.apps.rancher.io/[此处] 找到。
+====
+
+. 在准备好所有 CRDs 后，登录到 Rancher Application Collection，以便能够拉取 Helm Chart:
++
+[,bash,subs="attributes"]
+----
+helm registry login dp.apps.rancher.io -u ${APPS.RANCHER.IO_USERNAME} -p ${APPS.RANCHER.IO_ACCESS_TOKEN}
+----
++
+
+. 然后创建一个 https://docs.apps.rancher.io/get-started/authentication#kubernetes[docker-registry secret]，以便能够拉取容器镜像：
++
+[,bash,subs="attributes"]
+----
+kubectl create secret docker-registry rancher-app-collection \
+  --namespace longhorn-system \
+  --docker-server=dp.apps.rancher.io \
+  --docker-username="${APPS.RANCHER.IO_USERNAME}" \
+  --docker-password="${APPS.RANCHER.IO_ACCESS_TOKEN}"
+----
++
+
+. 最后，将您的 Longhorn 安装升级到 SUSE Storage：
++
+[,bash,subs="attributes"]
+----
+helm upgrade longhorn oci://dp.apps.rancher.io/charts/suse-storage \
+    --namespace longhorn-system \
+    --version {version-longhorn-chart} \
+    --set privateRegistry.registrySecret=rancher-app-collection
+----
++
+如果需要，您可以通过在升级命令中附加 `values.yaml` 来提供 `-f values.yaml` 文件。
+
+==== 准备 Rancher Turtles 升级
+
+[NOTE]
+====
+仅适用于需要 rancher turtles chart 升级的 CAPI/Metal3 管理集群。
+
+您必须确保管理集群首先更新到最新的 3.4 z-stream，其中包含必要的 0.24.3 Rancher Turtles 版本。
+====
+
+从 Rancher 2.13 开始，Rancher Turtles 默认安装，因此必须按照 https://documentation.suse.com/cloudnative/cluster-api/v0.25/en/tutorials/migration.html[Rancher Turtles 文档] 中所述执行一些额外的迁移步骤。
+
+升级前，必须删除已安装的 rancher-turtles chart 和 rancher-turtles-airgap-resources（如果已安装）。当通过 Edge Image Builder 安装时，这需要删除相应的 `HelmChart` 资源：
+
+[,bash,subs="attributes"]
+----
+kubectl delete -n kube-system helmchart rancher-turtles
+kubectl delete -n kube-system helmchart rancher-turtles-airgap-resources
+----
+
+接下来，我们必须按照 https://turtles.docs.rancher.com/turtles/next/en/tutorials/migration.html[Rancher Turtles 文档] 中的说明修补 CRD 资源。
+
+[,bash]
+----
+kubectl patch crd capiproviders.turtles-capi.cattle.io --type=json -p='[{"op": "add", "path": "/metadata/annotations/meta.helm.sh~1release-namespace", "value": "cattle-turtles-system"}]'
+kubectl patch crd clusterctlconfigs.turtles-capi.cattle.io --type=json -p='[{"op": "add", "path": "/metadata/annotations/meta.helm.sh~1release-namespace", "value": "cattle-turtles-system"}]'
+----
+
+现在，按照常规步骤将管理集群升级到 `Edge {static-edge-version}`。
+
+==== Rancher Turtles 升级后
+
+*在*按照以下步骤升级到 `Edge {static-edge-version}` 后，必须安装新的 `rancher-turtles-providers` helm chart - 这会创建新的 `CAPIProvider` 资源来替换上述预升级步骤中删除的资源。
+
+首先，我们必须按照 https://turtles.docs.rancher.com/turtles/next/en/tutorials/migration.html[Rancher Turtles 文档] 中的说明运行迁移脚本。
+
+```
+wget https://raw.githubusercontent.com/rancher/turtles/refs/heads/release/v0.25/scripts/migrate-providers-ownership.sh
+bash migrate-providers-ownership.sh --adopt metal3:capm3-system --adopt metal3ipam:metal3-ipam-system
+```
+
+接下来，可以安装 `rancher-turtles-providers` chart。 此 chart 安装应通过 `HelmChart` 资源完成，以启用通过 Upgrade Controller 进行的未来自动升级:
+
+[,shell,subs="attributes,specialchars"]
+----
+helm pull oci://registry.suse.com/edge/charts/rancher-turtles-providers --version {version-rancher-turtles-providers-chart}
+
+cat > turtles-providers-helmchart.yaml <<EOF
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  annotations:
+    edge.suse.com/repository-url: oci://registry.suse.com/edge/charts/rancher-turtles-providers
+  name: rancher-turtles-providers
+  namespace: kube-system
+spec:
+  chartContent: $(base64 -w 0 rancher-turtles-providers-{version-rancher-turtles-providers-chart}.tgz)
+  failurePolicy: reinstall
+  createNamespace: true
+  targetNamespace: cattle-turtles-system
+  version: {version-rancher-turtles-providers-chart}
+EOF
+kubectl apply -f turtles-providers-helmchart.yaml
+----
+
+几分钟后，应观察到类似于以下内容的输出：
+
+[,shell]
+----
+kubectl get capiprovider -A
+NAMESPACE                   NAME                 TYPE             PROVIDERNAME    INSTALLEDVERSION   PHASE
+capm3-system                metal3               infrastructure   metal3          v1.10.4            Ready
+cattle-capi-system          cluster-api          core             cluster-api     v1.10.6            Ready
+fleet-addon-system          fleet                addon            rancher-fleet   v0.12.0            Ready
+metal3-ipam-system          metal3ipam           ipam             metal3ipam      v1.10.4            Ready
+rke2-bootstrap-system       rke2-bootstrap       bootstrap        rke2            v0.21.1            Ready
+rke2-control-plane-system   rke2-control-plane   controlPlane     rke2            v0.21.1            Ready
+----
+
+[#day2-migration-mgmt-upgrade-controller]
+=== 升级控制器
+
+[IMPORTANT]
+====
+`Upgrade Controller` 目前仅支持 Edge 版本迁移，仅适用于 *非隔离的管理* 集群。
+====
+
+本节涵盖以下主题：
+
+<<day2-migration-mgmt-upgrade-controller-prereq>> - `Upgrade Controller` 的特定先决条件。
+
+<<day2-migration-mgmt-upgrade-controller-migration>> - 使用 `{cluster-type}` 将 `Upgrade Controller` 集群迁移到新 Edge 版本的步骤。
+
+[#day2-migration-mgmt-upgrade-controller-prereq]
+==== 先决条件
+
+===== Edge {version-edge} Upgrade Controller
+
+在使用 `Upgrade Controller` 之前，您必须首先确保其运行的版本能够迁移到所需的 Edge 版本。
+
+要执行这一操作：
+
+. 如果您已经从之前的 Edge 版本部署了 `Upgrade Controller`，请升级其 chart：
++
+[,bash,subs="attributes"]
+----
+helm upgrade upgrade-controller -n upgrade-controller-system oci://registry.suse.com/edge/charts/upgrade-controller --version {version-upgrade-controller-chart}
+----
+
+. 如果您 *没有* 部署 `Upgrade Controller`，请遵循 <<components-upgrade-controller-installation>>。
+
+[#day2-migration-mgmt-upgrade-controller-migration]
+==== 迁移步骤
+
+使用 `{cluster-type}` 执行 `Upgrade Controller` 集群迁移与执行升级基本相似。
+
+唯一的区别是您的 `UpgradePlan` *必须* 指定 `{static-edge-version}` 发布版本：
+
+[,yaml,subs="attributes"]
+----
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
+metadata:
+  name: upgrade-plan-mgmt
+  # Change to the namespace of your Upgrade Controller
+  namespace: CHANGE_ME
+spec:
+  releaseVersion: {static-edge-version}
+----
+
+有关如何使用上述 `UpgradePlan` 进行迁移的信息，请参阅 <<{cluster-type}-day2-upgrade-controller, Upgrade Controller 升级流程>>。
+
+[#day2-migration-mgmt-fleet]
+=== Fleet
+
+[NOTE]
+====
+尽可能使用 <<day2-migration-mgmt-upgrade-controller>> 进行迁移。
+
+仅在 `Upgrade Controller` 未涵盖的用例中参考本节。
+====
+
+使用 `{cluster-type}` 执行 `Fleet` 集群迁移与执行升级基本相似。
+
+*关键*区别在于：
+
+. 必须使用 `suse-edge/fleet-examples` 储存库的 link:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}] 版本中的 *Fleet*。
+
+. 计划升级的 Chart *必须*升级到与 `Edge {static-edge-version}` 版本兼容的版本。有关 `Edge {static-edge-version}` 组件的列表，请参阅 <<release-notes-3-5-0>>。
+
+[IMPORTANT]
+====
+为确保 `Edge {static-edge-version}` 迁移成功，用户务必遵守上述要点。
+====
+
+考虑到上述几点，用户可以遵循 `{cluster-type}` 集群 <<{cluster-type}-day2-fleet, Fleet>> 文档，获取执行迁移所需步骤的综合指南。
+
+[#day2-migration-downstream]
+== 下游集群
+:cluster-type: downstream
+
+<<day2-migration-downstream-fleet>> - 如何使用 `{cluster-type}` 执行 <<components-fleet>> 集群迁移。
+
+[#day2-migration-downstream-fleet]
+=== Fleet
+
+使用 `{cluster-type}` 执行 `Fleet` 集群迁移与执行升级基本相似。
+
+*关键*区别在于：
+
+. 必须使用 `suse-edge/fleet-examples` 储存库的 link:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}] 版本中的 *Fleet*。
+
+. 计划升级的 Chart *必须*升级到与 `Edge {static-edge-version}` 版本兼容的版本。有关 `Edge {static-edge-version}` 组件的列表，请参阅 <<release-notes-3-5-0>>。
+
+[IMPORTANT]
+====
+为确保 `Edge {static-edge-version}` 迁移成功，用户务必遵守上述要点。
+====
+
+考虑到上述几点，用户可以遵循 `{cluster-type}` 集群 <<{cluster-type}-day2-fleet, Fleet>> 文档，获取执行迁移所需步骤的综合指南。

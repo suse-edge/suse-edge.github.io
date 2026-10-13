@@ -1,0 +1,442 @@
+[#day2-migration]
+= エッジ {version-edge} 移行
+:revdate: 2026-01-19
+:revnumber: 3.5
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+:toc: preamble
+:previous-edge-version: 3.4
+:static-edge-version: 3.5.0
+:static-fleet-examples-tag: release-3.5.0
+
+このセクションでは、`management` および `downstream` クラスタを `Edge {previous-edge-version}` から `Edge {static-edge-version}` へマイグレーションする方法を説明します。
+
+[IMPORTANT]
+====
+クラスタのマイグレーションは、必ず `latest Z-stream` の `Edge {previous-edge-version}` リリースから実行してください。
+
+必ず `Edge {static-edge-version}` リリースへマイグレーションしてください。その後のマイグレーション後のアップグレードについては、<<day2-mgmt-cluster, management>> および <<day2-downstream-clusters,ダウンストリーム>> クラスタのセクションを参照してください。
+====
+
+次の表に、さまざまな種類のクラスタとクラスタをアップグレードする方法を示します。
+
+[[Clusters-and-methods-to-upgrade-downstream-clusters]]
+.ダウンストリームクラスタの種類とアップグレード方法
+|===
+| クラスタのタイプ  | メソッド
+
+|EIBでプロビジョニングされたクラスタ
+|詳細については<<day2-migration-mgmt-fleet>>を参照してください。
+
+|Metal^3^でプロビジョニングされたクラスタ
+|詳細は <<atip-lifecycle-downstream,ダウンストリームクラスタのアップグレード>> を参照してください。
+
+|Phone-homeでプロビジョニングされたクラスタ
+|Kubernetesバージョンのアップグレードについては https://ranchermanager.docs.rancher.com/{rancher-docs-version}/getting-started/installation-and-upgrade/upgrade-and-roll-back-kubernetes#upgrading-the-kubernetes-version[Kubernetesバージョンのアップグレード] を、SUC、オペレーティングシステム、その他のコンポーネントについては <<day2-downstream-clusters,ダウンストリームクラスタ群>> を参照してください。
+|===
+
+[#day2-migration-mgmt]
+== 管理クラスタ
+:cluster-type: management
+
+この章の構成は次のとおりです。
+
+<<day2-migration-mgmt-prereq>> - マイグレーション開始前に完了すべき前提条件の手順。
+
+<<day2-migration-mgmt-upgrade-controller>> - `{cluster-type}` を使用して <<components-upgrade-controller>> クラスタマイグレーションを実行する方法。
+
+<<day2-migration-mgmt-fleet>> - `{cluster-type}` を使用して <<components-fleet>> クラスタマイグレーションを実行する方法。
+
+[#day2-migration-mgmt-prereq]
+=== 前提条件
+
+==== ベアメタル Operator CRDのアップグレード
+
+[NOTE]
+====
+<<components-metal3>> チャートのアップグレードが必要なCAPI/Metal3管理クラスタにのみ適用されます。
+====
+
+`Metal^3^` Helmチャートには、Helmのlink:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#method-1-let-helm-do-it-for-you[CRD]ディレクトリを活用することで、link:https://book.metal3.io/bmo/introduction.html[ベアメタル Operator (BMO)] CRDが含まれています。
+
+ただし、このアプローチには特定の制限があり、特にこのディレクトリ内のCRDをHelmを使用してアップグレードできないという点があります。詳細については、link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#some-caveats-and-explanations[Helmマニュアル]を参照してください。
+
+その結果、Metal^3^を`Edge {static-edge-version}`互換バージョンにアップグレードする前に、ユーザーは基盤となるBMO CRDを手動でアップグレードする必要があります。
+
+`Helm`がインストールされ、`kubectl`が`{cluster-type}`クラスタを指すように設定されているマシンで、以下を実行します。
+
+. BMO CRDを手動で適用します。
++
+[,bash,subs="attributes"]
+----
+helm show crds oci://registry.suse.com/edge/charts/metal3 --version {version-metal3-chart} | kubectl apply -f -
+----
+
+==== SUSE Storageマイグレーションの準備
+
+`Edge {static-edge-version}`にアップグレードする場合、以前のLonghornチャートから、 https://www.suse.com/products/rancher/application-collection/[SUSE Application Collection]で管理されているSUSE Storageチャートへマイグレーションする必要があります。
+
+[NOTE]
+====
+この手順は、Longhornチャートのアップグレードが必要な管理クラスタにのみ適用されます。
+
+管理クラスタが、必要な1.9.2 SUSE Storageバージョンを含む最新の3.4 z-streamに最初に更新されていることを確認する必要があります。
+====
+
+SUSE Storageチャートには個別のCRD Helmチャートは存在しなくなり、1つにパッケージ化されているため、 https://documentation.suse.com/cloudnative/storage/1.9/en/migration/migration.html[SUSE Storage Documentation]に記載されている追加のマイグレーション手順に従う必要があります。
+
+. まず、インストールされているLonghorn CRDの現在のバージョンを確認します。
++
+[,bash,subs="attributes"]
+----
+helm list --all-namespaces | grep longhorn-crd
+longhorn-crd                    longhorn-system 1               2026-01-16 02:17:16.7804359 +0000 UTC   deployed        longhorn-crd-107.1.1+up1.9.2          v1.9.2
+----
++
+
+. 次に、現在インストールされている特定のLonghornバージョンのrancher/chartsリポジトリをクローンします。
+これを行うには、まずこの https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/download-longhorn-crd-chart.sh[スクリプト]をダウンロードする必要があります。
++
+スクリプトは次のように実行します。
++
+[,bash,subs="attributes"]
+----
+./download-longhorn-crd-chart.sh 107.1.1+up1.9.2
+----
++
+これで、longhorn-crdチャートがローカルディレクトリ`./107.1.1+up1.9.2`にダウンロードされます。
+
+. ダウンロード後、`Chart.yaml`を開き、`appVersion`がv1.9.2であることを確認してください。
++
+[,bash,subs="attributes"]
+----
+cat 107.1.1+up1.9.2/Chart.yaml
+
+annotations:
+  catalog.cattle.io/certified: rancher
+  catalog.cattle.io/hidden: "true"
+  catalog.cattle.io/namespace: longhorn-system
+  catalog.cattle.io/release-name: longhorn-crd
+apiVersion: v1
+appVersion: v1.9.2
+description: Installs the CRDs for longhorn.
+name: longhorn-crd
+version: 107.1.1+up1.9.2
+----
++
+
+. 次に、クローンした`longhorn-crd`チャート内の`templates/crds.yaml`において、`helm.sh/resource-policy`アノテーションの値を`keep`にパッチする必要があります。これにより、リリースがアンインストールされたときにHelmがCRDを削除しないようになります。
++
+これを行うには、この https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/patch-resource-policy-annotation.sh[スクリプト] をダウンロードして、アノテーションに自動的にパッチを適用します。
++
+[,bash,subs="attributes"]
+----
+./patch-resource-policy-annotation.sh 107.1.1+up1.9.2/templates/crds.yaml
+
+Processing CRDs in '107.1.1+up1.9.2/templates/crds.yaml'...
+Creating backup: '/tmp/crds.yaml.original'
+Successfully processed the file
+Original file backed up to: '/tmp/crds.yaml.original'
+Modified file saved as: '107.1.1+up1.9.2/templates/crds.yaml'
+Found 22 CustomResourceDefinition(s)
+Added 22 helm.sh/resource-policy: keep annotation(s)
+Original file: 4575 lines, Modified file: 4597 lines
+----
++
+
+. CRDsが正しくパッチされたことを確認するには、元のテンプレートとパッチ適用後のテンプレートの差分を確認し、`keep` に対して `helm.sh/resource-policy` の値が設定されていることを確認します。
++
+[,bash,subs="attributes"]
+----
+vim -d /tmp/crds.yaml.original 107.1.1+up1.9.2/templates/crds.yaml
+----
++
+
+. 次に、ローカルでパッチを適用したチャートを使用して、longhorn-crd Helmリリースをアップグレードします。
++
+[,bash,subs="attributes"]
+----
+helm upgrade longhorn-crd -n longhorn-system ./107.1.1+up1.9.2
+----
++
+
+. 次に、システムからlonghorn-crd Helmリリースをアンインストールします。適用されたパッチにより、CRDは残ります。
++
+[,bash,subs="attributes"]
+----
+helm uninstall longhorn-crd --namespace longhorn-system
+
+These resources were kept due to the resource policy:
+[CustomResourceDefinition] backingimagedatasources.longhorn.io
+[CustomResourceDefinition] backingimagemanagers.longhorn.io
+[CustomResourceDefinition] nodes.longhorn.io
+[CustomResourceDefinition] orphans.longhorn.io
+[CustomResourceDefinition] recurringjobs.longhorn.io
+[CustomResourceDefinition] replicas.longhorn.io
+[CustomResourceDefinition] settings.longhorn.io
+[CustomResourceDefinition] sharemanagers.longhorn.io
+[CustomResourceDefinition] snapshots.longhorn.io
+[CustomResourceDefinition] supportbundles.longhorn.io
+[CustomResourceDefinition] systembackups.longhorn.io
+[CustomResourceDefinition] systemrestores.longhorn.io
+[CustomResourceDefinition] backingimages.longhorn.io
+[CustomResourceDefinition] volumeattachments.longhorn.io
+[CustomResourceDefinition] volumes.longhorn.io
+[CustomResourceDefinition] backupbackingimages.longhorn.io
+[CustomResourceDefinition] backups.longhorn.io
+[CustomResourceDefinition] backuptargets.longhorn.io
+[CustomResourceDefinition] backupvolumes.longhorn.io
+[CustomResourceDefinition] engineimages.longhorn.io
+[CustomResourceDefinition] engines.longhorn.io
+[CustomResourceDefinition] instancemanagers.longhorn.io
+
+release "longhorn-crd" uninstalled
+----
++
+
+. 以前と同じコマンド `longhorn-crd` を再実行して `helm list --all-namespaces | grep longhorn-crd` チャートがアンインストールされていることを確認し、`longhorn-crd` が存在しないことを確認します。
++
+これに続いて、SUSE Storage Helmチャートへのアップグレードに備えて、既存のLonghorn CRDの所有権ラベルを更新する必要があります。
++
+この https://documentation.suse.com/cloudnative/storage/1.9/en/_attachments/migrate-crd-ownership.sh[スクリプト]を適用して置換を実行します。
++
+[,bash,subs="attributes"]
+----
+./migrate-crd-ownership.sh
+
+# The output will look like the following for each CRD. The most important thing to note is that each operation says "Successfully updated CRD..." at the end:
+
+Processing CRD: volumes.longhorn.io
+Warning: resource customresourcedefinitions/volumes.longhorn.io is missing the kubectl.kubernetes.io/last-applied-configuration annotation which is required by kubectl apply. kubectl apply should only be used on resources created declaratively by either kubectl create --save-config or kubectl apply. The missing annotation will be patched automatically.
+customresourcedefinition.apiextensions.k8s.io/volumes.longhorn.io configured
+Successfully updated CRD: volumes.longhorn.io
+----
++
+
+[NOTE]
+====
+Rancher Application Collectionレジストリのログイン資格情報は、 https://apps.rancher.io/settings/access-tokens[設定のアクセストークンセクション] にあります。（サインインしている必要があります）
+
+さらに、Rancher Application Collectionに関する追加ドキュメントは https://docs.apps.rancher.io/[こちら] にあります。
+====
+
+. すべてのCRDの準備ができたら、Rancher Application Collectionにログインして、Helmチャートをプルできるようにします。
++
+[,bash,subs="attributes"]
+----
+helm registry login dp.apps.rancher.io -u ${APPS.RANCHER.IO_USERNAME} -p ${APPS.RANCHER.IO_ACCESS_TOKEN}
+----
++
+
+. 次に、コンテナイメージをプルできるように https://docs.apps.rancher.io/get-started/authentication#kubernetes[docker-registryシークレット] を作成します。
++
+[,bash,subs="attributes"]
+----
+kubectl create secret docker-registry rancher-app-collection \
+  --namespace longhorn-system \
+  --docker-server=dp.apps.rancher.io \
+  --docker-username="${APPS.RANCHER.IO_USERNAME}" \
+  --docker-password="${APPS.RANCHER.IO_ACCESS_TOKEN}"
+----
++
+
+. 最後に、LonghornのインストールをSUSE Storageにアップグレードします。
++
+[,bash,subs="attributes"]
+----
+helm upgrade longhorn oci://dp.apps.rancher.io/charts/suse-storage \
+    --namespace longhorn-system \
+    --version {version-longhorn-chart} \
+    --set privateRegistry.registrySecret=rancher-app-collection
+----
++
+必要に応じて、アップグレードコマンドに `values.yaml` を追加することで `-f values.yaml` ファイルを指定できます。
+
+==== Rancher Turtlesのアップグレードの準備
+
+[NOTE]
+====
+Rancher Turtlesチャートのアップグレードが必要なCAPI/Metal3管理クラスタにのみ適用されます。
+
+管理クラスタが、必要な0.24.3バージョンのRancher Turtlesを含む最新の3.4 z-streamに最初に更新されていることを確認する必要があります。
+====
+
+Rancher 2.13以降、Rancher Turtlesはデフォルトでインストールされるため、 https://documentation.suse.com/cloudnative/cluster-api/v0.25/en/tutorials/migration.html[Rancher Turtlesドキュメント] に記載されている追加の移行手順に従う必要があります。
+
+アップグレードの前に、インストールされているRancher TurtlesチャートおよびRancher Turtles-airgap-resources（インストールされている場合）を削除する必要があります。Edge Image Builder経由でインストールされた場合、これには対応する`HelmChart`リソースの削除が必要です。
+
+[,bash,subs="attributes"]
+----
+kubectl delete -n kube-system helmchart rancher-turtles
+kubectl delete -n kube-system helmchart rancher-turtles-airgap-resources
+----
+
+次に、 https://turtles.docs.rancher.com/turtles/next/en/tutorials/migration.html[Rancher Turtlesドキュメント] に記載されているように、CRDリソースにパッチを適用する必要があります。
+
+[,bash]
+----
+kubectl patch crd capiproviders.turtles-capi.cattle.io --type=json -p='[{"op": "add", "path": "/metadata/annotations/meta.helm.sh~1release-namespace", "value": "cattle-turtles-system"}]'
+kubectl patch crd clusterctlconfigs.turtles-capi.cattle.io --type=json -p='[{"op": "add", "path": "/metadata/annotations/meta.helm.sh~1release-namespace", "value": "cattle-turtles-system"}]'
+----
+
+次に、通常のステップに従って管理クラスタを`Edge {static-edge-version}`にアップグレードします。
+
+==== Rancher Turtlesのアップグレード後
+
+*After*以下のステップに従って`Edge {static-edge-version}`にアップグレードした後、新しい`rancher-turtles-providers` Helmチャートをインストールする必要があります。これにより、上記のアップグレード前のステップで削除されたリソースを置き換える新しい`CAPIProvider`リソースが作成されます。
+
+まず、 https://turtles.docs.rancher.com/turtles/next/en/tutorials/migration.html[Rancher Turtlesドキュメント]で説明されている移行スクリプトを実行する必要があります。
+
+```
+wget https://raw.githubusercontent.com/rancher/turtles/refs/heads/release/v0.25/scripts/migrate-providers-ownership.sh
+bash migrate-providers-ownership.sh --adopt metal3:capm3-system --adopt metal3ipam:metal3-ipam-system
+```
+
+次に、`rancher-turtles-providers`チャートをインストールできます。 このチャートのインストールは、アップグレードコントローラーによる将来の自動アップグレードを有効にするために、`HelmChart`リソースを介して行う必要があります。
+
+[,shell,subs="attributes,specialchars"]
+----
+helm pull oci://registry.suse.com/edge/charts/rancher-turtles-providers --version {version-rancher-turtles-providers-chart}
+
+cat > turtles-providers-helmchart.yaml <<EOF
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  annotations:
+    edge.suse.com/repository-url: oci://registry.suse.com/edge/charts/rancher-turtles-providers
+  name: rancher-turtles-providers
+  namespace: kube-system
+spec:
+  chartContent: $(base64 -w 0 rancher-turtles-providers-{version-rancher-turtles-providers-chart}.tgz)
+  failurePolicy: reinstall
+  createNamespace: true
+  targetNamespace: cattle-turtles-system
+  version: {version-rancher-turtles-providers-chart}
+EOF
+kubectl apply -f turtles-providers-helmchart.yaml
+----
+
+数分後、以下のような出力が確認できるはずです。
+
+[,shell]
+----
+kubectl get capiprovider -A
+NAMESPACE                   NAME                 TYPE             PROVIDERNAME    INSTALLEDVERSION   PHASE
+capm3-system                metal3               infrastructure   metal3          v1.10.4            Ready
+cattle-capi-system          cluster-api          core             cluster-api     v1.10.6            Ready
+fleet-addon-system          fleet                addon            rancher-fleet   v0.12.0            Ready
+metal3-ipam-system          metal3ipam           ipam             metal3ipam      v1.10.4            Ready
+rke2-bootstrap-system       rke2-bootstrap       bootstrap        rke2            v0.21.1            Ready
+rke2-control-plane-system   rke2-control-plane   controlPlane     rke2            v0.21.1            Ready
+----
+
+[#day2-migration-mgmt-upgrade-controller]
+=== Upgrade Controller
+
+[IMPORTANT]
+====
+`Upgrade Controller`は現在、*非エアギャップ(された)管理*クラスターに対するEdgeリリース移行のみをサポートしています。
+====
+
+このセクションでは、以下のトピックについて説明します。
+
+<<day2-migration-mgmt-upgrade-controller-prereq>> - `Upgrade Controller`に固有の前提条件。
+
+<<day2-migration-mgmt-upgrade-controller-migration>> - `{cluster-type}`を使用して`Upgrade Controller`クラスタを新しいEdgeバージョンに移行する手順。
+
+[#day2-migration-mgmt-upgrade-controller-prereq]
+==== 前提条件
+
+===== Edge {version-edge} Upgrade Controller
+
+`Upgrade Controller`を使用する前に、目的のEdgeリリースへの移行が可能なバージョンで実行されていることを確認する必要があります。
+
+これには次の操作を行います。
+
+. 以前のEdgeリリースから`Upgrade Controller`が既にデプロイされている場合は、そのチャートをアップグレードしてください。
++
+[,bash,subs="attributes"]
+----
+helm upgrade upgrade-controller -n upgrade-controller-system oci://registry.suse.com/edge/charts/upgrade-controller --version {version-upgrade-controller-chart}
+----
+
+. `Upgrade Controller`がデプロイされて*いない*場合は、<<components-upgrade-controller-installation>>に従ってください。
+
+[#day2-migration-mgmt-upgrade-controller-migration]
+==== 移行手順
+
+`Upgrade Controller`を使用した`{cluster-type}`クラスターの移行は、基本的にアップグレードの実行と似ています。
+
+唯一の違いは、`UpgradePlan`で`{static-edge-version}`リリースバージョンを*指定する必要がある*点です。
+
+[,yaml,subs="attributes"]
+----
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
+metadata:
+  name: upgrade-plan-mgmt
+  # Change to the namespace of your Upgrade Controller
+  namespace: CHANGE_ME
+spec:
+  releaseVersion: {static-edge-version}
+----
+
+上記の`UpgradePlan`を使用して移行を行う方法については、<<{cluster-type}-day2-upgrade-controller,Upgrade Controller アップグレード処理>>を参照してください。
+
+[#day2-migration-mgmt-fleet]
+=== Fleet
+
+[NOTE]
+====
+可能な限り、移行には<<day2-migration-mgmt-upgrade-controller>>を使用してください。
+
+`Upgrade Controller`でカバーされていないユースケースについてのみ、このセクションを参照してください。
+====
+
+`Fleet`を使用した`{cluster-type}`クラスターの移行は、基本的にアップグレードの実行と似ています。
+
+*主な*違いは以下の通りです。
+
+. Fleetは、`suse-edge/fleet-examples`リポジトリのlink:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}]リリースから*使用する必要があります*。
+
+. アップグレードが予定されているチャートは、`Edge {static-edge-version}`リリースと互換性のあるバージョンに*アップグレードする必要があります*。`Edge {static-edge-version}`コンポーネントのリストについては、<<release-notes-3-5-0>>を参照してください。
+
+[IMPORTANT]
+====
+`Edge {static-edge-version}`移行を確実に成功させるため、ユーザーは上記で概説した点に従うことが重要です。
+====
+
+上記の点を考慮し、移行を実行するために必要な手順の包括的なガイドについては、`{cluster-type}`クラスタ<<{cluster-type}-day2-fleet, Fleet>>のドキュメントに従ってください。
+
+[#day2-migration-downstream]
+== ダウンストリームクラスタ
+:cluster-type: downstream
+
+<<day2-migration-downstream-fleet>> - `{cluster-type}` を使用して <<components-fleet>> クラスタマイグレーションを実行する方法。
+
+[#day2-migration-downstream-fleet]
+=== Fleet
+
+`{cluster-type}`を使用した`Fleet`クラスタの移行は、基本的にアップグレードの実行と似ています。
+
+*主な*違いは以下の通りです。
+
+. Fleetは、`suse-edge/fleet-examples`リポジトリのlink:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}]リリースから*使用する必要があります*。
+
+. アップグレードが予定されているチャートは、`Edge {static-edge-version}`リリースと互換性のあるバージョンに*アップグレードする必要があります*。`Edge {static-edge-version}`コンポーネントのリストについては、<<release-notes-3-5-0>>を参照してください。
+
+[IMPORTANT]
+====
+`Edge {static-edge-version}`移行を確実に成功させるため、ユーザーは上記で概説した点に従うことが重要です。
+====
+
+上記の点を考慮し、移行を実行するために必要な手順の包括的なガイドについては、`{cluster-type}`クラスタ<<{cluster-type}-day2-fleet, Fleet>>のドキュメントに従ってください。
