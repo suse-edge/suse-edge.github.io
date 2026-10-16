@@ -1,0 +1,196 @@
+[#day2-migration]
+= 边缘 {version-edge} 迁移
+:revdate: 2026-05-06
+:revnumber: 3.7
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+:toc: preamble
+:previous-edge-version: 3.6
+:static-edge-version: 3.7.0
+:static-fleet-examples-tag: release-3.7.0
+
+本节介绍了如何将您的 `management` 和 `downstream` 集群从 `{product} {previous-edge-version}` 迁移到 `{product} {static-edge-version}`。
+
+[IMPORTANT]
+====
+请务必从 `latest Z-stream` 的 `{product} {previous-edge-version}` 版本执行集群迁移。
+
+请务必迁移到 `{product} {static-edge-version}` 版本。有关后续迁移后的升级，请参阅 <<day2-mgmt-cluster, 管理>>
+ifeval::["{flavor}" == "edge"]
+和 <<day2-downstream-clusters,下游>> 集群
+endif::[]
+中的各个部分。
+====
+
+下表列出了不同类型的集群以及升级集群的方法：
+
+[[Clusters-and-methods-to-upgrade-downstream-clusters]]
+.集群以及升级下游集群的方法
+|===
+| 集群类型  | 方法
+
+|EIB 配置的集群
+|有关详细信息，请参见<<day2-migration-mgmt-fleet>>。
+ifeval::["{flavor}" == "telco"]
+|Metal^3^ 配置的集群
+|有关详细信息，请参阅 <<atip-lifecycle-downstream,下游集群升级>>。
+endif::[]
+ifeval::["{flavor}" == "edge"]
+|Phone-home 配置的集群
+|有关 Kubernetes 版本升级，请参阅 https://ranchermanager.docs.rancher.com/{rancher-docs-version}/getting-started/installation-and-upgrade/upgrade-and-roll-back-kubernetes#upgrading-the-kubernetes-version[升级 Kubernetes 版本]；有关 SUC、操作系统和其他组件，请参阅 <<day2-downstream-clusters,下游集群>>。
+endif::[]
+|===
+
+[#day2-migration-mgmt]
+== 管理群集
+:cluster-type: 自动化
+
+本节包含下列主题：
+
+<<day2-migration-mgmt-prereq>> - 开始迁移前需要完成的先决条件步骤。
+
+<<day2-migration-mgmt-upgrade-controller>> - 如何使用 `{cluster-type}` 执行 <<components-upgrade-controller>> 集群迁移。
+
+<<day2-migration-mgmt-fleet>> - 如何使用 `{cluster-type}` 执行 <<components-fleet>> 集群迁移。
+
+[#day2-migration-mgmt-prereq]
+=== 先决条件
+
+ifeval::["{flavor}" == "telco"]
+==== 升级裸机操作员 CRD
+
+[NOTE]
+====
+仅适用于需要 <<components-metal3>> chart 升级的 CAPI/Metal3 管理集群。
+====
+
+`Metal^3^` Helm chart 通过利用 Helm 的 link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#method-1-let-helm-do-it-for-you[CRD] 目录包含 link:https://book.metal3.io/bmo/introduction.html[Bare Metal Operator (BMO)] CRD。
+
+然而，这种方法有一定的局限性，特别是无法使用 Helm 升级此目录中的 CRD。有关详细信息，请参见 link:https://helm.sh/docs/chart_best_practices/custom_resource_definitions/#some-caveats-and-explanations[Helm 文档]。
+
+因此，在将 Metal^3^ 升级到 `{product} {static-edge-version}` 兼容版本之前，用户必须手动升级底层的 BMO CRD。
+
+在安装了 `Helm` 且 `kubectl` 配置为指向您的 `{cluster-type}` 集群的机器上：
+
+. 手动应用 BMO CRD：
++
+[,bash,subs="attributes"]
+----
+helm show crds oci://registry.suse.com/edge/charts/metal3 --version {version-metal3-chart} | kubectl apply -f -
+----
+endif::[]
+
+[#day2-migration-mgmt-upgrade-controller]
+=== 升级控制器
+
+[IMPORTANT]
+====
+`Upgrade Controller` 目前仅支持 `{product}` 版本迁移，仅适用于 *非隔离的管理* 集群。
+====
+
+本节涵盖以下主题：
+
+<<day2-migration-mgmt-upgrade-controller-prereq>> - `Upgrade Controller` 的特定先决条件。
+
+<<day2-migration-mgmt-upgrade-controller-migration>> - 使用 `Upgrade Controller` 将 `{cluster-type}` 集群迁移到新 `{product}` 版本的步骤。
+
+[#day2-migration-mgmt-upgrade-controller-prereq]
+==== 先决条件
+
+===== {product} {version} 升级控制器
+
+在使用 `Upgrade Controller` 之前，您必须首先确保其运行的版本能够迁移到所需的 `{product}` 版本。
+
+要执行这一操作：
+
+. 如果您已经从之前的 `Upgrade Controller` 版本部署了 `{product}`，请升级其 chart：
++
+[,bash,subs="attributes"]
+----
+helm upgrade upgrade-controller -n upgrade-controller-system oci://registry.suse.com/edge/charts/upgrade-controller --version {version-upgrade-controller-chart}
+----
+
+. 如果您 *没有* 部署 `Upgrade Controller`，请遵循 <<components-upgrade-controller-installation>>。
+
+[#day2-migration-mgmt-upgrade-controller-migration]
+==== 迁移步骤
+
+使用 `{cluster-type}` 执行 `Upgrade Controller` 集群迁移与执行升级基本相似。
+
+唯一的区别是您的 `UpgradePlan` *必须* 指定 `{static-edge-version}` 发布版本：
+
+[,yaml,subs="attributes"]
+----
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
+metadata:
+  name: upgrade-plan-mgmt
+  # Change to the namespace of your Upgrade Controller
+  namespace: CHANGE_ME
+spec:
+  releaseVersion: {static-edge-version}
+----
+
+有关如何使用上述 `UpgradePlan` 进行迁移的信息，请参阅 <<{cluster-type}-day2-upgrade-controller, Upgrade Controller 升级流程>>。
+
+[#day2-migration-mgmt-fleet]
+=== Fleet
+
+[NOTE]
+====
+尽可能使用 <<day2-migration-mgmt-upgrade-controller>> 进行迁移。
+
+仅在 `Upgrade Controller` 未涵盖的用例中参考本节。
+====
+
+使用 `{cluster-type}` 执行 `Fleet` 集群迁移与执行升级基本相似。
+
+*关键*区别在于：
+
+. 必须使用 `suse-edge/fleet-examples` 储存库的 link:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}] 版本中的 *Fleet*。
+
+. 计划升级的 Chart *必须*升级到与 `{product} {static-edge-version}` 版本兼容的版本。有关 `{product} {static-edge-version}` 组件的列表，请参阅 <<release-notes-3-7-0>>。
+
+[IMPORTANT]
+====
+为确保 `{product} {static-edge-version}` 迁移成功，用户务必遵守上述要点。
+====
+
+ifeval::["{flavor}" == "edge"]
+考虑到上述几点，用户可以遵循 `{cluster-type}` 集群 <<{cluster-type}-day2-fleet, Fleet>> 文档，获取执行迁移所需步骤的综合指南。
+endif::[]
+
+[#day2-migration-downstream]
+== 下游集群
+:cluster-type: 下游
+
+<<day2-migration-downstream-fleet>> - 如何使用 `{cluster-type}` 执行 <<components-fleet>> 集群迁移。
+
+[#day2-migration-downstream-fleet]
+=== Fleet
+
+使用 `{cluster-type}` 执行 `Fleet` 集群迁移与执行升级基本相似。
+
+*关键*区别在于：
+
+. 必须使用 `suse-edge/fleet-examples` 储存库的 link:https://github.com/suse-edge/fleet-examples/releases/tag/{static-fleet-examples-tag}[{static-fleet-examples-tag}] 版本中的 *Fleet*。
+
+. 计划升级的 Chart *必须*升级到与 `{product} {static-edge-version}` 版本兼容的版本。有关 `{product} {static-edge-version}` 组件的列表，请参阅 <<release-notes-3-7-0>>。
+
+[IMPORTANT]
+====
+为确保 `{product} {static-edge-version}` 迁移成功，用户务必遵守上述要点。
+====
+
+ifeval::["{flavor}" == "edge"]
+考虑到上述几点，用户可以遵循 `{cluster-type}` 集群 <<{cluster-type}-day2-fleet, Fleet>> 文档，获取执行迁移所需步骤的综合指南。
+endif::[]

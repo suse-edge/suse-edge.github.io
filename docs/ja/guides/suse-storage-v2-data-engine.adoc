@@ -1,0 +1,242 @@
+[#guides-suse-storage-v2-data-engine]
+= SUSE Storage V2データエンジン
+:revdate: 2026-09-17
+:revnumber: 3.7
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+SUSE Storage {version-longhorn}には、一般提供機能としてLonghorn V2データエンジンが含まれています。
+{product} 3.7以降、クラスターがV2の前提条件を満たしている場合、新規にプロビジョニングされるボリュームにはV2データエンジンが推奨されます。
+
+[IMPORTANT]
+====
+SUSE Storage Helmチャートは、既存のV1ボリュームをV2に変換しません。
+データエンジンは変更不可能なボリュームプロパティです。
+既存のV1ボリュームは、データが新規プロビジョニングされたV2ボリュームに移行されるまで、引き続きV1を使用します。
+====
+
+== 前提条件
+
+V2データエンジンを有効にする前に、{link-longhorn-v2-requirements}[アップストリームのV2要件]を確認してください。
+特に、V2レプリカをホストできるすべてのノードには以下が必要です。
+
+* 専用のフォーマットされていないブロックデバイス。本番環境のワークロードにはNVMeデバイスが推奨されます。
+* `nvme-tcp`、`vfio_pci`、および`uio_pci_generic`カーネルモジュール。
+* V2インスタンスマネージャーに十分なCPUとメモリ。デフォルト設定では、インスタンスマネージャーごとに2 GiBのヒュージページを使用します。
+* サポートされているCPUとカーネル。AMD64 CPUにはSSE4.2が必要であり、カーネル6.7以降が推奨されます。
+
+Longhornでは、移行完了後にデータエンジンを1つだけ使用することを推奨しています。
+両方のエンジンを実行すると個別のインスタンスマネージャーが作成されるため、追加のCPUとメモリが消費されます。
+
+== 新規ボリューム用にV2を設定する
+
+アプリケーションボリュームをプロビジョニングする前に、必要なブロックデバイスを準備してください。
+SUSE Storage UIを使用するか、対応する`block`リソースを更新して、各デバイスをLonghornノード上の`nodes.longhorn.io`ディスクとして登録してください。
+
+V1ボリュームが存在しない新しいクラスターの場合は、以下のHelm値を使用してください。
+
+[,yaml]
+----
+defaultSettings:
+  v1DataEngine: false
+  v2DataEngine: true
+persistence:
+  dataEngine: v2
+----
+
+V1ボリュームを持つ既存のクラスターの場合は、移行中に両方のエンジンを有効のままにしてください。
+
+[,yaml]
+----
+defaultSettings:
+  v1DataEngine: true
+  v2DataEngine: true
+persistence:
+  dataEngine: v2
+----
+
+通常のHelmデプロイメントまたはアップグレードワークフローで値を適用してください。
+次に例を示します。
+
+[,shell,subs="attributes"]
+----
+helm upgrade --install longhorn oci://dp.apps.rancher.io/charts/suse-storage \
+  --version {version-longhorn-chart} \
+  --namespace longhorn-system \
+  --create-namespace \
+  --reuse-values \
+  --values suse-storage-v2-values.yaml
+----
+
+既存のインストール環境で、実行中のLonghorn設定が有効になっていることを確認してください。
+Helmアップグレード後も無効のままの場合は、明示的に有効にしてください。
+
+[,shell]
+----
+kubectl -n longhorn-system patch settings.longhorn.io v2-data-engine \
+  --type merge --patch '{"value":"true"}'
+----
+
+[CAUTION]
+====
+クラスター内にV1ボリュームが残っている間は、V1データエンジンを無効にしないでください。
+既存のリリースをアップグレードする際は、`--reuse-values`が`persistence.dataEngine`の古い値（`v1`）を保持していないことも確認してください。
+====
+
+既存のStorageClassをその場で変更するのではなく、専用のV2 StorageClassを作成してください。
+
+[,yaml]
+----
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-v2
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  dataEngine: "v2"
+  numberOfReplicas: "3"
+  staleReplicaTimeout: "2880"
+  fsType: "ext4"
+----
+
+`storageClassName`を指定しないPVCに対してV2をデフォルトにするには、デフォルトのアノテーションを新しいStorageClassに移動してください。
+
+[,shell]
+----
+kubectl annotate storageclass longhorn \
+  storageclass.kubernetes.io/is-default-class="false" --overwrite
+
+kubectl annotate storageclass longhorn-v2 \
+  storageclass.kubernetes.io/is-default-class="true" --overwrite
+----
+
+この変更は、新しくプロビジョニングされたボリュームにのみ影響します。
+既存のボリュームのデータエンジンは変更されません。
+
+設定、StorageClass、ディスク、およびボリュームを確認してください。
+
+[,shell]
+----
+kubectl -n longhorn-system get settings.longhorn.io \
+  v1-data-engine v2-data-engine
+
+kubectl get storageclass longhorn-v2 \
+  -o jsonpath='dataEngine={.parameters.dataEngine}{"\n"}'
+
+kubectl -n longhorn-system get nodes.longhorn.io
+
+kubectl -n longhorn-system get volumes.longhorn.io \
+  -o custom-columns='NAME:.metadata.name,ENGINE:.spec.dataEngine,STATE:.status.state,ROBUSTNESS:.status.robustness'
+----
+
+== V1ボリュームをV2に移行する
+
+SUSE Storage {version-longhorn}は、既存のボリュームをV1からV2へその場で変換することをサポートしていません。
+メンテナンスウィンドウを計画し、各ワークロードを新しいV2ボリュームに移行してください。
+
+. アプリケーションとそのV1ボリュームをバックアップしてください。
+. ソースPVCに書き込むすべてのワークロードを停止またはスケールダウンしてください。
+. `longhorn-v2` StorageClassを使用し、ソースPVCと同等以上の容量を持つ宛先PVCを同じネームスペースに作成してください。
+. アプリケーションでサポートされている方法を使用してデータをコピーしてください。
+. ワークロードが宛先PVCを使用するように変更する前に、コピーされたデータを検証してください。
+. ワークロードがV2 PVCを参照するように、更新または再作成してください。
+. アプリケーションがV2で検証されるまでV1ボリュームを保持し、その後、保持ポリシーに従って削除してください。
+
+データベースや、整合性を意識した移行を必要とする他のアプリケーションによって管理されていないファイルシステムボリュームの場合、単一のメンテナンスポッドでV1ソースを読み取り専用、V2宛先を読み取り/書き込みでマウントできます：
+
+[,yaml]
+----
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: copy-v1-to-v2
+  namespace: <application-namespace>
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: copy
+          image: registry.suse.com/bci/bci-micro:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              cp -a /source/. /destination/
+              sync
+          volumeMounts:
+            - name: source
+              mountPath: /source
+              readOnly: true
+            - name: destination
+              mountPath: /destination
+      volumes:
+        - name: source
+          persistentVolumeClaim:
+            claimName: <v1-pvc-name>
+        - name: destination
+          persistentVolumeClaim:
+            claimName: <v2-pvc-name>
+----
+
+[WARNING]
+====
+コピー・ジョブは、一般的なファイルシステムの例にすぎません。
+データベース、RAWブロックボリューム、および独自の整合性要件を持つアプリケーションには、アプリケーションネイティブのバックアップと復元、またはレプリケーションを使用してください。
+ソースPVCを削除する前に、所有権、権限、拡張属性、およびアプリケーションデータを確認してください。
+====
+
+すべてのワークロードが移行された後、V1ボリュームが残っていないことを確認してください。
+
+[,shell]
+----
+kubectl -n longhorn-system get volumes.longhorn.io \
+  -o custom-columns='NAME:.metadata.name,ENGINE:.spec.dataEngine,STATE:.status.state'
+----
+
+その後、Helm値でV1 Data Engineを無効にし、リリースをアップグレードできます：
+
+[,yaml]
+----
+defaultSettings:
+  v1DataEngine: false
+  v2DataEngine: true
+persistence:
+  dataEngine: v2
+----
+
+Helmアップグレード後も実行設定が有効なままの場合は、明示的に無効にしてください。
+
+[,shell]
+----
+kubectl -n longhorn-system patch settings.longhorn.io v1-data-engine \
+  --type merge --patch '{"value":"false"}'
+----
+
+V1固有のノードストレージを削除する前に、ボリュームインベントリコマンドを再度実行し、V1ボリュームが見落とされていないことを確認してください。
+
+== 使用上の制限
+
+ワークロードをV2に移行する前に、{link-longhorn-v1-v2-parity}[V1とV2の機能比較]を確認してください。
+以下の制限は、SUSE Storage {version-longhorn}に特に関連しています:
+
+* V1ボリュームをその場でV2に変換することはできません。
+* V2バッキングイメージはサポートされていません。KubeVirtイメージのインポートワークフローにはCDIを使用してください。
+* Strict-localボリューム、オフラインの高速レプリカ再構築、リビジョンカウンター、および孤立したインスタンスの管理は、V2データエンジンではサポートされていません。
+* V2エンジンのライブアップグレードはサポートされていないため、SUSE Storage 1.12のパッチ間でアップグレードを行う前に、V2ボリュームをデタッチする必要があります。
+* シャーディングされたV2データエンジンは実験的なものであり、レプリケートされたV2ボリュームと機能の同等性はありません。バックアップ、ディザスタリカバリ、クローン作成、ライブマイグレーションなど、サポートされていない機能を必要とする本番ワークロードには使用しないでください。
+* ARM64では、NVMeブロックデバイスをバックエンドとするV2ボリュームにはアップストリームの制限があります。デプロイメントの前に、{link-longhorn-important-notes}[Longhornの重要な注意事項]を確認してください。

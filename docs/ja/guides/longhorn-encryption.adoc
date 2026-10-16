@@ -1,0 +1,487 @@
+[#guides-longhorn-encryption]
+= Longhorn Volume 暗号化
+:revdate: 2026-07-03
+:revnumber: 3.7
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Longhornは、レプリケーションと高可用性機能を備えた永続ストレージを提供する、Kubernetes向けの分散ブロックストレージシステムです。本ガイドでは、保存データの保護を確実にするために、LUKS/AES-256暗号化を使用してLonghornを構成する方法を説明します。
+
+== 概要
+
+データセキュリティは、現代のクラウドネイティブアプリケーション、特に機密情報を扱う環境において重要な要件です。ボリューム暗号化は、物理的なセキュリティが侵害されたシナリオであっても、物理メディアに保存されたデータを不正アクセスから保護する基本的なセキュリティ層を提供します。
+
+Longhornは、業界標準の暗号化技術を使用してボリュームレベルの暗号化を実装しています。
+
+* **LUKS (Linux Unified Key Setup)**:プラットフォームに依存しない標準のオンディスクフォーマットを提供する、ブロックデバイス暗号化の仕様です。
+* **AES-256**:256ビットキーによる高度暗号化標準（AES）であり、堅牢な暗号化保護を提供します
+
+== ボリューム暗号化を実装する理由
+
+ボリューム暗号化は、いくつかのセキュリティおよびコンプライアンス要件に対応します。
+
+* **保存データの保護**:物理ストレージメディア上の暗号化されたデータは、ディスクが物理的に取り外されたり盗難に遭ったりした場合でも、不正アクセスから保護されます。
+* **業界規制に対するコンプライアンス**:GDPR、HIPAA、PCI-DSSなどの業界規制では機密データの暗号化が義務付けられており、コンプライアンスを実現するためにボリューム暗号化が不可欠です。
+* **多層防御**:暗号化は、KubernetesのRBACやネットワークポリシーを補完する追加のセキュリティ層を提供します。
+* **安全なデータ廃棄**:暗号化されたボリュームは、暗号化キーを破棄するだけで安全に廃棄でき、データに永続的にアクセスできないようにすることができます。
+
+[NOTE]
+====
+暗号化は、ボリュームレベルで透過的に適用されます。アプリケーションは、コードを変更することなく、標準のKubernetes永続ボリューム要求を通じて暗号化されたボリュームとやり取りします。
+====
+
+== アーキテクチャの概要
+
+Longhorn暗号化は、Kubernetes Container Storage Interface (CSI) と統合され、透過的なボリューム暗号化を提供します。暗号化プロセスはボリュームのプロビジョニング中に行われ、以下のコンポーネントを通じて管理されます。
+
+* **Kubernetes Secrets**:暗号化キーは、Kubernetes Secret リソースとして安全に保存されます。
+* **StorageClass パラメーター**:暗号化構成は、CSI固有のパラメーターを通じて指定されます。
+* **LUKSデバイスマッパー**:各暗号化ボリュームは、LUKSで暗号化されたデバイスマッパー・ターゲットを基盤として利用して構成されています。
+* **CSIドライバー**:Longhorn CSIドライバーは、暗号化キーの取得とボリュームのステージングを管理します。
+
+暗号化ワークフローは次のように動作します。
+
+. PersistentVolumeClaim (PVC) が暗号化された StorageClass からストレージを要求すると、Longhorn CSIドライバーは指定されたSecretから暗号化キーを取得します。
+. 暗号化キーを使用して、LUKSで暗号化されたデバイスマッパー・ターゲットが作成されます。
+. ボリュームに書き込まれるすべてのデータは、基盤となるストレージにコミットされる前に暗号化されます。
+. ボリュームがマウントされると、CSIドライバーは保存されている暗号化キーを使用してLUKSデバイスをロック解除し、ボリュームをステージングします。
+
+== 前提条件
+
+Longhornボリューム暗号化を実装する前に、以下の前提条件が満たされていることを確認してください。
+
+* SUSE Storage {version-longhorn} がインストールされた機能的なKubernetesクラスター
+* で説明されているように有効化および準備されたV2データエンジン<<guides-suse-storage-v2-data-engine>>
+* 適切なRBAC権限を持つクラスター管理アクセス権限
+* `kubectl` クラスターアクセス用に構成されたコマンドラインツール
+* `openssl` 暗号化キー生成用ユーティリティ
+
+== 実装
+
+. **暗号化キーを生成する**
++
+暗号化キーの生成は、暗号学的に安全な乱数生成を使用して実行する必要があります。次のコマンドを実行して、`base64`形式でエンコードされた256ビットの暗号化キーを生成します。
++
+[source,bash]
+----
+openssl rand -base64 32
+----
++
+出力例：
++
+[source,text]
+----
+Kq8Xh2vN9pL3mZ1wR4tY6uI0oP5aS7dF8gH9jK1lM2n=
+----
++
+[WARNING]
+====
+**キー管理の重要な要件**
+
+* **暗号化キーをバージョン管理システムにコミットしないでください**
+* 暗号化キーを紛失すると、**永続的かつ不可逆的なデータ損失**が発生します。
+====
+
+. **暗号化キーのシークレットを作成する**
++
+生成された暗号化キーは、`longhorn-system`ネームスペースのKubernetesシークレットとして保存する必要があります。
++
+[source,bash]
+----
+CRYPTO_KEY_VALUE="Kq8Xh2vN9pL3mZ1wR4tY6uI0oP5aS7dF8gH9jK1lM2n="
+
+kubectl create secret generic longhorn-crypto \
+  --from-literal=CRYPTO_KEY_VALUE="${CRYPTO_KEY_VALUE}" \
+  -n longhorn-system
+----
++
+シークレットが正常に作成されたことを確認します。
++
+[source,bash]
+----
+kubectl get secret longhorn-crypto -n longhorn-system
+----
++
+[TIP]
+====
+本番環境では、機密データをクラスターのetcdに直接保存することを避けるため、External Secrets Operatorやsealed-secretsなど、Kubernetesと統合された外部シークレット管理ソリューションの使用を検討してください。
+====
+
+. **暗号化されたStorageClassを構成する**
++
+.. Longhorn CSIドライバーの暗号化パラメーターを指定する`StorageClass`を定義します。
++
+[source,yaml]
+----
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-encrypted
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+parameters:
+  dataEngine: "v2"
+  numberOfReplicas: "3"
+  staleReplicaTimeout: "2880"
+  fromBackup: ""
+  fsType: "ext4"
+  dataLocality: "disabled"
+  # Encryption configuration
+  encrypted: "true"
+  csi.storage.k8s.io/provisioner-secret-name: "longhorn-crypto"
+  csi.storage.k8s.io/provisioner-secret-namespace: "longhorn-system"
+  csi.storage.k8s.io/node-publish-secret-name: "longhorn-crypto"
+  csi.storage.k8s.io/node-publish-secret-namespace: "longhorn-system"
+  csi.storage.k8s.io/node-stage-secret-name: "longhorn-crypto"
+  csi.storage.k8s.io/node-stage-secret-namespace: "longhorn-system"
+----
++
+暗号化固有のパラメーターは、CSIシークレット参照を構成します。
++
+* `encrypted: "true"` - このStorageClassからプロビジョニングされるすべてのボリュームに対してLUKS暗号化を有効にします
+* `csi.storage.k8s.io/provisioner-secret-name` - ボリュームのプロビジョニング中に使用される暗号化キーを含むシークレットを指定します
+* `csi.storage.k8s.io/node-publish-secret-name` - ポッドにボリュームをマウントする際に使用されるシークレットを識別します
+* `csi.storage.k8s.io/node-stage-secret-name` - ボリュームのステージング操作中に使用されるシークレットを参照します。
++
+.. StorageClass定義を適用します。
++
+[source,bash]
+----
+kubectl apply -f longhorn-encrypted-storageclass.yaml
+----
++
+.. StorageClassの作成と構成を検証します。
++
+[source,bash]
+----
+kubectl get storageclass longhorn-encrypted
+kubectl get storageclass longhorn-encrypted -o yaml
+----
+
+. **テストワークロードのデプロイ**
++
+暗号化の実装を検証するために、暗号化されたボリュームにデータを書き込むテストPodをデプロイします。
++
+.. 次のマニフェスト（`test-encryption.yaml`）を作成します。
++
+[source,yaml]
+----
+# Test Longhorn Encryption
+# Deploys a simple pod that writes data to an encrypted volume
+
+---
+# PVC using the encrypted StorageClass
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-encrypted-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn-encrypted
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# Pod that writes sensitive data to the volume
+apiVersion: v1
+kind: Pod
+metadata:
+  name: encryption-test-pod
+  namespace: default
+  labels:
+    app: encryption-test
+spec:
+  containers:
+  - name: writer
+    image: busybox
+    command:
+      - sh
+      - -c
+      - |
+        echo "=== Writing sensitive data to encrypted volume ==="
+        echo "SECRET DATA: Credit Card 4111-1111-1111-1111" > /data/secret.txt
+        echo "SECRET DATA: Password MySuperSecret123!" >> /data/secret.txt
+        echo "SECRET DATA: API Key sk-1234567890abcdef" >> /data/secret.txt
+        date >> /data/secret.txt
+        echo "=== Data written successfully ==="
+        echo "Content of /data/secret.txt:"
+        cat /data/secret.txt
+        echo "=== Sleeping forever (use 'kubectl exec' to verify) ==="
+        sleep infinity
+    volumeMounts:
+    - name: encrypted-storage
+      mountPath: /data
+  volumes:
+  - name: encrypted-storage
+    persistentVolumeClaim:
+      claimName: test-encrypted-pvc
+----
++
+このマニフェストは以下を定義します。
++
+* `PersistentVolumeClaim`が`longhorn-encrypted` StorageClassから1Giのストレージを要求する
+* 暗号化されたボリュームにテストデータを書き込み、検証のために実行状態を維持するPod
++
+.. テストワークロードをデプロイします。
++
+[source,bash]
+----
+kubectl apply -f test-encryption.yaml
+----
++
+.. Podの起動を監視します。
++
+[source,bash]
+----
+kubectl get pod encryption-test-pod -w
+----
+
+. **ボリューム機能の検証**
++
+Podが`Running`状態になったら、データ操作が正常に完了することを確認します。
++
+.. Podのログを表示します。
++
+[source,bash]
+----
+kubectl logs encryption-test-pod
+----
+
+.. Pod内でシェルを実行します。
++
+[source,bash]
+----
+kubectl exec -it encryption-test-pod -- sh
+----
+
+.. Pod内でコンテンツを確認します。
++
+[source,bash]
+----
+cat /data/secret.txt
+ls -lh /data/
+----
++
+予想される出力:
++
+[source,text]
+----
+SECRET DATA: Credit Card 4111-1111-1111-1111
+SECRET DATA: Password MySuperSecret123!
+SECRET DATA: API Key sk-1234567890abcdef
+Thu Jul 03 10:30:45 UTC 2026
+----
++
+[NOTE]
+====
+データ操作が成功すれば、ボリュームのプロビジョニングとマウント機能が確認されたことになります。ただし、この検証だけでは暗号化は検証されません。次の手順で暗号化の検証を行います。
+====
+
+. **暗号化の検証**
++
+暗号化が有効であることを確実に検証するには、基盤となるストレージデバイスを直接検査する必要があります。
++
+.. **ボリュームの場所を特定する**
++
+ボリュームレプリカをホストしているノードを特定します：
++
+[source,bash]
+----
+# Get the PVC details
+kubectl get pvc test-encrypted-pvc
+
+# Get the associated PersistentVolume
+kubectl get pv | grep test-encrypted
+
+# View Longhorn volume details
+kubectl get volumes -n longhorn-system | grep test-encrypted
+----
+
+.. **ノードにアクセスしてボリュームファイルを特定する**
++
+（前の出力から特定された）ボリュームをホストしているノードにSSHで接続します：
++
+[source,bash]
+----
+# Connect to the node
+ssh root@<node-ip>
+
+# Locate the volume image file
+find /var/lib/longhorn -name "*.img*" -type f | grep -i test
+----
++
+一般的なボリュームパス：
++
+[source,text]
+----
+/var/lib/longhorn/replicas/pvc-abc12345-r-6789/volume-head-001.img
+----
+
+.. **プレーンテキストデータの抽出を試みる**
++
+次のコマンドを実行して、暗号化されていないデータを検索します：
++
+[source,bash]
+----
+# Attempt to find plaintext strings in the volume file
+strings /var/lib/longhorn/replicas/pvc-*/volume-head-*.img | grep -i "credit card"
+----
++
+**検証結果:**
++
+* **暗号化が有効**:プレーンテキストの文字列は見つかりませんでした（データは暗号化されています）
+* **暗号化が無効**:プレーンテキストの文字列が検出されました（データは暗号化されていません）
+
+.. **16進数検査**
++
+ボリュームの生のバイトコンテンツを調べます：
++
+[source,bash]
+----
+# Navigate to the replica directory
+cd /var/lib/longhorn/replicas/pvc-XXXXX-r-YYYY/
+
+# Display raw volume content
+hexdump -C volume-head-*.img | head -100
+----
++
+**暗号化されたボリュームの出力（ランダムなバイト）：**
++
+[source,text]
+----
+00000000  a3 7f 2c d9 8b 4e f1 2a  9c 5d 8e 6b 4f 1d 3c 7a  |..,..N.*.[.kO.<z|
+00000010  d2 9f 4a 8c 3b e7 6d 1e  5f 0c b8 a4 7d 2f 9e 6c  |..J.;.m._...}/.l|
+----
++
+**暗号化されていないボリュームの出力（読み取り可能なASCII）：**
++
+[source,text]
+----
+00000000  53 45 43 52 45 54 20 44  41 54 41 3a 20 43 72 65  |SECRET DATA: Cre|
+00000010  64 69 74 20 43 61 72 64  20 34 31 31 31 2d 31 31  |dit Card 4111-11|
+----
+
+. **LUKSデバイスの検証**
++
+Longhornは、LinuxのLUKSサブシステムを使用して暗号化を実装しています。LUKSデバイスマッパーのターゲットを検証します：
++
+[source,bash]
+----
+# List block devices with encryption type
+lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT | grep -i crypt
+
+# List device mapper crypt targets
+dmsetup ls --target crypt
+----
++
+`crypto_LUKS` ファイルシステムタイプまたはデバイスマッパー暗号化ターゲットの存在は、LUKS暗号化が有効であることを示しています。
+
+. **データ永続性の検証**
++
+暗号化されたボリュームがポッドのライフサイクルイベント全体でデータの整合性を維持していることを確認します：
++
+[source,bash]
+----
+# Delete the pod (volume persists)
+kubectl delete pod encryption-test-pod
+
+# Recreate the pod
+kubectl apply -f test-encryption.yaml
+
+# Wait for Running state
+kubectl get pod encryption-test-pod -w
+
+# Verify data persistence
+kubectl exec -it encryption-test-pod -- cat /data/secret.txt
+----
++
+データはそのまま保持され、適切なボリュームの永続性が実証される必要があります。
+
+== 暗号化検証の概要
+
+次の表は、暗号化検証の指標をまとめたものです：
+
+|===
+|検証方法 | 暗号化される | 暗号化しない
+
+|`strings` 出力
+|プレーンテキストは見つかりませんでした
+|プレーンテキスト文字列が表示されています
+
+|`hexdump` 出力
+|ランダムなバイナリデータ
+|読み取り可能なASCIIテキスト
+
+|`lsblk` 出力
+|`crypto_LUKS` タイプが存在します
+|`crypto_LUKS` タイプはありません
+
+|`dmsetup ls --target crypt`
+|暗号化デバイスを一覧表示します
+|暗号化デバイスは一覧表示されません
+|===
+
+== テスト環境のクリーンアップ
+
+テストリソースを削除します：
+
+[source,bash]
+----
+# Delete the test pod
+kubectl delete -f test-encryption.yaml
+
+# Delete the PVC and volume
+kubectl delete pvc test-encrypted-pvc
+----
+
+== CAPI統合
+
+Metal^3^ を使用してCluster API (CAPI) でクラスターをデプロイする場合、暗号化構成をクラスタープロビジョニングマニフェストに埋め込むことができ、初期クラスター起動から暗号化されたストレージを有効にできます。
+
+完全なリファレンス実装は、 https://github.com/suse-edge/telco-cloud-examples/tree/main/telco-examples/downstream-clusters/longhorn/longhorn-with-encryption[SUSE Edge telco-cloud-examples リポジトリ]で入手できます。
+
+このリファレンス実装には以下が含まれます。
+
+* マルチノードコントロールプレーンデプロイメント用の**BareMetalHost**定義
+* Longhorn暗号化設定が統合された**CAPIクラスターマニフェスト**
+* クラスター初期化中の**自動シークレットプロビジョニング**
+* デフォルトとして設定された**事前構成済みの暗号化StorageClass**
+* VIP管理用の**MetalLB**設定
+* コントロールプレーンエンドポイント同期用の**Endpoint Copier Operator**
+
+CAPIベースのデプロイメントでは、暗号化キーは通常、クラスタープロビジョニング変数を通じて提供されます：
+
+[source,yaml]
+----
+# Example variable reference from CAPI manifest
+# Full manifests available in the repository
+CRYPTO_KEY_VALUE: "YOUR_GENERATED_KEY_HERE"
+----
+
+この変数は、クラスターのプロビジョニング中に使用され、ダウンストリームクラスターの`longhorn-system`ネームスペースに`longhorn-crypto`シークレットを自動的に作成します。
+
+[CAUTION]
+====
+**CAPI暗号化デプロイメントに関する考慮事項：**
+
+* クラスターのプロビジョニング前に`openssl rand -base64 32`を使用して暗号化キーを生成してください。
+* マニフェスト内のプレースホルダ値を実際の暗号化キーに置き換えてください。
+* **実際の暗号化キーを含むマニフェストは、決してバージョン管理にコミットしないでください。**
+* シークレット管理ソリューションを使用してGitOpsワークフローを実装してください。
+* 災害復旧のために、暗号化キーをエンタープライズシークレット管理システムで維持してください。
+* キーが漏洩した場合の被害範囲を制限するため、クラスターごとに一意の暗号化キーを使用してください。
+====
+
+
