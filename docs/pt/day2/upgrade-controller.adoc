@@ -1,0 +1,172 @@
+[#{cluster-type}-day2-upgrade-controller]
+== Upgrade Controller
+:revdate: 2025-01-16
+:revnumber: 3.7
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+[IMPORTANT]
+====
+O `Upgrade Controller` atualmente suporta apenas operações `Day 2` para clusters *não air-gapped*.
+====
+
+Esta seção aborda como realizar as várias operações `Day 2` relacionadas a fazer upgrade do seu cluster `management` de uma versão de plataforma `{product}` para outra.
+
+As operações `Day 2` são automatizadas pelo <<components-upgrade-controller, Upgrade Controller>> e incluem:
+
+* Fazer upgrade do SO <<components-slmicro, SUSE Linux Micro>>
+ifeval::["{flavor}" == "edge"]
+* <<components-rke2>>Fazer upgrade do Kubernetes ou <<components-k3s>>
+endif::[]
+ifeval::["{flavor}" == "telco"]
+* <<components-rke2>>Fazer upgrade do Kubernetes
+endif::[]
+* Fazer upgrade de componentes adicionais do SUSE (SUSE Rancher Prime, SUSE Security, etc.)
+
+=== Pré-requisitos
+
+Antes de fazer upgrade do seu cluster `management`, os seguintes pré-requisitos devem ser atendidos:
+
+. `SCC registered nodes` - certifique-se de que o SO dos nós do seu cluster esteja registrado com uma chave de assinatura que suporte a versão do SO especificada na `{product}` <<release-notes,release>> para a qual você pretende fazer upgrade.
+
+. `Upgrade Controller` - certifique-se de que o `Upgrade Controller` tenha sido implantado em seu cluster `management`. Para as etapas de instalação, consulte <<components-upgrade-controller-installation>>.
+
+=== Upgrade
+
+. Determine a versão de `{product}` <<release-notes,release>> para a qual você deseja fazer upgrade do seu cluster `management`.
+
+. No cluster `management`, implante um `UpgradePlan` que especifique o `release version` desejado. O `UpgradePlan` deve ser implantado no namespace do `Upgrade Controller`.
++
+[,bash]
+----
+kubectl apply -n <upgrade_controller_namespace> -f - <<EOF
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
+metadata:
+  name: upgrade-plan-mgmt
+  namespace: upgrade-controller-system  # replaces it if the upgrade controller has been deployed in a different namespace
+spec:
+  # Version retrieved from release notes
+  releaseVersion: 3.X.Y
+EOF
+----
++
+[NOTE]
+====
+Podem existir casos de uso em que você deseje fazer configurações adicionais sobre o `UpgradePlan`. Para todas as configurações possíveis, consulte <<components-upgrade-controller-extensions-upgrade-plan>>.
+====
+
+. A implantação do `UpgradePlan` no namespace do `Upgrade Controller's` iniciará o `upgrade process`.
++
+[NOTE]
+====
+Para obter mais informações sobre o `upgrade process` real, consulte <<components-upgrade-controller-how>>.
+
+Para obter informações sobre como rastrear o `upgrade process`, consulte <<components-upgrade-controller-how-track>>.
+====
+
+=== Tarefas pós-upgrade
+`{product}` fazer upgrade do `{previous-edge-version}` z-stream mais recente para `{static-edge-version}` exige que etapas manuais finais sejam realizadas após o `Upgrade Controller` ter concluído o processo de fazer upgrade, relacionadas a algumas alterações de parâmetros do Helm no gráfico Helm `rke2-traefik` incluído na versão `{product}` `{static-edge-version}`.
+
+* aplique as seguintes alterações no objeto de API `helmchartconfigs.helm.cattle.io/rke2-traefik` no namespace `kube-system` (ou, caso esse objeto de API não exista, aplique-as no objeto de API `helmcharts.helm.cattle.io/rke2-traefik`):
+[NOTE]
+====
+Use os manifestos `HelmChartConfig` (ou `HelmChart`) para aplicar essas alterações conforme mostrado abaixo, para garantir que o `Upgrade Controller` as manterá em futuras atualizações do cluster de gerenciamento.
+====
+
+[,shell]
+----
+# You can use `kubectl edit', `kubectl patch` or `kubectl apply` commands to apply the changes indicated below
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-traefik
+  namespace: kube-system
+spec:
+  failurePolicy: reinstall
+  valuesContent: |-
+    ingressClass:
+      isDefaultClass: true
+    ports:
+      web:
+        hostPort: null
+        exposedPort: 80
+      websecure:
+        hostPort: null
+        exposedPort: 443
+    service:
+      enabled: true
+      # type: LoadBalancer              # CHANGE_1: This Helm parameter has been REMOVED
+      # ipFamilyPolicy: PreferDualStack # CHANGE_2: This Helm parameter has been REMOVED
+      spec:
+        type: LoadBalancer              # CHANGE_3: NEW Helm parameter replacing the old/removed one (above)
+        ipFamilyPolicy: PreferDualStack # CHANGE_4: NEW Helm parameter replacing the old/removed one (above)
+        externalTrafficPolicy: Local
+        allocateLoadBalancerNodePorts: false
+    providers:
+      kubernetesIngressNGINX:           # CHANGE_5: NEW Helm parameter replacing the old/removed "KubernetesIngressNginx"
+        enabled: true
+        ingressClass: "rke2-ingress-nginx-migration"
+        controllerClass: "rke2.​cattle.​io/ingress-nginx-migration"
+EOF
+----
+
+Ou, caso o objeto de API `helmchartconfigs.helm.cattle.io/rke2-traefik` no namespace `kube-system` não exista:
+
+[,shell]
+----
+# You can use `kubectl edit', `kubectl patch` or `kubectl apply` commands to apply the changes indicated below
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: rke2-traefik
+  namespace: kube-system
+spec:
+  chart: rke2-traefik
+  version: {rke2-traefik Helm chart version}
+  repo: https://rke2-charts.rancher.io
+  bootstrap: false
+  failurePolicy: reinstall
+  backOffLimit: 20
+  targetNamespace: kube-system
+  set:
+    global.cattle.systemDefaultRegistry: registry.rancher.com
+    global.rke2DataDir: /var/lib/rancher/rke2
+    global.systemDefaultRegistry: registry.rancher.com
+  valuesContent: |-
+    ingressClass:
+      isDefaultClass: true
+    ports:
+      web:
+        hostPort: null
+        exposedPort: 80
+      websecure:
+        hostPort: null
+        exposedPort: 443
+    service:
+      enabled: true
+      # type: LoadBalancer              # CHANGE_1: This Helm parameter has been REMOVED
+      # ipFamilyPolicy: PreferDualStack # CHANGE_2: This Helm parameter has been REMOVED
+      spec:
+        type: LoadBalancer              # CHANGE_3: NEW Helm parameter replacing the old/removed one (above)
+        ipFamilyPolicy: PreferDualStack # CHANGE_4: NEW Helm parameter replacing the old/removed one (above)
+        externalTrafficPolicy: Local
+        allocateLoadBalancerNodePorts: false
+    providers:
+      kubernetesIngressNGINX:           # CHANGE_5: NEW Helm parameter replacing the old/removed "KubernetesIngressNginx"
+        enabled: true
+        ingressClass: "rke2-ingress-nginx-migration"
+        controllerClass: "rke2.​cattle.​io/ingress-nginx-migration"
+EOF
+----
+
+O `{rke2-traefik Helm chart version}` mostrado acima é aquele fornecido pela versão do RKE2/k3s usada na versão `{product}` `{static-edge-version}` para a qual atualizar (você pode obtê-lo na https://github.com/rancher/rke2/releases/[página de lançamento do RKE2] / https://github.com/k3s-io/k3s/releases/[página de lançamento do k3s] correspondente).

@@ -1,0 +1,361 @@
+[#atip-lifecycle]
+= Acciones del ciclo de vida
+:revdate: 2025-10-17
+:revnumber: 3.7
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Esta sección cubre las acciones de gestión del ciclo de vida para clústeres desplegados a través de SUSE Telco Cloud.
+
+[#load-balancer-exclusion]
+== Exclusión del equilibrador de carga
+Existen muchas acciones del ciclo de vida que requieren que los nodos sean vaciados. Durante el proceso de vaciado, todos los pods se moverán a otros nodos del clúster. Una vez finalizado el proceso de vaciado, el nodo no aloja ningún servicio y, por tanto, no debería recibir tráfico dirigido a él. Los equilibradores de carga, como MetalLB, pueden ser informados de esto aplicando una etiqueta al nodo:
+
+
+[,yaml]
+----
+node.kubernetes.io/exclude-from-external-load-balancers: "true"
+----
+Para obtener más detalles, consulte: https://kubernetes.io/docs/reference/labels-annotations-taints/#node-kubernetes-io-exclude-from-external-load-balancers[Documentación de Kubernetes].
+
+Para ver las etiquetas en todos vuestros nodos de un clúster, podéis ejecutar:
+[,shell]
+----
+kubectl get nodes -o json | jq -r '.items[].metadata | .name, .labels'
+----
+
+En el caso de actualizaciones de clústeres descendentes, esto se puede automatizar añadiendo una anotación al RKE2ControlPlane en el clúster de gestión:
+
+[,yaml]
+----
+rke2.controlplane.cluster.x-k8s.io/load-balancer-exclusion="true"
+----
+
+Esto crea inmediatamente una anotación en todos los objetos de máquina del clúster de gestión para ese RKE2ControlPlane.
+[,yaml]
+----
+pre-drain.delete.hook.machine.cluster.x-k8s.io/rke2-lb-exclusion: ""
+----
+Con esta anotación en los objetos de máquina, cualquier nodo del clúster descendente que esté programado para ser vaciado recibirá la etiqueta de nodo mencionada anteriormente antes de que comience el proceso de vaciado. La etiqueta se eliminará del nodo una vez que esté disponible y listo de nuevo.
+
+== Actualizaciones del clúster de gestión
+
+La actualización del clúster de gestión se describe en la documentación del `Day 2` <<day2-mgmt-cluster,clúster de gestión>>.
+
+[#atip-lifecycle-downstream]
+== Actualizaciones de clústeres descendentes
+
+La actualización de los clústeres descendentes implica actualizar varios componentes. Las siguientes secciones cubren el proceso de actualización para cada uno de los componentes.
+
+*Actualización del sistema operativo*
+
+Para este proceso, consultad la siguiente <<eib-edge-image-connected,referencia>> para crear la nueva imagen con una nueva versión del sistema operativo.
+Con esta nueva imagen generada por `EIB`, la siguiente fase de aprovisionamiento utiliza la nueva versión del sistema operativo proporcionada.
+En el siguiente paso, se utiliza la nueva imagen para actualizar los nodos.
+
+*Actualización del clúster RKE2*
+
+Los cambios necesarios para actualizar el clúster `RKE2` mediante el flujo de trabajo automatizado son los siguientes:
+
+* Cambiad el bloque `RKE2ControlPlane` en el `capi-provisioning-example.yaml` que se muestra en la siguiente <<single-node-provision,sección>>:
+
+  ** Especificad la deseada `rolloutStrategy`
+  *** Tened en cuenta que en un clúster `RKE2` de varios nodos con al menos 3 nodos de plano de control, establecer el campo `RKE2ControlPlane.spec.rolloutStrategy.type` en `"RollingUpdate"` y el `rolloutStrategy.rollingUpdate.maxSurge` en `0` garantiza que no se creen ni se necesiten nodos adicionales durante la actualización cuando el `Metal3MachineTemplate.spec.nodeReuse` relacionado también se establece en `True` (como se explica a continuación).
+  ** Cambiad la versión del clúster `RKE2` a la nueva versión sustituyendo `$\{RKE2_NEW_VERSION\}`.
+
+[,yaml]
+----
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: RKE2ControlPlane
+metadata:
+  name: multinode-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: Metal3MachineTemplate
+    name: multinode-cluster-controlplane
+  version: ${RKE2_NEW_VERSION}
+  replicas: 3
+  rolloutStrategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxSurge: 0
+  serverConfig:
+    cni: cilium
+    tlsSan:
+      - ${EDGE_VIP_ADDRESS_IPV4}
+      - ${EDGE_VIP_ADDRESS_IPV6}
+      - https://${EDGE_VIP_ADDRESS_IPV4}.sslip.io
+      - https://${EDGE_VIP_ADDRESS_IPV6}.sslip.io
+  rolloutStrategy:
+    rollingUpdate:
+      maxSurge: 0
+  registrationMethod: "control-plane-endpoint"
+  registrationAddress: ${EDGE_VIP_ADDRESS}
+  agentConfig:
+    format: ignition
+    additionalUserData:
+      config: |
+        variant: fcos
+        version: 1.4.0
+        systemd:
+          units:
+          - name: rke2-preinstall.service
+            enabled: true
+            contents: |
+              [Unit]
+              Description=rke2-preinstall
+              Wants=network-online.target
+              Before=rke2-install.service
+              ConditionPathExists=!/run/cluster-api/bootstrap-success.complete
+              [Service]
+              Type=oneshot
+              User=root
+              ExecStartPre=/bin/sh -c "mount -L config-2 /mnt"
+              # Note we use _ as a delimiter for sed here because the providerid includes / characters
+              ExecStart=/bin/sh -c "sed -i \"s_PROVIDERID_$(jq -r .providerid /mnt/openstack/latest/meta_data.json)_\" /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-name: $(jq -r .name /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"node-label:\" >> /etc/rancher/rke2/config.yaml"
+              ExecStart=/bin/sh -c "echo \"  - metal3.io/uuid=$(jq -r .uuid /mnt/openstack/latest/meta_data.json)\" >> /etc/rancher/rke2/config.yaml"
+              ExecStartPost=/bin/sh -c "umount /mnt"
+              [Install]
+              WantedBy=multi-user.target
+        storage:
+          directories:
+          - path: /var/lib/rancher/rke2/server/manifests
+            overwrite: true
+          files:
+            - path: /var/lib/rancher/rke2/server/manifests/endpoint-copier-operator.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChart
+                  metadata:
+                    name: endpoint-copier-operator
+                    namespace: kube-system
+                  spec:
+                    chart: oci://registry.suse.com/edge/charts/endpoint-copier-operator
+                    targetNamespace: endpoint-copier-operator
+                    version: {version-endpoint-copier-operator-chart}
+                    createNamespace: true
+            - path: /var/lib/rancher/rke2/server/manifests/metallb.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChart
+                  metadata:
+                    name: metallb
+                    namespace: kube-system
+                  spec:
+                    chart: oci://registry.suse.com/edge/charts/metallb
+                    targetNamespace: metallb-system
+                    version: {version-metallb-chart}
+                    createNamespace: true
+            - path: /var/lib/rancher/rke2/server/manifests/metallb-cr.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: metallb.io/v1beta1
+                  kind: IPAddressPool
+                  metadata:
+                    name: kubernetes-vip-ip-pool
+                    namespace: metallb-system
+                  spec:
+                    addresses:
+                      - ${EDGE_VIP_ADDRESS_IPV4}/32
+                      - ${EDGE_VIP_ADDRESS_IPV6}/128
+                    serviceAllocation:
+                      priority: 100
+                      namespaces:
+                        - default
+                      serviceSelectors:
+                        - matchExpressions:
+                          - {key: "serviceType", operator: In, values: [kubernetes-vip]}
+                  ---
+                  apiVersion: metallb.io/v1beta1
+                  kind: L2Advertisement
+                  metadata:
+                    name: ip-pool-l2-adv
+                    namespace: metallb-system
+                  spec:
+                    ipAddressPools:
+                      - kubernetes-vip-ip-pool
+            - path: /var/lib/rancher/rke2/server/manifests/endpoint-svc.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: v1
+                  kind: Service
+                  metadata:
+                    name: kubernetes-vip
+                    namespace: default
+                    labels:
+                      serviceType: kubernetes-vip
+                  spec:
+                    ipFamilyPolicy: PreferDualStack
+                    ports:
+                    - name: rke2-api
+                      port: 9345
+                      protocol: TCP
+                      targetPort: 9345
+                    - name: k8s-api
+                      port: 6443
+                      protocol: TCP
+                      targetPort: 6443
+                    type: LoadBalancer
+            ###############################################################################
+            # In case of deploying the RKE2 ingress controller, the following 2 files must
+            # be added.
+            # NOTE: The .providers stanza can be removed from the Helm parameters settings
+            #       here below in case of not deploying/not planning to deploy Ingress
+            #       objects including ingress-nginx annotations in its `.metadata` stanza.
+            ###############################################################################
+            - path: /var/lib/rancher/rke2/server/manifests/rke2-traefik-config.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: helm.cattle.io/v1
+                  kind: HelmChartConfig
+                  metadata:
+                    name: rke2-traefik
+                    namespace: kube-system
+                  spec:
+                    valuesContent: |-
+                      ingressClass:
+                        isDefaultClass: false
+                      ports:
+                        web:
+                          hostPort: null    # disallow hostPort
+                          exposedPort: 80
+                        websecure:
+                          hostPort: null    # disallow hostPort
+                          exposedPort: 443
+                      service:
+                        enabled: true
+                        spec:
+                          type: LoadBalancer
+                          ipFamilyPolicy: PreferDualStack
+                          externalTrafficPolicy: Local
+                          allocateLoadBalancerNodePorts: false
+                      providers:
+                        kubernetesIngressNGINX:  # this provider allows Traefik to "understand" most of the Ingress-NGINX annotations
+                          enabled: true
+                          ingressClass: "rke2-ingress-nginx-migration"
+                          controllerClass: "rke2.​cattle.​io/ingress-nginx-migration"
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+            - path: /var/lib/rancher/rke2/server/manifests/metallb-traefik-cr.yaml
+              overwrite: true
+              contents:
+                inline: |
+                  apiVersion: metallb.io/v1beta1
+                  kind: IPAddressPool
+                  metadata:
+                    name: ingress-ippool
+                    namespace: metallb-system
+                  spec:
+                    addresses:
+                      - ${INGRESS_IPV4}/32
+                      - ${INGRESS_IPV6}/128
+                    serviceAllocation:
+                      priority: 100
+                      serviceSelectors:
+                      - matchExpressions:
+                        - {key: app.kubernetes.io/name, operator: In, values: [rke2-traefik]} # assign to rke2-traefik LB svc
+                  ---
+                  apiVersion: metallb.io/v1beta1
+                  kind: L2Advertisement
+                  metadata:
+                    name: ingress-l2-adv
+                    namespace: metallb-system
+                  spec:
+                    ipAddressPools:
+                      - ingress-ippool
+              mode: 0644
+              user:
+                name: root
+              group:
+                name: root
+    kubelet:
+      extraArgs:
+      - provider-id=metal3://PROVIDERID
+    nodeName: "localhost.localdomain"
+----
+
+* Cambiad el bloque `Metal3MachineTemplate` en el `capi-provisioning-example.yaml` que se muestra en la siguiente <<single-node-provision,sección>>:
+
+  ** Cambiad el nombre de la imagen y la suma de comprobación por la nueva versión generada en el paso anterior.
+  ** Añadid la directiva `nodeReuse` a `true` para evitar la creación de un nuevo nodo.
+  ** Añadid la directiva `automatedCleaningMode` a `metadata` para habilitar la limpieza automatizada del nodo.
+
+[,yaml]
+----
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
+kind: Metal3MachineTemplate
+metadata:
+  name: multinode-cluster-controlplane
+  namespace: default
+spec:
+  nodeReuse: True
+  template:
+    spec:
+      automatedCleaningMode: metadata
+      dataTemplate:
+        name: multinode-cluster-controlplane-template
+      hostSelector:
+        matchLabels:
+          cluster-role: control-plane
+      image:
+        checksum: http://imagecache.local:8080/${NEW_IMAGE_GENERATED}.sha256
+        checksumType: sha256
+        diskFormat: raw
+        url: http://imagecache.local:8080/${NEW_IMAGE_GENERATED}.raw
+----
+
+Antes de aplicar el archivo `capi-provisioning-example.yaml`, siempre es una buena práctica informar a los equilibradores de carga externos (p. ej., MetalLB) de que los nodos se están vaciando para que no dirijan tráfico a los nodos en este estado. Como se menciona en la sección <<load-balancer-exclusion>>, puedes automatizar esto anotando el RKE2ControlPlane en el clúster de gestión. En este ejemplo, se anota un objeto RKE2ControlPlane llamado multinode-cluster:
+
+[,shell]
+----
+kubectl annotate  RKE2ControlPlane/multinode-cluster  rke2.controlplane.cluster.x-k8s.io/load-balancer-exclusion="true"
+----
+
+Verificad que los objetos de máquina se hayan anotado: 
+
+[,yaml]
+----
+pre-drain.delete.hook.machine.cluster.x-k8s.io/rke2-lb-exclusion: ""
+----
+Obtened las anotaciones de todos vuestros objetos de máquina:
+
+[,shell]
+----
+kubectl get machines -o json | jq -r '.items[].metadata | .name, .annotations'
+----
+
+[NOTE]
+====
+Sin estas anotaciones, los usuarios podrían experimentar tiempos de respuesta más largos en los servicios, ya que los equilibradores de carga no detectan los nodos vaciados.
+====
+
+Tras realizar estos cambios, el archivo `capi-provisioning-example.yaml` puede aplicarse al clúster mediante el siguiente comando:
+
+[,shell]
+----
+kubectl apply -f capi-provisioning-example.yaml
+----
+

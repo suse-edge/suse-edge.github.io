@@ -1,0 +1,389 @@
+[#{cluster-type}-day2-longhorn-engine-cleanup]
+== Limpieza de imágenes de Longhorn Engine
+:revdate: 2026-07-03
+:revnumber: 3.7
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Esta sección describe cómo implementar la limpieza automatizada de imágenes de Longhorn Engine obsoletas que se acumulan después de las actualizaciones del clúster.
+
+=== Planteamiento del problema
+
+Longhorn no elimina automáticamente las imágenes de Longhorn Engine antiguas después de las actualizaciones. Esta es una decisión de diseño intencionada para evitar la pérdida accidental de datos: Longhorn conserva las versiones anteriores de la imagen de Longhorn Engine como medida de seguridad en caso de que sea necesaria una reversión.
+
+Sin embargo, en entornos de producción con actualizaciones frecuentes, estas imágenes de Longhorn Engine no utilizadas se acumulan con el tiempo, lo que resulta en:
+
+* **Consumo de almacenamiento**: Cada imagen de Longhorn Engine consume espacio en disco en los nodos del clúster
+* **Sobrecarga de recursos**: Kubernetes gestiona recursos de imagen adicionales innecesariamente
+* **Complejidad operativa**: Identificación y limpieza manual de imágenes obsoletas
+
+
+=== Cuándo implementar la limpieza
+
+Se recomienda la limpieza de imágenes de Longhorn Engine en los siguientes escenarios:
+
+* **Actualizaciones regulares del clúster**: Entornos que realizan actualizaciones frecuentes de la versión de Longhorn
+* **Despliegues con almacenamiento limitado**: Clústeres con capacidad de almacenamiento de nodo limitada
+* **Higiene operativa**: Como parte de los procedimientos de mantenimiento rutinarios del Día 2
+
+[NOTE]
+====
+Este procedimiento de limpieza se clasifica como **bajo riesgo** porque solo elimina imágenes de Longhorn Engine con cero referencias activas (`refCount == 0`). Las imágenes de Longhorn Engine que utilizan actualmente los volúmenes están protegidas y no se eliminarán.
+====
+
+=== Arquitectura de la solución
+
+La solución de limpieza utiliza un CronJob de Kubernetes que ejecuta tareas de mantenimiento periódicas:
+
+. **Descubrimiento**: Identifica la versión más reciente de la imagen de Longhorn Engine desplegada en el clúster
+. **Selección de candidatos**: Localiza todas las versiones de imagen de Longhorn Engine más antiguas sin referencias de volumen activas
+. **Ejecución de la limpieza**: Elimina las imágenes de Longhorn Engine obsoletas que cumplen los criterios de seguridad
+. **Registro de auditoría**: Registra las operaciones de limpieza para la visibilidad operativa
+
+La implementación requiere:
+
+* **ServiceAccount**: Para la autenticación en la API de Kubernetes
+* **Permisos RBAC**: Acceso de lectura y eliminación a los recursos `engineimages.longhorn.io`
+* **CronJob**: Contenedor de ejecución programada con la lógica de limpieza
+
+=== Implementación
+
+La solución de limpieza completa consta de cuatro manifiestos de Kubernetes desplegados en el espacio de nombres `longhorn-system`.
+
+. **Create ServiceAccount**
++
+Cread una ServiceAccount dedicada para el CronJob de limpieza:
++
+[source,yaml]
+----
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: longhorn-engineimage-cleanup
+  namespace: longhorn-system
+  labels:
+    app: longhorn-engineimage-cleanup
+----
+
+. **Configurad los permisos RBAC**
++
+.. Definid un Rol con los permisos mínimos requeridos:
++
+[source,yaml]
+----
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: longhorn-engineimage-cleanup
+  namespace: longhorn-system
+  labels:
+    app: longhorn-engineimage-cleanup
+rules:
+- apiGroups: [longhorn.io]
+  resources: [engineimages]
+  verbs: [get, list, delete]
+----
++
+.. Vinculad el Rol a la ServiceAccount:
++
+[source,yaml]
+----
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: longhorn-engineimage-cleanup
+  namespace: longhorn-system
+  labels:
+    app: longhorn-engineimage-cleanup
+subjects:
+- kind: ServiceAccount
+  name: longhorn-engineimage-cleanup
+  namespace: longhorn-system
+roleRef:
+  kind: Role
+  name: longhorn-engineimage-cleanup
+  apiGroup: rbac.authorization.k8s.io
+----
+
+. **Desplegad el CronJob de limpieza**
++
+Desplegad el CronJob de limpieza automatizada:
++
+[source,yaml]
+----
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: longhorn-engineimage-cleanup
+  namespace: longhorn-system
+  labels:
+    app: longhorn-engineimage-cleanup
+  annotations:
+    description: "Cleanup old Longhorn engine images left over after upgrades"
+    source: "SUSE Edge Telco Cloud - Day 2 Operations"
+spec:
+  # Execute weekly on Sunday at 2:00 AM UTC
+  schedule: "0 2 * * 0"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app: longhorn-engineimage-cleanup
+        spec:
+          serviceAccountName: longhorn-engineimage-cleanup
+          restartPolicy: Never
+          automountServiceAccountToken: true
+          containers:
+          - name: cleanup
+            image: registry.suse.com/bci/bci-base:15.6
+            command:
+            - sh
+            - -c
+            - |
+              set -e
+
+              # Install required tools
+              zypper --non-interactive install curl jq
+
+              # Install kubectl from official Kubernetes
+              curl -LO "https://dl.k8s.io/release/v1.36.3/bin/linux/amd64/kubectl"
+              chmod +x kubectl
+              mv kubectl /usr/local/bin/
+
+              echo "=== Longhorn Engine Image Cleanup ==="
+              echo "Automated maintenance - Day 2 Operations"
+              echo ""
+
+              echo "Step 1: Discovering latest engine image version..."
+
+              ENGINE_IMAGES=$(kubectl get engineimages.longhorn.io -n longhorn-system -o json)
+
+              LATEST_VERSION=$(echo "$ENGINE_IMAGES" | jq -r '
+                .items[]
+                | select(.status.version != null)
+                | .status.version' |
+                sed 's/^v//' |
+                sort -V |
+                tail -1)
+
+              if [ -z "$LATEST_VERSION" ]; then
+                echo "No engine images found. Nothing to cleanup."
+                exit 0
+              fi
+
+              echo "Latest version detected: v${LATEST_VERSION}"
+              echo ""
+
+              echo "Step 2: Identifying obsolete engine images..."
+
+              TO_DELETE=$(echo "$ENGINE_IMAGES" | jq -r --arg latest "v${LATEST_VERSION}" '
+                .items[]
+                | select(.status.version != $latest)
+                | select(.status.refCount == 0)
+                | .metadata.name')
+
+              if [ -z "$TO_DELETE" ]; then
+                echo "No obsolete engine images found"
+                echo "All engine images are either:"
+                echo "  - Latest version (v${LATEST_VERSION})"
+                echo "  - Still in use (refCount > 0)"
+                exit 0
+              fi
+
+              DELETE_COUNT=$(echo "$TO_DELETE" | wc -l | tr -d ' ')
+              echo "Found $DELETE_COUNT obsolete engine image(s) for deletion:"
+              echo "$TO_DELETE"
+              echo ""
+
+              COUNT=0
+              FAILED=0
+              for IMAGE_NAME in $TO_DELETE; do
+                VERSION=$(echo "$ENGINE_IMAGES" | jq -r --arg name "$IMAGE_NAME" \
+                  '.items[] | select(.metadata.name == $name) | .status.version')
+                REFCOUNT=$(echo "$ENGINE_IMAGES" | jq -r --arg name "$IMAGE_NAME" \
+                  '.items[] | select(.metadata.name == $name) | .status.refCount')
+
+                echo "Deleting: $IMAGE_NAME (version: $VERSION, refCount: $REFCOUNT)"
+
+                if kubectl delete engineimages.longhorn.io "$IMAGE_NAME" -n longhorn-system; then
+                  COUNT=$((COUNT + 1))
+                  echo "  ✓ Deleted successfully"
+                else
+                  FAILED=$((FAILED + 1))
+                  echo "  ✗ Failed to delete"
+                fi
+              done
+
+              echo ""
+              echo "=== Cleanup Summary ==="
+              echo "Latest version: v${LATEST_VERSION}"
+              echo "Successfully deleted: $COUNT obsolete engine images"
+              echo "Failed deletions: $FAILED engine images"
+
+              if [ $FAILED -gt 0 ]; then
+                exit 1
+              fi
+
+              echo ""
+              echo "Cleanup completed successfully"
+----
+
+. **Aplicad la configuración**
++
+.. Guardad los cuatro manifiestos en un solo archivo (p. ej., `longhorn-engine-cleanup.yaml`), luego desplegadlos en el clúster:
++
+[source,bash]
+----
+kubectl apply -f longhorn-engine-cleanup.yaml
+----
++
+.. Verificad que el CronJob se haya creado:
++
+[source,bash]
+----
+kubectl get cronjob -n longhorn-system longhorn-engineimage-cleanup
+----
++
+Salida esperada:
++
+[source,text]
+----
+NAME                            SCHEDULE     SUSPEND   ACTIVE   LAST SCHEDULE   AGE
+longhorn-engineimage-cleanup    0 2 * * 0    False     0        <none>          5s
+----
+
+=== Procedimientos operativos
+
+Esta sección describe las tareas operativas diarias para gestionar el CronJob de limpieza de imágenes de Longhorn Engine, incluida la ejecución manual, la personalización de la programación, la supervisión y la verificación.
+
+==== Ejecución manual
+
+Para ejecutar la limpieza inmediatamente sin esperar a la hora programada, ejecutad el siguiente comando:
+
+[source,bash]
+----
+kubectl create job --from=cronjob/longhorn-engineimage-cleanup \
+  longhorn-engineimage-cleanup-manual-$(date +%Y%m%d-%H%M%S) \
+  -n longhorn-system
+----
+
+Vigilad la ejecución manual:
+
+. Observad el estado del trabajo:
++
+[source,bash]
+----
+kubectl get jobs -n longhorn-system -w
+----
+
+. Visualizad los registros del trabajo:
++
+[source,bash]
+----
+kubectl logs -n longhorn-system -l app=longhorn-engineimage-cleanup --tail=100
+----
+
+==== Configuración de la programación
+
+La programación predeterminada ejecuta la limpieza semanalmente los domingos a las 2:00 AM UTC:
+
+[source,yaml]
+----
+schedule: "0 2 * * 0"
+----
+
+Alternativas de programación comunes:
+
+* **Diariamente a las 3:00 AM**: `"0 3 * * *"`
+* **Mensualmente el día 1 a las 4:00 AM**: `"0 4 1 * *"`
+* **Cada 6 horas**: `"0 */6 * * *"`
+
+Modificad la programación:
+
+[source,bash]
+----
+kubectl patch cronjob longhorn-engineimage-cleanup \
+  -n longhorn-system \
+  --type='merge' \
+  -p '{"spec":{"schedule":"0 3 * * *"}}'
+----
+
+==== Monitorización y registros
+
+Visualizad el historial de limpieza:
+
+* Enumerad los trabajos completados:
++
+[source,bash]
+----
+kubectl get jobs -n longhorn-system -l app=longhorn-engineimage-cleanup
+----
+
+* Visualizad los registros de la última ejecución correcta:
++
+[source,bash]
+----
+kubectl logs -n longhorn-system \
+  -l app=longhorn-engineimage-cleanup \
+  --tail=200 \
+  | grep -A 50 "Cleanup Summary"
+----
+
+Inspeccionad la ejecución de un trabajo específico:
+
+[source,bash]
+----
+# Get job name
+JOB_NAME=$(kubectl get jobs -n longhorn-system \
+  -l app=longhorn-engineimage-cleanup \
+  --sort-by=.metadata.creationTimestamp \
+  -o jsonpath='{.items[-1].metadata.name}')
+
+# View job details
+kubectl describe job $JOB_NAME -n longhorn-system
+
+# View job logs
+kubectl logs job/$JOB_NAME -n longhorn-system
+----
+
+==== Verificación
+
+Tras la ejecución de la limpieza, verificad que solo permanezcan las imágenes de Longhorn Engine actuales:
+
+. Enumerad todas las imágenes de Longhorn Engine:
++
+[source,bash]
+----
+kubectl get engineimages.longhorn.io -n longhorn-system
+----
+
+. Comprobad los recuentos de referencia:
++
+[source,bash]
+----
+kubectl get engineimages.longhorn.io -n longhorn-system \
+  -o custom-columns=NAME:.metadata.name,VERSION:.status.version,REFCOUNT:.status.refCount
+----
+
+Salida esperada que muestra solo la última versión con referencias activas:
+
+[source,text]
+----
+NAME                                VERSION     REFCOUNT
+ei-acba2c08                         v1.12.1     3
+----

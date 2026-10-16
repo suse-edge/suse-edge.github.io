@@ -1,0 +1,172 @@
+[#{cluster-type}-day2-upgrade-controller]
+== Upgrade Controller
+:revdate: 2025-01-16
+:revnumber: 3.7
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+[IMPORTANT]
+====
+`Upgrade Controller`は現在、*非エアギャップ管理*クラスターに対する`Day 2`操作のみをサポートしています。
+====
+
+このセクションでは、`Day 2`クラスターをある`management`プラットフォームバージョンから別のバージョンへアップグレードする際に関連する、さまざまな`{product}`操作の実行方法について説明します。
+
+`Day 2`操作は<<components-upgrade-controller,Upgrade Controller>>によって自動化されており、以下が含まれます。
+
+* <<components-slmicro, SUSE Linux Micro>> OSアップグレード
+ifeval::["{flavor}" == "edge"]
+* <<components-rke2>>または<<components-k3s>> Kubernetesアップグレード
+endif::[]
+ifeval::["{flavor}" == "telco"]
+* <<components-rke2>> Kubernetesアップグレード
+endif::[]
+* SUSE追加コンポーネント（SUSE Rancher Prime、SUSE Securityなど）のアップグレード
+
+=== 前提条件
+
+`management`クラスターをアップグレードする前に、以下の前提条件を満たす必要があります。
+
+. `SCC registered nodes` - クラスターノードのOSが、アップグレード先の`{product}`<<release-notes,リリース>>で指定されているOSバージョンをサポートするサブスクリプションキーで登録されていることを確認してください。
+
+. `Upgrade Controller` - `Upgrade Controller`が`management`クラスターにデプロイされていることを確認してください。インストール手順については、<<components-upgrade-controller-installation>>を参照してください。
+
+=== アップグレード
+
+. `{product}`クラスターのアップグレード先となる<<release-notes,リリース>>バージョンを決定します。`management`
+
+. `management`クラスターに、目的の`UpgradePlan`を指定する`release version`をデプロイします。`UpgradePlan`は、`Upgrade Controller`のネームスペースにデプロイする必要があります。
++
+[,bash]
+----
+kubectl apply -n <upgrade_controller_namespace> -f - <<EOF
+apiVersion: lifecycle.suse.com/v1alpha1
+kind: UpgradePlan
+metadata:
+  name: upgrade-plan-mgmt
+  namespace: upgrade-controller-system  # replaces it if the upgrade controller has been deployed in a different namespace
+spec:
+  # Version retrieved from release notes
+  releaseVersion: 3.X.Y
+EOF
+----
++
+[NOTE]
+====
+`UpgradePlan`に対して追加の設定を行いたいユースケースがあるかもしれません。可能なすべての設定については、<<components-upgrade-controller-extensions-upgrade-plan>>を参照してください。
+====
+
+. `UpgradePlan`を`Upgrade Controller's`ネームスペースにデプロイすると、`upgrade process`が開始されます。
++
+[NOTE]
+====
+実際の`upgrade process`の詳細については、<<components-upgrade-controller-how>>を参照してください。
+
+`upgrade process`の追跡方法については、<<components-upgrade-controller-how-track>>を参照してください。
+====
+
+=== アップグレード後の手順
+`{product}`の最新の`{previous-edge-version}` z-streamから`{static-edge-version}`へのアップグレードでは、`Upgrade Controller`のアップグレードプロセス完了後に、`{product}` `{static-edge-version}`リリースに含まれる`rke2-traefik` HelmチャートのHelmパラメータ変更に関連する最後の手動手順を実行する必要があります。
+
+* `kube-system`ネームスペースの`helmchartconfigs.helm.cattle.io/rke2-traefik` APIオブジェクトに以下の変更を適用してください（そのAPIオブジェクトが存在しない場合は、`helmcharts.helm.cattle.io/rke2-traefik` APIオブジェクトに適用してください）。
+[NOTE]
+====
+以下の通り`HelmChartConfig`（または`HelmChart`）マニフェストを使用してこれらの変更を適用し、将来の管理クラスターのアップグレードでも`Upgrade Controller`がそれらを保持するようにしてください。
+====
+
+[,shell]
+----
+# You can use `kubectl edit', `kubectl patch` or `kubectl apply` commands to apply the changes indicated below
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: rke2-traefik
+  namespace: kube-system
+spec:
+  failurePolicy: reinstall
+  valuesContent: |-
+    ingressClass:
+      isDefaultClass: true
+    ports:
+      web:
+        hostPort: null
+        exposedPort: 80
+      websecure:
+        hostPort: null
+        exposedPort: 443
+    service:
+      enabled: true
+      # type: LoadBalancer              # CHANGE_1: This Helm parameter has been REMOVED
+      # ipFamilyPolicy: PreferDualStack # CHANGE_2: This Helm parameter has been REMOVED
+      spec:
+        type: LoadBalancer              # CHANGE_3: NEW Helm parameter replacing the old/removed one (above)
+        ipFamilyPolicy: PreferDualStack # CHANGE_4: NEW Helm parameter replacing the old/removed one (above)
+        externalTrafficPolicy: Local
+        allocateLoadBalancerNodePorts: false
+    providers:
+      kubernetesIngressNGINX:           # CHANGE_5: NEW Helm parameter replacing the old/removed "KubernetesIngressNginx"
+        enabled: true
+        ingressClass: "rke2-ingress-nginx-migration"
+        controllerClass: "rke2.​cattle.​io/ingress-nginx-migration"
+EOF
+----
+
+または、`kube-system`ネームスペースの`helmchartconfigs.helm.cattle.io/rke2-traefik` APIオブジェクトが存在しない場合：
+
+[,shell]
+----
+# You can use `kubectl edit', `kubectl patch` or `kubectl apply` commands to apply the changes indicated below
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: rke2-traefik
+  namespace: kube-system
+spec:
+  chart: rke2-traefik
+  version: {rke2-traefik Helm chart version}
+  repo: https://rke2-charts.rancher.io
+  bootstrap: false
+  failurePolicy: reinstall
+  backOffLimit: 20
+  targetNamespace: kube-system
+  set:
+    global.cattle.systemDefaultRegistry: registry.rancher.com
+    global.rke2DataDir: /var/lib/rancher/rke2
+    global.systemDefaultRegistry: registry.rancher.com
+  valuesContent: |-
+    ingressClass:
+      isDefaultClass: true
+    ports:
+      web:
+        hostPort: null
+        exposedPort: 80
+      websecure:
+        hostPort: null
+        exposedPort: 443
+    service:
+      enabled: true
+      # type: LoadBalancer              # CHANGE_1: This Helm parameter has been REMOVED
+      # ipFamilyPolicy: PreferDualStack # CHANGE_2: This Helm parameter has been REMOVED
+      spec:
+        type: LoadBalancer              # CHANGE_3: NEW Helm parameter replacing the old/removed one (above)
+        ipFamilyPolicy: PreferDualStack # CHANGE_4: NEW Helm parameter replacing the old/removed one (above)
+        externalTrafficPolicy: Local
+        allocateLoadBalancerNodePorts: false
+    providers:
+      kubernetesIngressNGINX:           # CHANGE_5: NEW Helm parameter replacing the old/removed "KubernetesIngressNginx"
+        enabled: true
+        ingressClass: "rke2-ingress-nginx-migration"
+        controllerClass: "rke2.​cattle.​io/ingress-nginx-migration"
+EOF
+----
+
+上記で示されている`{rke2-traefik Helm chart version}`は、アップグレード先の`{product}` `{static-edge-version}`リリースで使用されるRKE2/k3sリリースによって提供されるものです（対応する https://github.com/rancher/rke2/releases/[RKE2リリースページ] / https://github.com/k3s-io/k3s/releases/[k3sリリースページ]から入手できます）。

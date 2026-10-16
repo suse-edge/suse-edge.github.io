@@ -1,0 +1,242 @@
+[#guides-suse-storage-v2-data-engine]
+= SUSE Storage V2 Data Engine
+:revdate: 2026-09-17
+:revnumber: 3.7
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+SUSE Storage {version-longhorn} 将 Longhorn V2 Data Engine 作为正式发布功能包含在内。
+从 {product} 3.7 版本开始，当集群满足 V2 先决条件时，建议对新配置的卷使用 V2 Data Engine。
+
+[IMPORTANT]
+====
+SUSE Storage Helm chart 不会将现有的 V1 卷转换为 V2。
+数据引擎是不可变的卷属性。
+现有的 V1 卷将继续使用 V1，直到其数据迁移到新配置的 V2 卷为止。
+====
+
+== 先决条件
+
+在启用 V2 Data Engine 之前，请查看 {link-longhorn-v2-requirements}[上游 V2 要求]。
+特别是，每个可以托管 V2 副本的节点都需要：
+
+* 一个专用的、未格式化的块设备。生产工作负载建议使用 NVMe 设备。
+* `nvme-tcp`、`vfio_pci` 和 `uio_pci_generic` 内核模块。
+* 为 V2 实例管理器提供充足的 CPU 和内存。默认配置为每个实例管理器使用 2 GiB 大页内存。
+* 受支持的 CPU 和内核。AMD64 CPU 需要 SSE4.2，并建议使用 6.7 或更高版本的内核。
+
+Longhorn 建议在迁移完成后仅使用一个 Data Engine。
+同时运行两个引擎会创建独立的实例管理器，从而消耗额外的 CPU 和内存。
+
+== 为新卷配置 V2
+
+在配置应用程序卷之前，请准备好所需的块设备。
+使用 SUSE Storage UI 或更新相应的 `nodes.longhorn.io` 资源，将每个设备注册为对应 Longhorn 节点上的 `block` 磁盘。
+
+对于没有 V1 卷的新集群，请使用以下 Helm 值：
+
+[,yaml]
+----
+defaultSettings:
+  v1DataEngine: false
+  v2DataEngine: true
+persistence:
+  dataEngine: v2
+----
+
+对于具有 V1 卷的现有集群，请在迁移期间保持两个引擎都处于启用状态：
+
+[,yaml]
+----
+defaultSettings:
+  v1DataEngine: true
+  v2DataEngine: true
+persistence:
+  dataEngine: v2
+----
+
+使用您正常的 Helm 部署或升级工作流程应用这些值。
+例如：
+
+[,shell,subs="attributes"]
+----
+helm upgrade --install longhorn oci://dp.apps.rancher.io/charts/suse-storage \
+  --version {version-longhorn-chart} \
+  --namespace longhorn-system \
+  --create-namespace \
+  --reuse-values \
+  --values suse-storage-v2-values.yaml
+----
+
+在现有安装上，确认正在运行的 Longhorn 设置已启用。
+如果 Helm 升级后它仍然处于禁用状态，请显式启用它：
+
+[,shell]
+----
+kubectl -n longhorn-system patch settings.longhorn.io v2-data-engine \
+  --type merge --patch '{"value":"true"}'
+----
+
+[CAUTION]
+====
+当集群中仍有任何 V1 卷时，请勿禁用 V1 Data Engine。
+升级现有版本时，还要确认 `--reuse-values` 没有保留 `persistence.dataEngine` 的旧值 `v1`。
+====
+
+创建一个专用的 V2 StorageClass，而不是就地更改现有的 StorageClass：
+
+[,yaml]
+----
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-v2
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  dataEngine: "v2"
+  numberOfReplicas: "3"
+  staleReplicaTimeout: "2880"
+  fsType: "ext4"
+----
+
+要使 V2 成为未指定 `storageClassName` 的 PVC 的默认设置，请将默认注释移动到新的存储类：
+
+[,shell]
+----
+kubectl annotate storageclass longhorn \
+  storageclass.kubernetes.io/is-default-class="false" --overwrite
+
+kubectl annotate storageclass longhorn-v2 \
+  storageclass.kubernetes.io/is-default-class="true" --overwrite
+----
+
+此更改仅影响新配置的卷。
+它不会更改现有卷的数据引擎。
+
+验证设置、存储类、磁盘和卷：
+
+[,shell]
+----
+kubectl -n longhorn-system get settings.longhorn.io \
+  v1-data-engine v2-data-engine
+
+kubectl get storageclass longhorn-v2 \
+  -o jsonpath='dataEngine={.parameters.dataEngine}{"\n"}'
+
+kubectl -n longhorn-system get nodes.longhorn.io
+
+kubectl -n longhorn-system get volumes.longhorn.io \
+  -o custom-columns='NAME:.metadata.name,ENGINE:.spec.dataEngine,STATE:.status.state,ROBUSTNESS:.status.robustness'
+----
+
+== 将 V1 卷迁移到 V2
+
+SUSE Storage {version-longhorn} 不支持将现有卷就地从 V1 转换为 V2。
+规划一个维护窗口，并将每个工作负载迁移到新的 V2 卷。
+
+. 备份应用程序及其 V1 卷。
+. 停止或缩减所有写入源 PVC 的工作负载。
+. 在同一名称空间中创建一个目标 PVC，使用 `longhorn-v2` 存储类，且容量等于或大于源 PVC。
+. 使用应用程序支持的方法复制数据。
+. 在更改工作负载以使用目标 PVC 之前，请验证复制的数据。
+. 更新或重新创建工作负载，使其引用 V2 PVC。
+. 保留 V1 卷，直到在 V2 上验证了应用程序，然后根据您的保留策略将其删除。
+
+对于不由数据库或其他需要一致性感知迁移的应用程序管理的文件系统卷，单个维护 Pod 可以以只读方式挂载 V1 源，并以读/写方式挂载 V2 目标：
+
+[,yaml]
+----
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: copy-v1-to-v2
+  namespace: <application-namespace>
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: copy
+          image: registry.suse.com/bci/bci-micro:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              cp -a /source/. /destination/
+              sync
+          volumeMounts:
+            - name: source
+              mountPath: /source
+              readOnly: true
+            - name: destination
+              mountPath: /destination
+      volumes:
+        - name: source
+          persistentVolumeClaim:
+            claimName: <v1-pvc-name>
+        - name: destination
+          persistentVolumeClaim:
+            claimName: <v2-pvc-name>
+----
+
+[WARNING]
+====
+复制作业仅是一个通用的文件系统示例。
+对于数据库、原始块卷以及有自身一致性要求的应用程序，请使用应用程序原生的备份和恢复或复制功能。
+在删除源 PVC 之前，请验证所有权、权限、扩展属性和应用程序数据。
+====
+
+在每个工作负载迁移完成后，确认没有剩余的 V1 卷：
+
+[,shell]
+----
+kubectl -n longhorn-system get volumes.longhorn.io \
+  -o custom-columns='NAME:.metadata.name,ENGINE:.spec.dataEngine,STATE:.status.state'
+----
+
+然后，您可以在 Helm 值中禁用 V1 Data Engine 并升级版本：
+
+[,yaml]
+----
+defaultSettings:
+  v1DataEngine: false
+  v2DataEngine: true
+persistence:
+  dataEngine: v2
+----
+
+如果 Helm 升级后运行设置仍处于启用状态，请显式禁用它：
+
+[,shell]
+----
+kubectl -n longhorn-system patch settings.longhorn.io v1-data-engine \
+  --type merge --patch '{"value":"false"}'
+----
+
+再次运行卷清单命令，并在删除任何 V1 特定节点存储之前确认没有遗漏任何 V1 卷。
+
+== 使用限制
+
+在将工作负载迁移到 V2 之前，请查看 {link-longhorn-v1-v2-parity}[V1 和 V2 功能比较]。
+以下限制与 SUSE Storage {version-longhorn} 特别相关：
+
+* V1 卷无法在原地转换为 V2。
+* 不支持 V2 后端镜像。使用 CDI 进行 KubeVirt 镜像导入工作流。
+* V2 Data Engine 不支持严格本地卷、离线快速副本重建、修订计数器和孤立实例管理。
+* 在SUSE Storage 1.12补丁版本之间升级之前，必须先分离V2卷，因为不支持V2引擎在线升级。
+* 分片 V2 数据引擎处于实验阶段，且在功能上与复制的 V2 卷不完全对等。请勿将其用于需要不支持的功能（如备份和恢复、灾难恢复、克隆或在线迁移）的生产工作负载。
+* 在 ARM64 上，由 NVMe 块设备支持的 V2 卷存在上游限制。部署前请查看 {link-longhorn-important-notes}[Longhorn 重要说明]。
