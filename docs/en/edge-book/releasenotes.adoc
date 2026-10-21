@@ -79,6 +79,31 @@ If deploying new clusters, please follow <<guides-kiwi-builder-images>> to build
 
 Release-specific known issues will be added as release validation completes.
 
+* The `seactl` tool, invoked by the `release-manifest` container image `mirror` command, fails to resolve the `dependencyCharts` and `addonCharts` declared in the release manifest. As a result, the following charts are not pulled and populated into the SUSE Private Registry during air-gapped mirroring:
+** `sriov-crd` (`dependencyChart` of `sriov-network-operator`), leaving the SR-IOV Network Operator CRDs unavailable on air-gapped downstream clusters.
+** `neuvector-ui-ext` (`addonChart` of `neuvector`), leaving the SUSE Security (NeuVector) Rancher Dashboard extension unavailable on air-gapped downstream clusters.
+
+As a workaround, pull and push each chart to the mirror registry manually:
+
+[,bash]
+----
+helm pull oci://registry.suse.com/edge/charts/sriov-crd --version 307.1.0+up1.6.0 -d .
+helm push sriov-crd-307.1.0+up1.6.0.tgz oci://<Registry IP>/mirror --ca-file ca.crt
+
+helm repo add ui-plugin-charts https://github.com/rancher/ui-plugin-charts/raw/main
+helm repo update
+helm pull ui-plugin-charts/neuvector-ui-ext --version 2.1.5
+helm push neuvector-ui-ext-2.1.5.tgz oci://<Registry IP>/mirror --ca-file ca.crt
+----
+
+Verify that the charts were mirrored correctly:
+
+[,bash]
+----
+helm show chart oci://<Registry IP>/mirror/sriov-crd --version 307.1.0+up1.6.0 --ca-file ca.crt | grep -E '^(name|version):'
+helm show chart oci://<Registry IP>/mirror/neuvector-ui-ext --version 2.1.5 --ca-file ca.crt | grep -E '^(name|version):'
+----
+
 === SUSE Storage V2 Data Engine limitations
 
 SUSE Storage {version-longhorn} cannot convert an existing V1 volume to V2 in place.
