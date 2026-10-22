@@ -1,0 +1,2957 @@
+[#atip-features]
+= Telco機能の設定
+:revdate: 2026-05-27
+:revnumber: 3.7
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+// TEMP (preview only): resolve images locally in the AsciiDoc preview. REMOVE before commit.
+ifndef::env-github[]
+:imagesdir: ../images/
+endif::[]
+
+このセクションでは、SUSE Telco Cloud経由でデプロイされたクラスターにおけるTelco固有機能の設定について説明します。
+
+<<atip-automated-provisioning,自動プロビジョニング>>セクションで説明されているように、ダイレクトネットワークプロビジョニングのデプロイメント方法が使用されます。
+
+このセクションの構成は次のとおりです。
+
+* <<kernel-image-for-real-time,リアルタイム用カーネルイメージ>>:リアルタイムカーネルで使用するカーネルイメージ。
+* <<kernel-args,低レイテンシおよび高性能のためのカーネル引数>>:Telcoワークロードを実行する際のパフォーマンスを最大化し、レイテンシを低減するために使用するカーネル引数。
+* <<cpu-pinning-host,ホストでのCPUピニング>>:カーネル引数とTuneDプロファイルによるCPUの分離。
+* <<cpu-pinning-k8s,KubernetesでのCPUピニング>>:Kubelet設定によるKubernetes上でのCPUの分離。
+* <<network-parameters,ネットワークパラメータ>>:最適なパフォーマンスと低遅延を実現するためのネットワークチューニングパラメータ。
+* <<cni-configuration,CNI設定>>:Kubernetesクラスターで使用するCNI設定。
+* <<sriov,SR-IOV設定>>:Kubernetesワークロードで使用するSR-IOV設定。
+* <<dpdk,DPDK設定>>:システムで使用するDPDK設定。
+* <<acceleration,vRANアクセラレーション>>:vRANアクセラレーションカードへのFECアルゴリズム計算のオフロード。
+* <<huge-pages,Huge pages>>:Kubernetesワークロードで使用するHuge pages設定。
+* <<numa-aware-scheduling,NUMA対応スケジューリング設定>>:Kubernetesワークロードで使用するNUMA対応スケジューリング設定。
+* <<metal-lb-configuration,Metal LB設定>>:Kubernetesワークロードで使用するMetal LB設定。
+* <<private-registry,プライベートレジストリ設定>>:Kubernetesワークロードで使用するプライベートレジストリ設定。
+* <<ptp-configuration,Precision Time Protocol設定>>:PTP Telcoプロファイルを実行するための設定ファイル。
+* <<sctp,SCTP設定>>:LinuxカーネルIPスタックでSCTPレイヤーを有効にします。
+
+
+[#kernel-image-for-real-time]
+== リアルタイム用カーネルイメージ
+
+リアルタイムカーネルイメージが標準カーネルより優れているとは限りません。
+これは特定のユースケースに合わせて調整された別のカーネルです。リアルタイムカーネルは、スループットを犠牲にして低遅延を実現するように調整されています。リアルタイムカーネルは汎用用途には推奨されませんが、Telcoワークロードにおいて遅延が重要な要因となる場合には、推奨されるカーネルです。
+
+主な機能は4つあります。
+
+* 決定論的実行:
++
+予測可能性を高め、システム負荷が高い場合でも、毎回、重要なビジネスプロセスを期限内に確実に完了させ、高品質のサービスを提供します。重要なシステムリソースを高優先度プロセス用に保護することで、時間的制約のあるアプリケーションの予測可能性を高めることができます。
++
+* 低ジッタ:
++
+高度に決定論的な技術に基づく低ジッタは、アプリケーションを現実世界と同期させるのに役立ちます。これは、継続的かつ反復的な計算を必要とするサービスに役立ちます。
++
+* プライオリティの継承:
++
+プライオリティの継承とは、優先度の高いプロセスがタスクを完了するために優先度の低いプロセスの終了を必要とする場合に、優先度の低いプロセスが高い優先度を引き継ぐ機能を指します。SUSE Linux Enterprise Real Timeは、ミッションクリティカルなプロセスにおけるこれらの優先度の逆転問題を解決します。
++
+* スレッド割り込み:
++
+汎用OSにおいて割り込みモードで動作しているプロセスは、プリエンプトされることがありません。SUSE Linux Enterprise Real Timeでは、これらの割り込みがカーネルスレッドによってカプセル化され、これらのカーネルスレッドは割り込み可能なため、ユーザが定義した優先度の高いプロセスによってハード割り込みやソフト割り込みがプリエンプトされるようになります。
++
+この場合、`SUSE Linux Micro RT`のようなリアルタイムイメージをインストール済みであれば、カーネルリアルタイムはすでにインストールされています。 https://scc.suse.com/[SUSE Customer Center]から、リアルタイムカーネルイメージをダウンロードできます。
++
+
+[NOTE]
+====
+リアルタイムカーネルの詳細については、 https://www.suse.com/products/realtime/[SUSE Real Time]を参照してください。
+====
+
+[#kernel-args]
+== 低レイテンシおよび高性能のためのカーネル引数
+
+適切なカーネル引数を設定することは、パフォーマンスの最適化、低レイテンシの実現、およびTelcoワークロード向けのクラスタ展開を成功させるために不可欠です。一部のパラメータはリアルタイムカーネルが最適に機能するように特別に設計されていますが、このセクションはRTカーネルとデフォルトカーネルの両方の構成に適用されます。さらに、Directed Network Provisioning方式を使用してダウンストリームのクラスタノードを正常に展開するには、特定の引数が必須となります。
+
+* SUSEリアルタイムカーネルを使用する場合は、`kthread_cpus`を削除してください。このパラメータは、どのCPU上でカーネルスレッドが作成されるかを制御します。また、PID 1やカーネルモジュール（kmodユーザスペースヘルパー）の読み込みに使用できるCPUを制御します。このパラメータは認識されず、何の効果もありません。
+
+* `isolcpus`、`nohz_full`、`rcu_nocbs`、および`irqaffinity`を使用してCPUコアを分離します。CPUピン留め技術の包括的な一覧については、<<cpu-pinning-host,CPU Pinning on Host>>の章を参照してください。
+
+* `isolcpus`カーネル引数に`domain,nohz,managed_irq`フラグを追加します。フラグを指定しない場合、`isolcpus`は`domain`フラグのみを指定した場合と同等になります。これにより、カーネルタスクを含むスケジューリングから指定されたCPUが分離されます。`nohz`フラグは指定されたCPUでのスケジューラティックを停止し（CPU上で実行可能なタスクが1つだけの場合）、`managed_irq`フラグは指定されたCPUへの管理対象の外部（デバイス）割り込みのルーティングを回避します。NVMeデバイスのIRQラインはカーネルによって完全に管理されており、その結果、分離されていない（ハウスキーピング）コアにルーティングされることに注意してください。例えば、このセクションの最後に記載されているコマンドラインを実行すると、システムには4つのキュー（および管理/制御キュー）のみが割り当てられます。
+
++
+[,shell]
+----
+for I in $(grep nvme0 /proc/interrupts | cut -d ':' -f1); do cat /proc/irq/${I}/effective_affinity_list; done | column
+39      0       19      20      39
+----
++
+この動作により、分離されたコア上で実行される時間に敏感なアプリケーションがディスクI/Oによる中断を回避できる一方で、ストレージ向けのワークロードでは慎重な設計が求められる場合があります。
+
+* ティック（カーネルの周期的なタイマー割り込み）を調整します。
+** `skew_tick=1`: ティックが同時に発生することがあります。すべてのCPUが同時にタイマーティックを受け取るのではなく、`skew_tick=1`を使用すると、わずかに時間をずらして発生させることができます。これはシステムジッターの低減に役立ち、より一貫した低い割り込み応答時間を実現します（これはレイテンシに敏感なアプリケーションにとって不可欠な要件です）。
+** `nohz=on`: アイドル状態のCPUでの周期的なタイマーティックを停止します。
+** `nohz_full=<cpu-cores>`:リアルタイムアプリケーション専用の指定されたCPUでの周期的なタイマーティックを停止します。
+
+* `mce=off`を指定して、マシンチェック例外（MCE）処理を無効にします。MCEはプロセッサによって検出されるハードウェアエラーであり、これらを無効にすることで、不要なログ出力を回避できます。
+
+* `nowatchdog`を追加して、タイマーハード割り込みコンテキストで実行されるタイマーとして実装されているソフトロックアップウォッチドッグを無効にします。期限が切れると（つまり、ソフトロックアップが検出されると）、警告が出力され（ハード割り込みコンテキストで）、レイテンシターゲットが実行されます。期限が切れない場合でも、タイマーリストに追加されるため、すべてのタイマー割り込みのオーバーヘッドがわずかに増加します。このオプションはNMIウォッチドッグも無効にするため、NMIが干渉することはありません。
+
+* `nmi_watchdog=0`はNMI（ノンマスカブル割り込み）ウォッチドッグを無効にします。`nowatchdog`が使用されている場合、これは省略可能です。
+
+* RCU（Read-Copy-Update）は、共有データへの同時かつロックフリーなアクセスを多くのリーダーに対して可能にするカーネルメカニズムです。RCUコールバックは「猶予期間」の後にトリガーされる関数であり、以前のすべてのリーダーが終了したことを確認して、古いデータを安全に再利用できるようにします。私たちは、特に機密性の高いワークロードに対してRCUを微調整し、これらのコールバックを専用（固定）CPUからオフロードすることで、カーネル操作が重要で時間的制約のあるタスクに干渉するのを防ぎます。
+** RCUコールバックが実行されないように、`rcu_nocbs`で固定CPUを指定します。これは、リアルタイムワークロードのジッターとレイテンシを低減するのに役立ちます。
+** `rcu_nocb_poll`は、コールバック処理が必要かどうかを確認するために、ノーコールバックCPUに定期的にポーリングを行わせます。これにより、割り込みオーバーヘッドを削減できます。
+** `rcupdate.rcu_cpu_stall_suppress=1`は、負荷の高いリアルタイムシステムで誤検知となることがあるRCU CPUストール警告を抑制します。
+** `rcupdate.rcu_expedited=1`はRCU操作の猶予期間を短縮し、読み取り側のクリティカルセクションの応答性を高めます。
+** `rcupdate.rcu_normal_after_boot=1` rcu_expeditedと併用すると、システム起動後にRCUを通常（非高速化）の動作に戻すことができます。
+** `rcupdate.rcu_task_stall_timeout=0`はRCUタスクストール検出器を無効にし、長時間実行されるRCUタスクによる潜在的な警告やシステム停止を防ぎます。
+** `rcutree.kthread_prio=99`はRCUコールバックカーネルスレッドの優先度を最高値（99）に設定し、必要に応じてコールバックを迅速に処理するために確実にスケジュールされるようにします。
+
+* Metal^3^およびCluster APIがクラスターのプロビジョニング/デプロビジョニングを正常に行えるように、`ignition.platform.id=openstack`を追加します。これは、OpenStack Ironicに由来するMetal^3^ Pythonエージェントによって使用されます。
+
+* `net.ifnames=1`を介して https://documentation.suse.com/smart/network/html/network-interface-predictable-naming/index.html[ネットワークインタフェースの予測可能な命名]を有効にします。SUSE Linux Micro 6.2以降では、これがデフォルトで有効になっており、明示的な設定は不要です。6.2より前のバージョンでは、これをカーネル引数として明示的に設定する必要があります。これは、Management ClusterのMetal^3^ Helmチャートの`predictableNicNames`設定と一致しており、ダイレクトネットワークプロビジョニングが正しく機能するために必要です。SR-IOVを利用する場合、一貫したインターフェース命名も重要です。
+
+* `intel_pstate=passive`を削除する。このオプションは、`intel_pstate`が汎用cpufreqガバナーと連携するように設定しますが、これを機能させるために、副作用としてハードウェア管理のP-state（`HWP`）を無効にします。ハードウェアのレイテンシを削減するため、リアルタイムワークロードにはこのオプションは推奨されません。
+
+* `intel_idle.max_cstate=0 processor.max_cstate=1`を`idle=poll`に置き換えます。C-State遷移を回避するために、`idle=poll`オプションを使用してC-State遷移を無効にし、CPUを最高のC-Stateに維持します。`intel_idle.max_cstate=0`オプションは`intel_idle`を無効にするため、`acpi_idle`が使用され、その後`acpi_idle.max_cstate=1`がacpi_idleの最大C-stateを設定します。
+{x86-64}アーキテクチャでは、最初のACPI C-Stateは常に`POLL`ですが、`poll_idle()`関数を使用します。この関数は、定期的にクロックを読み取り、タイムアウト後に`do_idle()`でメインループを再起動するため、わずかなレイテンシが発生する可能性があります（これには`TIF_POLL`タスクフラグのクリアと設定も含まれます）。
+対照的に、`idle=poll`はタイトなループで実行され、タスクが再スケジュールされるのをビジーウェイトで待機します。これによりアイドル状態からの復帰レイテンシは最小限に抑えられますが、アイドルスレッドでCPUをフルスピードで動作させ続けるという代償が伴います。
+
+* BIOSでC1Eを無効にします。このオプションは、BIOSでC1E状態を無効にし、アイドル時にCPUがC1E状態に入るのを防ぐために重要です。C1E状態は、CPUがアイドル状態のときにレイテンシを引き起こす可能性のある低電力状態です。
+
+このドキュメントの残りの部分では、ヒュージページやIOMMUを含む追加のパラメータについて説明します。
+
+以下は、前述の調整を含む、32コアIntelサーバーのカーネル引数の例です。
+
+[,shell]
+----
+$ cat /proc/cmdline
+BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll
+----
+
+以下は、64コアAMDサーバーの別の設定例です。128個の論理プロセッサ（`0-127`）のうち、最初の8コア（`0-7`）はハウスキーピング用に指定され、残りの120コア（`8-127`）はアプリケーション用に固定されています。
+[,shell]
+----
+$ cat /proc/cmdline
+BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=575291cf-74e8-42cf-8f2c-408a20dc00b8 skew_tick=1 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 amd_iommu=on iommu=pt irqaffinity=0-7 isolcpus=domain,nohz,managed_irq,8-127 nohz_full=8-127 rcu_nocbs=8-127 mce=off nohz=on nowatchdog nmi_watchdog=0 nosoftlockup quiet rcu_nocb_poll rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll
+----
+
+[#cpu-pinning-host]
+== ホストでのCPU固定
+
+CPUピニング（プロセッサアフィニティとも呼ばれます）は、プロセスやスレッドを特定のCPUコアにバインドし、オペレーティングシステムのスケジューラによる移動を防ぐ手法です。プロセスが常に同じコアで実行されるようにすることで、そのコアのキャッシュメモリに残っているデータへのアクセスが高速になるという利点があります。この手法は、ハイパフォーマンスコンピューティング環境で一般的であり、パフォーマンスを劇的に向上させ、オーバーヘッドを削減します。
+
+=== TuneDによるCPUの分離
+`tuned`は、さまざまな定義済みプロファイルを使用してパフォーマンスを最適化するためにシステムの状態を監視するシステムチューニングツールです。重要な機能として、リアルタイムアプリケーションなどの特定のワークロードに対してCPUコアを分離する機能があります。これにより、OSがこれらのコアを使用することを防ぎ、レイテンシが増加する可能性を抑えます。
+
+この機能を有効にして設定するには、まず分離したいCPUコア用のプロファイルを作成する必要があります。この例では、64個のコアのうち、60個のコア（`1-30,33-62`）をアプリケーション専用とし、残りの4個のコアをハウスキーピング用に使用します。分離されたCPUの設計は、リアルタイムアプリケーションに大きく依存することに注意してください。
+
+[,shell]
+----
+$ echo "export tuned_params" >> /etc/grub.d/00_tuned
+
+$ echo "isolated_cores=1-30,33-62" >> /etc/tuned/cpu-partitioning-variables.conf
+
+$ tuned-adm profile cpu-partitioning
+Tuned (re)started, changes applied.
+----
+
+=== カーネル引数によるCPUの分離
+次に、CPUコアを分離し、CPU使用率に関するその他の重要なパラメータを設定するために、GRUBオプションを変更する必要があります。
+以下のオプションは、現在のハードウェア仕様に合わせてカスタマイズすることが重要です。
+
+[,shell]
+
+|===
+| パラメータ」 | 値 | description
+
+| isolcpus
+| domain,nohz,managed_irq,1-30,33-62
+| コア1～30および33～62を分離します。`domain`は、これらのCPUが分離ドメインの一部であることを示します。`nohz`は、これらの分離されたCPUがアイドル状態のときにティックレス動作を有効にし、割り込みを削減します。`managed_irq`は、固定されたCPUがIRQのターゲットにならないように分離します。これは、すでにほとんどのIRQをハウスキーピングコアに振り向けている`irqaffinity=0-7`を考慮に入れています。
+
+| skew_tick
+| 1
+| このオプションにより、カーネルは分離されたCPU間でタイマー割り込みをスキュー（ずらすこと）できます。
+
+| nohz
+| on
+| 有効にすると、カーネルの周期的なタイマー割り込み（「ティック」）が、アイドル状態になった任意のCPUコアで停止します。これは主にハウスキーピングCPU（`0,31,32,63`）にメリットがあり、電力を節約し、それらの汎用コアでの不要なウェイクアップを削減します。
+
+| nohz_full
+| 1-30,33-62
+| 分離されたコアの場合、これはCPUが単一のアクティブなタスクを実行しているときでもティックを停止します。これは、CPUをフルティックレスモード（または「dyntick」）で実行することを意味します。カーネルは、実際に必要な場合にのみタイマー割り込みを発生させます。
+
+| rcu_nocbs
+| 1-30,33-62
+| このオプションは、指定されたCPUコアからRCUコールバック処理をオフロードします。
+
+| rcu_nocb_poll
+| 
+| このオプションが設定されている場合、no-RCU-callback CPUは、他のCPUによって明示的にウェイクアップされるのではなく、コールバック処理が必要かどうかを定期的にポーリングして確認します。これにより、割り込みオーバーヘッドを削減できます。
+
+| irqaffinity
+| 0,31,32,63
+| このオプションにより、カーネルはハウスキーピングコアに対して割り込みを実行できるようになります。
+
+| アイドル
+| ポーリング
+| これによりアイドル状態からの復帰レイテンシは最小限に抑えられますが、アイドルスレッドでCPUをフルスピードで動作させ続けるという代償が伴います。
+
+| nmi_watchdog
+| 0
+| このオプションはNMIウォッチドッグのみを無効にします。`nowatchdog`が設定されている場合は、これを省略できます。
+
+| nowatchdog
+|
+| このオプションは、タイマーハード割り込みコンテキストで実行されるタイマーとして実装されているソフトロックアップウォッチドッグを無効にします。
+|===
+
+次のコマンドはGRUB設定を変更し、前述の変更を次回の起動時に適用します。
+
+`/etc/default/grub`ファイルを上記のパラメータで編集すると、ファイルは次のようになります。
+
+[,shell]
+----
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
+----
+
+GRUB設定を更新します。
+[,shell]
+----
+$ transactional-update grub.cfg
+$ reboot
+----
+
+再起動後にパラメータが適用されたことを確認するには、次のコマンドを使用してカーネルコマンドラインを確認できます。
+
+[,shell]
+----
+$ cat /proc/cmdline
+----
+
+CPU構成とネットワークパラメータを調整するために使用できる別のスクリプトがあり、基本的には次の手順を実行します。
+
+* CPUガバナーを`performance`に設定します。
+* 分離されたCPUへのタイマー移行を解除します。
+* kdaemonスレッドをハウスキーピングCPUに移行します。
+* 分離されたCPUのレイテンシを可能な限り低い値に設定します。
+* vmstatの更新を300秒に遅延させます。
+* 最適なパフォーマンスを得るためにネットワークチューニングパラメータを構成します。
+
+スクリプトは https://raw.githubusercontent.com/suse-edge/telco-cloud-examples/refs/heads/{release-tag-telco-cloud}/telco-examples/downstream-clusters/dhcp-less/eib/custom/files/performance-settings.sh[SUSE Telco Cloud Examplesリポジトリ]で入手できます。
+
+[#cpu-pinning-k8s]
+== KubernetesにおけるCPUピニング
+
+=== RKE2 Versions < v1.32
+RKE2設定ファイルを編集して、RKE2クラスターでCPUピニングを有効にします。`/etc/rancher/rke2/config.yaml`ファイルに以下のkubelet引数を追加します。`kubelet-reserved`および`system-reserved`引数でハウスキーピングCPUコアを必ず指定してください：
+
+[,yaml]
+----
+kubelet-arg:
+- "cpu-manager-policy=static"
+- "cpu-manager-policy-options=full-pcpus-only=true"
+- "cpu-manager-reconcile-period=0s"
+- "kubelet-reserved=cpu=0,31,32,63"
+- "system-reserved=cpu=0,31,32,63"
+----
+
+=== RKE2 Versions >= v1.32
+RKE2のバージョンがv1.32以上の場合、アップストリームのKubernetesの慣行に従い、コマンドライン引数を使用してkubeletを設定することはできません。CPUピニングを設定するには、kubelet設定ファイルを作成する必要があります。 https://documentation.suse.com/cloudnative/rke2/latest/en/install/configuration.html#_kubelet_configuration[RKE2ドキュメント]を参照してください。
+
+`01-cpu-pinning.conf`のような新しいkubelet設定ファイルを作成し、`/var/lib/rancher/rke2/agent/etc/kubelet.conf.d/`ディレクトリに配置します：
+
+[,yaml]
+----
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cpuManagerPolicy: static
+reservedSystemCPUs: 0,31,32,63
+topologyManagerPolicy: single-numa-node
+----
+
+設定変更を有効にするには、適切なRKE2サービス（サーバーまたはエージェント）の再起動が必要です。この操作により、ホスト上のRKE2サービスが一時的に中断されます。ノードタイプに応じて、以下のコマンドのいずれかのみを実行してください：
+
+[,shell]
+----
+# If the node is RKE2 agent
+systemctl restart rke2-agent
+# Else if the node is RKE2 server
+systemctl restart rke2-server
+----
+
+=== CPUピニングを活用したワークロードのデプロイ
+
+ワークロードで定義するリクエストと制限に応じて、kubeletで定義された`Static Policy`を使用してこの機能を使用する方法は3つあります。
+
+1. `BestEffort` QoSクラス:`CPU`のリクエストまたは制限を定義しない場合、ポッドはシステムで使用可能な最初の`CPU`にスケジュールされます。
++
+`BestEffort` QoSクラスを使用する例は次のとおりです。
++
+[,yaml]
+----
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+----
++
+2. `Burstable` QoSクラス:CPUのリクエストを定義したが制限と等しくない場合、またはCPUリクエストがない場合。
++
+`Burstable` QoSクラスを使用する例は次のとおりです。
++
+[,yaml]
+----
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    resources:
+      limits:
+        memory: "200Mi"
+      requests:
+        memory: "100Mi"
+----
++
+または
++
+[,yaml]
+----
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    resources:
+      limits:
+        memory: "200Mi"
+        cpu: "2"
+      requests:
+        memory: "100Mi"
+        cpu: "1"
+----
++
+3.  `Guaranteed` QoSクラス:CPUのリクエストを定義し、それが制限と等しい場合。
++
+`Guaranteed` QoSクラスを使用する例は次のとおりです。
++
+[,yaml]
+----
+spec:
+  containers:
+    - name: nginx
+      image: nginx
+      resources:
+        limits:
+          memory: "200Mi"
+          cpu: "2"
+        requests:
+          memory: "200Mi"
+          cpu: "2"
+----
+
+
+[#network-parameters]
+== ネットワークパラメータ
+
+ネットワークのチューニングは、通信ワークロードで最適なパフォーマンスを実現するために不可欠です。performance-settings.shスクリプトには、バッファサイズ、パケット処理、およびUDPパフォーマンスを最適化するために、さまざまなカーネルネットワークパラメータを設定する`configure_network_tuning`関数が含まれています。
+
+[NOTE]
+====
+提供されているネットワークチューニング値は、テストおよび検証済みの例です。ただし、これらは特定のユースケース、ワークロード要件、およびハードウェア構成に合わせて調整する必要があります。
+====
+
+次のネットワークパラメータがスクリプトによって構成されます。
+
+=== コアネットワークパラメータ
+
+* `net.core.rmem_max` (1342177280バイト):最大受信ソケットバッファサイズ。このパラメータは、任意のソケットでデータを受信するために割り当て可能なメモリの最大量を設定します。
+
+* `net.core.wmem_max` (516777216バイト):送信ソケットバッファの最大サイズ。このパラメータは、任意のソケットでデータを送信するために割り当てることができるメモリの最大量を設定します。
+
+* `net.core.rmem_default` (10000000バイト):受信ソケットバッファのデフォルトサイズ。これは、新しいソケットでデータを受信するための初期バッファサイズです。
+
+* `net.core.wmem_default` (10000000バイト):送信ソケットバッファのデフォルトサイズ。これは、新しいソケットでデータを送信するための初期バッファサイズです。
+
+* `net.core.netdev_max_backlog` (416384パケット):インターフェースがカーネルの処理能力を超える速度でパケットを受信したときに、入力側でキューに入れられるパケットの最大数。この値を増やすと、トラフィックのバースト時にパケットがドロップするのを防ぐのに役立ちます。
+
+* `net.core.optmem_max` (25165824 bytes):ソケットごとに許可される補助バッファの最大サイズ。これは、オプションメモリバッファのサイズに影響します。
+
+* `net.core.netdev_budget` (1024パケット):1回のsoftirq実行で処理できるパケットの最大数。これは、パケット処理中のCPU使用率を制御するのに役立ちます。
+
+=== UDP固有のパラメータ
+
+* `net.ipv4.udp_mem` (11416320 15221760 22832640 ページ):UDPによって使用されるメモリ量（ページ単位）を制御します。3つの値は以下を表します：
+** 最小しきい値これより下では、UDPに負荷はかかりません
+** 負荷しきい値:UDPがメモリ負荷の適用を開始します
+** 最大しきい値UDPの最大メモリページ数
+
+* `net.ipv4.udp_rmem_min` (16384バイト):UDPソケットの最小受信バッファサイズ。UDP受信のベースラインバッファサイズを確保します。
+
+* `net.ipv4.udp_wmem_min` (16384バイト):UDPソケットの最小送信バッファサイズ。UDP送信のベースラインバッファサイズを確保します。
+
+=== リアルタイムスケジューリング
+
+* `kernel.sched_rt_runtime_us` (-1):リアルタイムスロットリングメカニズムを無効にします。これを-1に設定すると、リアルタイムタスクに無制限のCPU時間が許可されます。これは、決定論的なレイテンシを必要とする通信ワークロードに不可欠です。
+
+[IMPORTANT]
+====
+これらのパラメータは、SUSE Telco Cloud Examplesリポジトリのperformance-settings.shスクリプトを使用すると自動的に構成されます。このスクリプトは、<<atip-automated-provisioning,Automated Provisioning>>セクションで説明されているように、イメージビルドプロセスに統合する必要があります。
+====
+
+
+[#cni-configuration]
+== CNI構成
+
+=== Cilium
+`Cilium`は、SUSE Telco CloudのデフォルトのCNIプラグインです。
+RKE2クラスターでCiliumをデフォルトのプラグインとして有効にするには、`/etc/rancher/rke2/config.yaml`ファイルに以下の構成が必要です。
+
+[,yaml]
+----
+cni:
+- cilium
+----
+
+これはコマンドライン引数でも指定できます。つまり、`/etc/systemd/system/rke2-server`ファイルのサーバー行に`--cni=cilium`を追加します。
+
+<<option2-sriov-helm>>で説明されている`SR-IOV`ネットワークをCiliumと共に使用するには、`multus`メタプラグインをデプロイします。`multus`が他のCNIよりも前にリストされていることを確認してください。
+
+[,yaml]
+----
+cni:
+- multus
+- cilium
+----
+
+=== Calico
+`Calico`は、Telco向け{product}のもう1つのCNIプラグインです。
+RKE2クラスターでCalicoをデフォルトのプラグインとして有効にするには、`/etc/rancher/rke2/config.yaml`ファイルに以下の設定が必要です。
+
+[,yaml]
+----
+cni:
+- calico
+----
+
+これはコマンドライン引数でも指定できます。つまり、`/etc/systemd/system/rke2-server`ファイルのサーバー行に`--cni=calico`を追加します。
+
+<<option2-sriov-helm>>で説明されている`SR-IOV`ネットワークをCalicoと共に使用するには、`multus`メタプラグインをデプロイします。`multus`が他のCNIよりも前にリストされていることを確認してください。
+
+[,yaml]
+----
+cni:
+- multus
+- calico
+----
+
+[NOTE]
+====
+CNIプラグインの詳細については、 https://docs.rke2.io/install/network_options[Network Options]を参照してください。
+====
+
+=== Bond CNI
+一般的に、ボンディングは複数のネットワークインタフェースを単一の論理的な「ボンドインタフェース」に集約する方法を提供します。これは通常、冗長なネットワークパスを導入してサービスの可用性を高めるために使用されますが、特定のボンドモードでは帯域幅を増やすためにも使用できます。
+Bond CNIプラグインとMultusを組み合わせて使用する場合、以下のCNIプラグインがサポートされています。
+
+* MACVLAN
+* ホストデバイス
+* SR-IOV
+
+==== MACVLANを使用したBond CNI
+MACVLANでBond CNIプラグインを使用するには、コンテナ内に2つの空きネットワークインタフェースが必要です。以下の例では「enp8s0」と「enp9s0」を使用します。まず、それらのネットワークアタッチメント定義を作成します。
+
+*NetworkAttachmentDefinition enp8s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp8s0-conf
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "macvlan",
+          "capabilities": { "ips": true },
+          "master": "enp8s0",
+          "mode": "bridge",
+          "ipam": {}
+        }, {
+          "capabilities": { "mac": true },
+          "type": "tuning"
+        }
+      ]
+    }'
+----
+
+*NetworkAttachmentDefinition enp9s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp9s0-conf
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "macvlan",
+          "capabilities": { "ips": true },
+          "master": "enp9s0",
+          "mode": "bridge",
+          "ipam": {}
+        }, {
+          "capabilities": { "mac": true },
+          "type": "tuning"
+        }
+      ]
+    }'
+----
+
+次に、ボンド自体のネットワークアタッチメント定義を追加します。
+
+*NetworkAttachmentDefinition bond*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: bond-net1
+spec:
+  config: '{
+  "type": "bond",
+  "cniVersion": "0.3.1",
+  "name": "bond-net1",
+  "mode": "active-backup",
+  "failOverMac": 1,
+  "linksInContainer": true,
+  "miimon": "100",
+  "mtu": 1500,
+  "links": [
+     {"name": "net1"},
+     {"name": "net2"}
+  ],
+  "ipam": {
+    "type": "static",
+    "addresses": [
+      {
+        "address": "192.168.200.100/24",
+        "gateway": "192.168.200.1"
+      }
+    ],
+    "subnet": "192.168.200.0/24",
+    "routes": [{
+      "dst": "0.0.0.0/0"
+    }]
+  }
+}'
+----
+
+ここでのIPアドレス割り当ては静的であり、ボンドのアドレスを/24ネットワーク上の「192.168.200.100」と定義し、ゲートウェイはネットワークの最初に使用可能なアドレスに配置されます。ボンドのネットワークアタッチメントでは、必要なボンドのタイプも定義します。この場合はアクティブバックアップです。
+
+このボンドを使用するには、Podがすべてのネットワークインタフェースを認識している必要があります。Pod定義の例は次のようになります。
+
+[,shell,subs="attributes"]
+----
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod
+  annotations:
+        k8s.v1.cni.cncf.io/networks: '[
+{"name": "enp8s0-conf",
+"interface": "net1"
+},
+{"name": "enp9s0-conf",
+"interface": "net2"
+},
+{"name": "bond-net1",
+"interface": "bond0"
+}]'
+spec:
+  restartPolicy: Never
+  containers:
+  - name: bond-test
+    image: alpine:latest
+    command:
+      - /bin/sh
+      - "-c"
+      - "sleep 60m"
+    imagePullPolicy: IfNotPresent
+----
+
+アノテーションがどのようにすべてのネットワークを参照し、インターフェース「enp8s0 -> net1」と「enp9s0->net2」の間のマッピングを定義しているかに注目してください。
+
+==== ホストデバイスでのBond CNI
+ホストデバイスでBond CNIプラグインを使用するには、ホスト上に2つの空きネットワークインタフェースが必要です。これらのネットワークインタフェースは、コンテナにマッピングされます。次の例では、「enp8s0」と「enp9s0」を使用します。まず、それらのネットワークアタッチメント定義を作成します。
+
+*NetworkAttachmentDefinition enp8s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp8s0-hostdev
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "host-device",
+          "name": "host0",
+          "device": "enp8s0",
+          "ipam": {}
+        }]
+    }'
+----
+
+*NetworkAttachmentDefinition enp9s0*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: enp9s0-hostdev
+spec: 
+  config: '{
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "host-device",
+          "name": "host0",
+          "device": "enp9s0",
+          "ipam": {}
+        }]
+    }'
+----
+
+この後、ボンド自体のネットワークアタッチメント定義を追加します。これはMACVLANのユースケースと似ています。
+
+*NetworkAttachmentDefinition bond*
+
+[,shell,subs="attributes"]
+----
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: bond-net1
+spec:
+  config: '{
+  "type": "bond",
+  "cniVersion": "0.3.1",
+  "name": "bond-net1",
+  "mode": "active-backup",
+  "failOverMac": 1,
+  "linksInContainer": true,
+  "miimon": "100",
+  "mtu": 1500,
+  "links": [
+     {"name": "net1"},
+     {"name": "net2"}
+  ],
+  "ipam": {
+    "type": "static",
+    "addresses": [
+      {
+        "address": "192.168.200.100/24",
+        "gateway": "192.168.200.1"
+      }
+    ],
+    "subnet": "192.168.200.0/24",
+    "routes": [{
+      "dst": "0.0.0.0/0"
+    }]
+  }
+}'
+----
+
+ここでのIPアドレスの割り当ては静的であり、ボンドのアドレスを/24ネットワーク上の「192.168.200.100」として定義し、ゲートウェイはネットワークの最初に使用可能なアドレスに配置されます。ボンドのネットワークアタッチメントで、ボンドのタイプを定義します。この場合はアクティブ-バックアップです。
+
+このボンドを使用するには、podがすべてのインターフェースを認識している必要があります。ホストデバイスを使用したボンドのpod定義の例は、次のようになります。
+
+[,shell,subs="attributes"]
+----
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod
+  annotations:
+        k8s.v1.cni.cncf.io/networks: '[
+{"name": "enp8s0-hostdev",
+"interface": "net1"
+},
+{"name": "enp9s0-hostdev",
+"interface": "net2"
+},
+{"name": "bond-net1",
+"interface": "bond0"
+}]'
+spec:
+  restartPolicy: Never
+  containers:
+  - name: bond-test
+    image: alpine:latest
+    command:
+      - /bin/sh
+      - "-c"
+      - "sleep 60m"
+    imagePullPolicy: IfNotPresent
+----
+
+==== SR-IOVでのボンドCNI
+SR-IOVでボンドCNIを使用するのは非常に簡単です。SR-IOVのセットアップ方法の詳細については、<<sriov>>を参照してください。そこに記載されているように、`SriovNetworkNodePolicies`を作成して、`resourceNames`や仮想関数の数などを定義する必要があります。`resourceNames`は、ポッド定義でインターフェースとして使用される`SriovNetwork`によって使用されます。ボンドの定義は、MACVLANおよびホストデバイスの場合とまったく同じです。
+
+[NOTE]
+====
+SR-IOVでのボンドCNIは、カーネルドライバーを使用するSR-IOV仮想関数（VF）にのみ適用されます。DPDKワークロードで使用されるようなユーザースペースドライバーVFは、ボンドCNIでボンディングすることはできません。
+====
+
+[#sriov]
+== SR-IOV
+
+SR-IOV（Single Root I/O Virtualization）を使用すると、ネットワークアダプターなどの単一の物理デバイスが、そのリソースを複数の`PCIe`ハードウェア関数に分離できます。これにより、さまざまなアプリケーションがリソースに直接アクセスできるようになります。
+
+クラスターに`SR-IOV`をデプロイするために、2つの異なる方法を提供しています。
+
+* <<option1-sriov-deviceplugin>>:このメソッドは、ネットワークデバイスとvRANアクセラレータの両方をサポートしています。
+* <<option2-sriov-helm>>:この自動化されたメソッドにより、デプロイメントが簡素化されます。このメソッドはネットワークデバイス専用です。
+
+ネットワークデバイスにNetwork Operatorを使用し、vRANアクセラレータにDevice Pluginを使用するというように、両方のソリューションが必要な稀なケースでは、それらを別々のKubernetesネームスペースにデプロイする必要があります。この分離は、2つのデプロイメント間の競合を防ぐために不可欠です。
+
+[#option1-sriov-deviceplugin]
+=== オプション1:SR-IOV Network Device Plugin DaemonsetおよびconfigMap
+
+https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin[SR-IOV Network Device Plugin]は、PCI物理機能（PF）やその仮想機能（VF）などのネットワークリソースをKubernetesホスト上で検出し、アドバタイズします。
+
+* デバイスプラグイン用のconfig mapを準備します
+
+SR-IOVリソースプールを定義するconfig mapを作成する必要があります。`lspci`コマンドを実行して情報を取得します。
+
+[,shell]
+----
+$ lspci | grep -i acc
+07:00.0 Processing accelerators: Intel Corporation Device 57c2
+07:00.1 Processing accelerators: Intel Corporation Device 57c3
+07:00.2 Processing accelerators: Intel Corporation Device 57c3
+07:00.3 Processing accelerators: Intel Corporation Device 57c3
+07:00.4 Processing accelerators: Intel Corporation Device 57c3
+07:00.5 Processing accelerators: Intel Corporation Device 57c3
+07:00.6 Processing accelerators: Intel Corporation Device 57c3
+07:00.7 Processing accelerators: Intel Corporation Device 57c3
+07:01.0 Processing accelerators: Intel Corporation Device 57c3
+07:01.1 Processing accelerators: Intel Corporation Device 57c3
+07:01.2 Processing accelerators: Intel Corporation Device 57c3
+07:01.3 Processing accelerators: Intel Corporation Device 57c3
+07:01.4 Processing accelerators: Intel Corporation Device 57c3
+07:01.5 Processing accelerators: Intel Corporation Device 57c3
+07:01.6 Processing accelerators: Intel Corporation Device 57c3
+07:01.7 Processing accelerators: Intel Corporation Device 57c3
+07:02.0 Processing accelerators: Intel Corporation Device 57c3
+0a:00.0 Processing accelerators: Intel Corporation Device 57c2
+
+$ lspci | grep -i net
+19:00.0 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
+19:00.1 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
+19:00.2 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
+19:00.3 Ethernet controller: Broadcom Inc. and subsidiaries BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet (rev 11)
+51:00.0 Ethernet controller: Intel Corporation Ethernet Controller E810-C for QSFP (rev 02)
+51:00.1 Ethernet controller: Intel Corporation Ethernet Controller E810-C for QSFP (rev 02)
+51:01.0 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:01.1 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:01.2 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:01.3 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:11.0 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:11.1 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:11.2 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+51:11.3 Ethernet controller: Intel Corporation Ethernet Adaptive Virtual Function (rev 02)
+----
+
+SR-IOV Device Pluginは、Kubernetesが公開すべきハードウェアリソースを定義するJSONファイルを含むconfigMapを使用します。この構成は、2つのコアとなる概念、`selectors`（ハードウェア検出用）と`resources`（Kubernetes公開用）に基づいています。
+
+`resource`とは、Podが消費する名前付きエンティティです（例: `rancher.io/intel_fec_5g`）。リソースは、次の2つのタイプのいずれかとして定義できます。
+
+* `accelerator`:vRANアクセラレータカード（ACC100/vRAN Boostなど）に使用されます。
+* `netdevice`:標準のネットワークインタフェース（NIC）に使用されます。
+
+ノード上のハードウェアをフィルタリングするために`selectors`を使用してターゲットデバイスを定義します。
+
+* `vendors`:`8086` (Intel)
+* `devices`:`57c3` (FEC VF)、`1889` (NIC VF)
+* `drivers`: `vfio-pci`
+* `pfNames`: `eno16595np0` (物理インターフェイス名)
+
+ネットワークカードの場合、物理機能（PF）から仮想機能（VF）のサブセットを選択することもできます。
+
+* `pfNames`: `["eth1#1,2,3,4,5,6"]` または `[eth1#1-6]`
+
+ポッドがデバイスを要求できるようにするには、各リソースに名前を付ける必要があります。この名前は、プレフィックスと名前で構成されます。
+
+* `resourceName`: `pci_sriov_net_bh_dpdk`
+* `resourcePrefix`: `rancher.io`
+
+ポッドは、結合されたリソース名 `rancher.io/pci_sriov_net_bh_dpdk` を要求します。
+
+[NOTE]
+====
+このドキュメントには、すべての可能なセレクターが記載されているわけではありません。リソースの種類によって、使用するセレクターのセットが異なります。詳細については、 https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin[SR-IOV Network Device Pluginリポジトリ]を参照してください。
+====
+
+以下のConfigMapは、vRANアクセラレータカード（FEC）用に1つ、2つの異なるNICポート用に2つ、合計3つのリソースを作成する例です。
+
+FECカードの場合は、まずデバイスIDとVFIOトークンを取得する必要があります。前提条件については、<<acceleration>>の章の手順に従ってください。
+
+[,yaml]
+----
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sriovdp-config
+  namespace: kube-system
+data:
+  config.json: |
+    {
+        "resourceList": [
+            {
+                "resourcePrefix": "rancher.io",
+                "resourceName": "intel_fec_5g",
+                "deviceType": "accelerator",
+                "selectors": {
+                    "vendors": ["8086"],
+                    "devices": ["57c3"]
+                },
+                "additionalInfo": {
+                      "*": {
+                        "VFIO_TOKEN": "00112233-4455-6677-8899-aabbccddeeff"
+                      }
+                  }
+            },
+            {
+                "resourcePrefix": "rancher.io",
+                "resourceName": "intel_sriov_odu",
+                "deviceType": "netdevice",
+                "selectors": {
+                    "vendors": ["8086"],
+                    "devices": ["1889"],
+                    "drivers": ["vfio-pci"],
+                    "pfNames": ["eno16595np0"]
+                }
+            },
+            {
+                "resourcePrefix": "rancher.io",
+                "resourceName": "intel_sriov_oru",
+                "deviceType": "netdevice",
+                "selectors": {
+                    "vendors": ["8086"],
+                    "devices": ["1889"],
+                    "drivers": ["vfio-pci"],
+                    "pfNames": ["eno16605np1"]
+                }
+            }
+        ]
+    }
+----
+
+* デバイスプラグインをデプロイするために`daemonset`ファイルを準備します。
+
+デバイスプラグインは複数のアーキテクチャ（`arm`、`amd`、`ppc64le`）をサポートしているため、アーキテクチャごとに複数の`daemonset`をデプロイすることで、同じファイルを異なるアーキテクチャに使用できます。
+
+[,yaml]
+----
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sriov-device-plugin
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-sriov-device-plugin-amd64
+  namespace: kube-system
+  labels:
+    tier: node
+    app: sriovdp
+spec:
+  selector:
+    matchLabels:
+      name: sriov-device-plugin
+  template:
+    metadata:
+      labels:
+        name: sriov-device-plugin
+        tier: node
+        app: sriovdp
+    spec:
+      hostNetwork: true
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      serviceAccountName: sriov-device-plugin
+      containers:
+      - name: kube-sriovdp
+        image: registry.suse.com/edge/3.7/sriov-network-device-plugin:v3.10.0
+        imagePullPolicy: IfNotPresent
+        args:
+        - --log-dir=sriovdp
+        - --log-level=10
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "40Mi"
+          limits:
+            cpu: 1
+            memory: "200Mi"
+        volumeMounts:
+        - name: devicesock
+          mountPath: /var/lib/kubelet/
+          readOnly: false
+        - name: log
+          mountPath: /var/log
+        - name: config-volume
+          mountPath: /etc/pcidp
+        - name: device-info
+          mountPath: /var/run/k8s.cni.cncf.io/devinfo/dp
+      volumes:
+        - name: devicesock
+          hostPath:
+            path: /var/lib/kubelet/
+        - name: log
+          hostPath:
+            path: /var/log
+        - name: device-info
+          hostPath:
+            path: /var/run/k8s.cni.cncf.io/devinfo/dp
+            type: DirectoryOrCreate
+        - name: config-volume
+          configMap:
+            name: sriovdp-config
+            items:
+            - key: config.json
+              path: config.json
+----
+
+* configMapと`daemonset`を適用すると、デバイスプラグインがデプロイされ、インターフェースが検出されてポッドで使用可能になります。
++
+[,shell]
+----
+$ kubectl get pods -n kube-system | grep sriov
+kube-system  kube-sriov-device-plugin-amd64-twjfl  1/1  Running  0  2m
+----
++
+* すべてのノードで、インターフェースが検出され、ポッドで使用可能になったかどうかを確認します。
++
+----
+$ kubectl get nodes -o json | jq '.items[] | {name: .metadata.name, allocatable: .status.allocatable}'
+{
+  "name": "node1.suse.edge.com",
+  "allocatable": {
+      "cpu": "64",
+      "ephemeral-storage": "256196109726",
+      "hugepages-1Gi": "40Gi",
+      "hugepages-2Mi": "0",
+      "rancher.io/intel_fec_5g": "16",
+      "rancher.io/intel_sriov_odu": "4",
+      "rancher.io/intel_sriov_oru": "4",
+      "memory": "221396384Ki",
+      "pods": "110"
+  }
+}
+----
++
+* `FEC`アクセラレータのresourceNameは`rancher.io/intel_fec_5g`であり、16個のVFが使用可能です。
+* NICカードのresourceNameは`rancher.io/intel_sriov_odu`および`rancher.io/intel_sriov_oru`です。各リソースは4個のVFを提供します。
+
+[IMPORTANT]
+====
+Kubernetesノードでインターフェースが割り当て可能なリソースとして検出されない場合は、この問題を解決することが不可欠です。一般的な原因の1つはconfigMapの仕様が正しくないことであるため、configMapとそのセレクターを確認することをお勧めします。
+====
+
+[#option2-sriov-helm]
+=== オプション2（推奨）：SR-IOV Network Operator 
+
+* Helmが存在しない場合は取得します。
+
+[,shell,subs="attributes"]
+----
+$ curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+----
+
+* `sriov-network-operator`ネームスペースにSR-IOV Network Operatorをインストールします。
+
+[,shell,subs="attributes"]
+----
+helm install sriov-crd oci://registry.suse.com/edge/charts/sriov-crd -n sriov-network-operator
+helm install sriov-network-operator oci://registry.suse.com/edge/charts/sriov-network-operator -n sriov-network-operator
+----
+
+* デプロイされたCRDとポッドを確認します。
+
+[,shell]
+----
+$ kubectl get crd
+$ kubectl -n sriov-network-operator get pods
+----
+
+* SR-IOVラベルがノードに適用されているかどうかを確認します。
+
+すべてのリソースが実行されると、ラベルがノードに自動的に表示されます。
+
+[,shell]
+----
+$ kubectl get nodes -oyaml | grep feature.node.kubernetes.io/network-sriov.capable
+
+feature.node.kubernetes.io/network-sriov.capable: "true"
+----
+
+* `daemonset` を確認して、新しい `sriov-network-config-daemon` と `sriov-rancher-nfd-worker` がアクティブで準備完了になっていることを確認します。
+
+[,shell]
+----
+$ kubectl get daemonset -n sriov-network-operator
+NAMESPACE             NAME                            DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR                                           AGE
+sriov-network-operator   sriov-network-config-daemon     1         1         1       1            1           feature.node.kubernetes.io/network-sriov.capable=true   45m
+sriov-network-operator   sriov-rancher-nfd-worker        1         1         1       1            1           <none>                                                  45m
+----
+
+数分でノードが検出され、`SR-IOV` 機能で完全に構成されます。更新には最大10分かかる場合があります。
+
+[,shell]
+----
+$ kubectl get sriovnetworknodestates -A
+NAMESPACE             NAME     AGE
+sriov-network-operator   xr11-2   83s
+----
+
+* インターフェイスが検出されたかどうかを確認します。
+
+検出されたインターフェイスは、ネットワークデバイスのPCIアドレスである必要があります。ホストで `lspci` コマンドを使用して、この情報を確認します。
+
+[,shell]
+----
+$ kubectl get sriovnetworknodestates -n sriov-network-operator -oyaml
+apiVersion: v1
+items:
+- apiVersion: sriovnetwork.openshift.io/v1
+  kind: SriovNetworkNodeState
+  metadata:
+    creationTimestamp: "2023-06-07T09:52:37Z"
+    generation: 1
+    name: xr11-2
+    namespace: sriov-network-operator
+    ownerReferences:
+    - apiVersion: sriovnetwork.openshift.io/v1
+      blockOwnerDeletion: true
+      controller: true
+      kind: SriovNetworkNodePolicy
+      name: default
+      uid: 80b72499-e26b-4072-a75c-f9a6218ec357
+    resourceVersion: "356603"
+    uid: e1f1654b-92b3-44d9-9f87-2571792cc1ad
+  spec:
+    dpConfigVersion: "356507"
+  status:
+    interfaces:
+    - deviceID: "1592"
+      driver: ice
+      eSwitchMode: legacy
+      linkType: ETH
+      mac: 40:a6:b7:9b:35:f0
+      mtu: 1500
+      name: eno16595np0
+      pciAddress: "0000:51:00.0"
+      totalvfs: 128
+      vendor: "8086"
+    - deviceID: "1592"
+      driver: ice
+      eSwitchMode: legacy
+      linkType: ETH
+      mac: 40:a6:b7:9b:35:f1
+      mtu: 1500
+      name: eno16605np1
+      pciAddress: "0000:51:00.1"
+      totalvfs: 128
+      vendor: "8086"
+    syncStatus: Succeeded
+kind: List
+metadata:
+  resourceVersion: ""
+----
+
+[NOTE]
+====
+インターフェイスがここで検出されない場合は、次のConfigMapに存在することを確認してください。
+
+[,shell]
+----
+$ kubectl get cm supported-nic-ids -oyaml -n sriov-network-operator
+----
+
+デバイスがリストにない場合は、ConfigMapを編集して、検出される正しい値を追加してください。次に、各ノードの `sriov-network-config-daemon` ポッドを再起動して、更新を有効にします。
+====
+
+* `SriovNetworkNodePolicy` を構成するために `VFs` を作成します。
+
+このポリシーは、ポッドで使用するためのリソース `intelnicsDpdk` を作成します。また、`vfio-pci` ドライバーを指定されたPCIデバイスにバインドし、MTUサイズ1500の8つのVFを作成します。
+
+[NOTE]
+====
+`resourceName` フィールドには特殊文字を含めることはできず、クラスター全体で一意である必要があります。
+この例では、DPDKがSR-IOVと組み合わせて使用されるため、`deviceType: vfio-pci` を使用します。DPDKを使用しない場合は、`deviceType: netdevice`（デフォルト値）を設定してください。
+====
+
+[,yaml]
+----
+apiVersion: sriovnetwork.openshift.io/v1
+kind: SriovNetworkNodePolicy
+metadata:
+  name: policy-dpdk
+  namespace: sriov-network-operator
+spec:
+  nodeSelector:
+    feature.node.kubernetes.io/network-sriov.capable: "true"
+  resourceName: intelnicsDpdk
+  deviceType: vfio-pci
+  numVfs: 8
+  mtu: 1500
+  nicSelector:
+    deviceID: "1592"
+    vendor: "8086"
+    rootDevices:
+    - 0000:51:00.0
+----
+
+* すべてのノードで構成を検証します。
+
+定義済みの resourcePrefix `rancher.io` を使用すると、8つのVFを持つリソース `rancher.io/intelnicsDpdk` が検出されるはずです。
+
+[,shell]
+----
+$ kubectl get nodes -o jsonpath='{"items": [ { "name": @.metadata.name, "allocatable": @.status.allocatable } ]}' | jq
+{
+  "name": "node1.suse.edge.com",
+  "allocatable": {
+      "cpu": "64",
+      "ephemeral-storage": "256196109726",
+      "hugepages-1Gi": "60Gi",
+      "hugepages-2Mi": "0",
+      "rancher.io/intel_fec_5g": "16",
+      "memory": "200424836Ki",
+      "pods": "110",
+      "rancher.io/intelnicsDpdk": "8"
+  }
+}
+----
+
+* （オプション）`sriovnetwork` を作成します。
+
+この手順はオプションであり、カスタムネットワーク定義の場合にのみ必要です。以前に作成したノードポリシーにバインドする `resourceName` を指定します。
+
+`networkNamespace` が設定されている場合、ネットワークはそのネームスペース内のポッドに公開されます。それ以外の場合、ネットワークはNetwork Operatorのインストールネームスペースで使用可能になります。
+
+[,yaml]
+----
+apiVersion: sriovnetwork.openshift.io/v1
+kind: SriovNetwork
+metadata:
+  name: network-dpdk
+  namespace: sriov-network-operator        # where SRIOV Operator is installed
+spec:
+  ipam: |
+    {
+      "type": "host-local",
+      "subnet": "192.168.0.0/24",
+      "rangeStart": "192.168.0.20",
+      "rangeEnd": "192.168.0.60",
+      "routes": [{
+        "dst": "0.0.0.0/0"
+      }],
+      "gateway": "192.168.0.1"
+    }
+  vlan: 500
+  resourceName: intelnicsDpdk
+  networkNamespace: default         # where workloads are deployed
+----
+
+* 更新が成功すると、ターゲットクラスターにNetworkAttachmentDefinition（NAD）が作成されます。
+
+[,shell]
+----
+$ kubectl get net-attach-def -A -oyaml
+
+apiVersion: v1
+items:
+- apiVersion: k8s.cni.cncf.io/v1
+  kind: NetworkAttachmentDefinition
+  metadata:
+    annotations:
+      k8s.v1.cni.cncf.io/resourceName: rancher.io/intelnicsDpdk
+    creationTimestamp: "2023-06-08T11:22:27Z"
+    generation: 1
+    name: network-dpdk
+    namespace: default
+    resourceVersion: "13124"
+    uid: df7c89f5-177c-4f30-ae72-7aef3294fb15
+  spec:
+    config: '{ "cniVersion":"0.4.0", "name":"network-dpdk","type":"sriov","vlan":500,"vlanQoS":0,"ipam":{"type":"host-local","subnet":"192.168.0.0/24","rangeStart":"192.168.0.10","rangeEnd":"192.168.0.60","routes":[{"dst":"0.0.0.0/0"}],"gateway":"192.168.0.1"}
+      }'
+kind: List
+metadata:
+  resourceVersion: ""
+----
+
+ワークロードポッドは、リソース名 `rancher.io/intelnicsDpdk` を使用してネットワークインターフェイスのVFを利用できます。
+
+
+[#dpdk]
+== DPDK
+
+`DPDK`（Data Plane Development Kit）は、高速なパケット処理のためのライブラリおよびドライバーのセットです。これは、さまざまなCPUアーキテクチャで実行されるパケット処理ワークロードを高速化するために使用されます。
+DPDKには、データプレーンライブラリと、以下に対する最適化されたネットワークインタフェースコントローラ（`NIC`）ドライバーが含まれています。
+
+1. キューマネージャーは、ロックレスキューを実装します。
+2. バッファーマネージャーは、固定サイズのバッファーを事前割り当てします。
+3. メモリーマネージャーは、メモリー内のオブジェクトプールを割り当て、リングを使用して空きオブジェクトを格納します。また、オブジェクトがすべての `DRAM` チャネルに均等に分散されるようにします。
+4. ポーリングモードドライバー（`PMD`）は、非同期通知なしで動作するように設計されており、オーバーヘッドを削減します。
+5. パケットフレームワークは、パケット処理の開発を支援するライブラリのセットです。
+
+以下の手順では、`DPDK`を有効にする方法と、`DPDK`インターフェイスで使用する`NICs`から`VFs`を作成する方法を説明します。
+
+* `DPDK`パッケージをインストールします。
+
+[,shell]
+----
+$ transactional-update pkg install dpdk dpdk-tools libdpdk-25
+$ reboot
+----
+
+
+* カーネルパラメータ:
+
+DPDKを使用するには、いくつかのドライバーを使用してカーネル内の特定のパラメーターを有効にします。
+
+|===
+| パラメータ」 | 値 | description
+
+| iommu
+| pt
+| このオプションは、DPDKインターフェイス用の`vfio`ドライバーの使用を有効にします。
+
+| intel_iommu or amd_iommu
+| on
+| このオプションは、`vfio`用の`VFs`の使用を有効にします。
+|===
+
+パラメーターを有効にするには、それらを`/etc/default/grub`ファイルに追加します。
+
+[,shell]
+----
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
+----
+
+GRUB構成を更新し、システムを再起動して変更を適用します。
+
+[,shell]
+----
+$ transactional-update grub.cfg
+$ reboot
+----
+
+* `vfio-pci`カーネルモジュールをロードし、NICで`SR-IOV`を有効にします。最初の引数はSR-IOVをサポートする`vfio-pci`ドライバーを示し、2番目の引数はPCIデバイスがアイドル状態のときに低電力状態になるのを防ぎます。
+
+[,shell]
+----
+$ modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
+----
+
+* `NICs`からいくつかの仮想機能（`VFs`）を作成します。
+
+`VFs`用に、例えば2つの異なる`NICs`用に作成するには、以下のコマンドが必要です。
+
+[,shell]
+----
+$ echo 4 > /sys/bus/pci/devices/0000:51:00.0/sriov_numvfs
+$ echo 4 > /sys/bus/pci/devices/0000:51:00.1/sriov_numvfs
+----
+
+* 新しいVFを`vfio-pci`ドライバーにバインドします。
+
+[,shell]
+----
+$ dpdk-devbind.py -b vfio-pci 0000:51:01.0 0000:51:01.1 0000:51:01.2 0000:51:01.3 \
+                              0000:51:11.0 0000:51:11.1 0000:51:11.2 0000:51:11.3
+----
+
+* 構成が正しく適用されていることを確認します。
+
+[,shell]
+----
+$ dpdk-devbind.py -s
+
+Network devices using DPDK-compatible driver
+============================================
+0000:51:01.0 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:01.1 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:01.2 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:01.3 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:01.0 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:11.1 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:21.2 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+0000:51:31.3 'Ethernet Adaptive Virtual Function 1889' drv=vfio-pci unused=iavf,igb_uio
+
+Network devices using kernel driver
+===================================
+0000:19:00.0 'BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet 1751' if=eno8303np0 drv=bnxt_en unused=igb_uio,vfio-pci *Active*
+0000:19:00.1 'BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet 1751' if=eno8403np1 drv=bnxt_en unused=igb_uio,vfio-pci
+0000:19:00.2 'BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet 1751' if=eno8503np2 drv=bnxt_en unused=igb_uio,vfio-pci
+0000:19:00.3 'BCM57504 NetXtreme-E 10Gb/25Gb/40Gb/50Gb/100Gb/200Gb Ethernet 1751' if=eno8603np3 drv=bnxt_en unused=igb_uio,vfio-pci
+0000:51:00.0 'Ethernet Controller E810-C for QSFP 1592' if=eth13 drv=ice unused=igb_uio,vfio-pci
+0000:51:00.1 'Ethernet Controller E810-C for QSFP 1592' if=rename8 drv=ice unused=igb_uio,vfio-pci
+----
+
+
+[#acceleration]
+== vRANアクセラレーション（`Intel ACC100/VRB1/VRB2`）
+
+通信サービスプロバイダーが4Gから5Gネットワークへ移行するにつれ、多くのプロバイダーが、より高いチャネル容量と、エッジベースのサービスやアプリケーションの容易な展開を実現するために、仮想化無線アクセスネットワーク（vRAN）アーキテクチャを採用しています。vRANソリューションは、リアルタイムトラフィックの量やネットワーク上の需要に基づいて容量を増減できる柔軟性を備え、低遅延サービスを提供するのに理想的な位置にあります。
+
+最も計算集約的な4Gおよび5Gワークロードの1つが、RAN階層1（`L1`）`FEC`であり、これは信頼性の低い、またはノイズの多い通信チャネルでのデータ伝送エラーを解決します。`FEC`テクノロジーは、4Gまたは5Gデータ内の限られた数のエラーを検出および修正し、再送信の必要性を排除します。`FEC`アクセラレーショントランザクションにはセル状態情報が含まれていないため、簡単に仮想化でき、プーリングの利点と容易なセル移行が可能になります。
+
+歴史的に、Intelはレイヤー1 FECアルゴリズムを迅速に実行し、メインCPUのホスト処理能力を解放するために、ACC100 vRANアクセラレータカードを提供してきました。Intelはその後、Sapphire Rapidsを皮切りに、このテクノロジーを`Intel vRAN Boost`（VRB）という名称で新しいCPUに直接統合しました。Intel vRAN BoostはCPU自体でオフロードアクセラレーターとして機能し、個別のハードウェアカードを不要にします。本セクションでは、ワークロードがACC100またはIntel vRAN Boostを活用するためのSUSE Telco Cloudの構成について詳しく説明します。
+
+
+=== カーネルパラメータ
+
+`vRAN`アクセラレーションを有効にするには、以下のカーネルパラメータを有効にする必要があります（まだ存在しない場合）。
+
+|===
+| パラメータ」 | 値 | description
+
+| iommu
+| pt
+| このオプションは、DPDKインターフェースでのvfioの使用を有効にします。
+
+| intel_iommu or amd_iommu
+| on
+| このオプションは、VFでのvfioの使用を有効にします。
+|===
+
+GRUBファイル`/etc/default/grub`を変更して、カーネルコマンドラインに追加します。
+
+[,shell]
+----
+GRUB_CMDLINE_LINUX="BOOT_IMAGE=/boot/vmlinuz-6.4.0-9-rt root=UUID=77b713de-5cc7-4d4c-8fc6-f5eca0a43cf9 skew_tick=1 rd.timeout=60 rd.retry=45 console=ttyS1,115200 console=tty0 default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0 ignition.platform.id=openstack net.ifnames=1 intel_iommu=on iommu=pt irqaffinity=0,31,32,63 isolcpus=domain,nohz,managed_irq,1-30,33-62 nohz_full=1-30,33-62 nohz=on mce=off nosoftlockup nowatchdog nmi_watchdog=0 quiet rcu_nocb_poll rcu_nocbs=1-30,33-62 rcupdate.rcu_cpu_stall_suppress=1 rcupdate.rcu_expedited=1 rcupdate.rcu_normal_after_boot=1 rcupdate.rcu_task_stall_timeout=0 rcutree.kthread_prio=99 security=selinux selinux=1 idle=poll"
+----
+
+GRUB構成を更新し、システムを再起動して変更を適用します。
+
+[,shell]
+----
+$ transactional-update grub.cfg
+$ reboot
+----
+
+再起動後にパラメータが適用されていることを確認するには、コマンドラインを確認します。
+
+[,shell]
+----
+$ cat /proc/cmdline
+----
+
+=== FECアクセラレータでのSR-IOVの構成
+
+* vRANアクセラレーションを有効にするために`vfio-pci`カーネルモジュールをロードします。最初の引数はSR-IOVをサポートするための`vfio-pci`モジュールを示し、2番目の引数はPCIデバイスがアイドル状態のときに低電力状態になるのを防ぎます。
+
+[,shell]
+----
+$ modprobe vfio-pci enable_sriov=1 disable_idle_d3=1
+----
+
+* FECアクセラレータのPCIデバイスアドレスを取得します。
+
+[,shell]
+----
+$ lspci -DPPnn | grep -i acc
+0000:07:00.0 Processing accelerators [1200]: Intel Corporation Device [8086:57c2]
+0000:0a:00.0 Processing accelerators [1200]: Intel Corporation Device [8086:57c2]
+
+----
+
+* 物理インターフェース（`PF`）を`vfio-pci`ドライバーにバインドします。
+
+[,shell]
+----
+$ dpdk-devbind.py -b vfio-pci 0000:07:00.0
+----
+
+* 物理インターフェース（`PF`）から仮想関数（`VFs`）を作成します。
+
+アクセラレータカードの最大`VF`容量を確認します。次に、最大数を超えない範囲で、希望する数のVFを公開するようにカードを構成します。この例では、カードを16 VFのフル容量で構成します。
+
+[,shell]
+----
+$ cat /sys/bus/pci/devices/0000:07:00.0/sriov_totalvfs
+64
+$ echo 16 > /sys/bus/pci/devices/0000:07:00.0/sriov_numvfs
+----
+
+* アクセラレータカードとその仮想関数を4Gまたは5Gプロファイルで構成します。その際、正確なIntelプロセッサ世代に応じて適切な`vRAN Boost`デバイスタイプを選択してください。Sapphire Rapids Edge Enhanced（SPR-EE）の場合は`VRB1`（旧称ACC200）、Granite Rapids-D（GNR-D）の場合は`VRB2`を選択します。一意のVFトークン（UUID）を提供する必要があります（ワークロードは、このVFトークンを使用してカードのFECアクセラレータ機能を利用します）。
+
+[WARNING]
+====
+`pf-bb-config`からの非推奨事項：VRB2デバイスタイプをサポートする新しいRPMリリースでは、設定例ファイルが`/usr/share/pf-bb-config/examples`の場所にインストールされるようになりました。古い`/opt/pf-bb-config/`パスも引き続きサポートされますが、将来のリリースで削除される予定です。新しいパスを反映するようにスクリプトとドキュメントを更新してください（以下の例のように実行してください）。
+====
+
+[,shell]
+----
+$ pf_bb_config VRB2 -c /usr/share/pf-bb-config/examples/vrb2/vrb2_config_vf_5g.cfg -f /usr/share/pf-bb-config/examples/vrb2/srs_fft_windows_coefficient.bin -v 00112233-4455-6677-8899-aabbccddeeff -p 0000:07:00.0
+== pf_bb_config Version 25.11 ==
+VRB2 PF [0000:07:00.0] configuration complete!
+Log file = /var/log/pf_bb_cfg_0000:07:00.0.log
+----
+
+* FEC PFから作成された新しいVFを確認します。VFは `0d5d` デバイスIDを取得したことに注意してください。この情報は、これらのVFをKubernetesリソースとして公開するための次のステップで必要になります。
+
+[,shell]
+----
+$ # dpdk-devbind.py -s | grep -A18 Baseband 
+Baseband devices using DPDK-compatible driver
+=============================================
+0000:07:00.0 'Device 57c2' numa_node=0 drv=vfio-pci unused=
+0000:07:00.1 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.2 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.3 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.4 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.5 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.6 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:00.7 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.0 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.1 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.2 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.3 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.4 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.5 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.6 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:01.7 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+0000:07:02.0 'Device 57c3' numa_node=0 drv=vfio-pci unused=
+--
+Other Baseband devices
+======================
+0000:0a:00.0 'Device 57c2' numa_node=0 unused=vfio-pci
+
+Other Crypto devices
+====================
+0000:01:00.0 '420xx Series QAT 4946' numa_node=0 unused=vfio-pci
+0000:03:00.0 'Device 2714' numa_node=0 unused=vfio-pci
+
+DMA devices using kernel driver
+===============================
+0000:00:01.0 'Device 11fb' numa_node=0 drv=idxd unused=vfio-pci 
+
+Other Eventdev devices
+======================
+0000:03:00.0 'Device 2714' numa_node=0 unused=vfio-pci
+
+No 'Mempool' devices detected
+=============================
+----
+
+=== FECアクセラレーション用にKubernetesを構成する
+最後のステップは、SR-IOVデバイスプラグインを使用してVFをKubernetesに公開することです。前のステップで収集したVFのdeviceIDを使用してConfigMapを作成し、SR-IOVデバイスプラグインをインストールします。KubernetesノードがFEC VFを `Allocatable` リソースとして表示すれば、クラスターはワークロードがFECアクセラレーションを利用できる状態になります。
+
+<<sriov>> 章のオプション1の手順に従ってください。SRIOV Network OperatorはFECアクセラレータには適用できないため、オプション2は適用できません。
+
+
+[#huge-pages]
+== ヒュージページ
+
+プロセスが`RAM`を使用する場合、`CPU`はそのプロセスによって利用される正確な部分をマークします。効率を達成するために、`CPU`は`RAM`を`pages`と呼ばれるブロックで割り当てます。多くのプラットフォームでのデフォルトの`page`サイズは`4 KB`です。ページはディスクにスワップされることがあります（他の操作の中でも）。
+
+プロセスのアドレス空間は仮想であるため、`CPU`とオペレーティングシステムは、どの`pages`が各プロセスに属し、それぞれがどこに格納されているかを追跡する必要があります。`pages`の数が多いほど、メモリマッピングの検索に時間がかかります。例えば、`1 GB`のメモリを使用するプロセスでは、262,144個のエントリを確認する必要があります（1 GB / 4 KB）。各`page table entry`が8バイトを占める場合、参照するデータの合計は`2 MB`（262,144 * 8）になります。
+
+現在のほとんどの`CPU`アーキテクチャでは、デフォルトの`4 KB`値よりも大きいサイズの`pages`ブロックを定義できます（`1 GB`や`2 MB`が一般的なサポート値です）。これは`huge pages`として知られており、`CPU/Operating System`が参照しなければならないエントリの数を減らします。
+
+* カーネルパラメータ
+
+`huge pages`を有効にするには、以下のカーネルパラメータを追加する必要があります。この例では、`1 GB`サイズのページを40ページ、`2 MB`サイズのページを0ページ設定しますが、サポートする巨大なページサイズと各ページの正確な数は、アプリケーションのメモリ要件に応じて調整してください。
+
+|===
+| パラメータ」 | 値 | description
+
+| hugepagesz
+| 1G
+| このオプションを使用すると、「ヒュージページ」のサイズを1 GBに設定できます。
+
+| ヒュージページ
+| 40
+| これは、直前に定義されたサイズ (1 GB) に対して、起動時に割り当てるよう要求される「ヒュージページ」の数です。
+
+| hugepagesz
+| 2M
+| このオプションを使用すると、「ヒュージページ」のサイズを2 MBに設定できます。
+
+| ヒュージページ
+| 0
+| これは、直前に定義されたサイズ (2 MB) に対して、起動時に割り当てるよう要求される「ヒュージページ」の数です。
+
+| default_hugepagesz
+| 1G
+| これは、「ヒュージページ」サイズのデフォルト値です。
+|===
+
+GRUBファイル`/etc/default/grub`を変更し、`GRUB_CMDLINE_LINUX`にこれらのパラメーターを追加します。
+
+[,shell]
+----
+default_hugepagesz=1G hugepagesz=1G hugepages=40 hugepagesz=2M hugepages=0
+----
+
+GRUB設定を更新し、システムを再起動して変更を適用します。
+
+[,shell]
+----
+$ transactional-update grub.cfg
+$ reboot
+----
+
+再起動後にパラメーターが適用されたことを確認するには、コマンドラインを確認します。
+
+[,shell]
+----
+$ cat /proc/cmdline
+----
+
+* ヒュージページの使用
+
+ヒュージページを使用するには、それらをマウントする必要があります。
+
+[,shell]
+----
+$ mkdir -p /hugepages
+$ mount -t hugetlbfs nodev /hugepages
+----
+
+Kubernetesワークロードをデプロイし、リソースとボリュームを作成します。
+
+[,yaml]
+----
+...
+ resources:
+   requests:
+     memory: "24Gi"
+     hugepages-1Gi: 16Gi
+     intel.com/intel_sriov_oru: '4'
+   limits:
+     memory: "24Gi"
+     hugepages-1Gi: 16Gi
+     intel.com/intel_sriov_oru: '4'
+...
+----
+
+[,yaml]
+----
+...
+volumeMounts:
+  - name: hugepage
+    mountPath: /hugepages
+...
+volumes:
+  - name: hugepage
+    emptyDir:
+      medium: HugePages
+...
+----
+
+
+[#numa-aware-scheduling]
+== NUMA対応スケジューリング
+
+Non-Uniform Memory Access（不均一メモリアクセス）またはNon-Uniform Memory Architecture（`NUMA`）は、`SMP`（マルチプロセッサ）アーキテクチャで使用される物理メモリ設計であり、メモリへのアクセス時間はプロセッサに対するメモリの場所によって異なります。`NUMA`では、プロセッサは非ローカルメモリ（別のプロセッサのローカルメモリやプロセッサ間で共有されるメモリ）よりも、自身のローカルメモリに高速にアクセスできます。
+
+=== NUMAノードの特定
+
+`NUMA`ノードを特定するには、システム上で次のコマンドを使用します。
+
+[,shell]
+----
+$ lscpu | grep NUMA
+NUMA node(s):                       1
+NUMA node0 CPU(s):                  0-63
+----
+
+[NOTE]
+====
+この例では、64個の`CPUs`を表示する`NUMA`ノードが1つだけあります。
+
+`NUMA`は`BIOS`で有効にする必要があります。`dmesg`に起動時のNUMA初期化の記録がない場合、カーネルリングバッファ内の`NUMA`関連のメッセージが上書きされている可能性があります。
+====
+
+
+
+[#metal-lb-configuration]
+== Metal LB
+
+`MetalLB`は、`L2`や`BGP`などの標準的なルーティングプロトコルをアドバタイズメントプロトコルとして使用する、ベアメタルKubernetesクラスター向けのロードバランサー実装です。これは、ベアメタル環境でKubernetesサービスのタイプ`LoadBalancer`を使用する必要があるため、Kubernetesクラスター内のサービスを外部に公開するために使用できるネットワークロードバランサーです。
+
+`RKE2`クラスターで`MetalLB`を有効にするには、次の手順が必要です。
+
+* 次のコマンドを使用して`MetalLB`をインストールします。
+
+[,shell,subs="attributes,specialchars"]
+----
+$ kubectl apply <<EOF -f
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: metallb
+  namespace: kube-system
+spec:
+  chart: oci://registry.suse.com/edge/charts/metallb
+  targetNamespace: metallb-system
+  version: {version-metallb-chart}
+  createNamespace: true
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: endpoint-copier-operator
+  namespace: kube-system
+spec:
+  chart: oci://registry.suse.com/edge/charts/endpoint-copier-operator
+  targetNamespace: endpoint-copier-operator
+  version: {version-endpoint-copier-operator-chart}
+  createNamespace: true
+EOF
+----
+
+* `IpAddressPool`と`L2advertisement`の設定を作成します。
+
+[,yaml]
+----
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: kubernetes-vip-ip-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    - 10.168.200.98/32
+  serviceAllocation:
+    priority: 100
+    namespaces:
+      - default
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: ip-pool-l2-adv
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - kubernetes-vip-ip-pool
+----
+
+* `VIP`を公開するためのエンドポイントサービスを作成します。
+
+[,yaml]
+----
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubernetes-vip
+  namespace: default
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: rke2-api
+    port: 9345
+    protocol: TCP
+    targetPort: 9345
+  - name: k8s-api
+    port: 6443
+    protocol: TCP
+    targetPort: 6443
+  sessionAffinity: None
+  type: LoadBalancer
+----
+
+* `VIP`が作成され、`MetalLB`ポッドが実行されていることを確認します。
+
+[,shell]
+----
+$ kubectl get svc -n default
+$ kubectl get pods -n default
+----
+
+[#private-registry]
+== プライベートレジストリの設定
+
+`Containerd`は、プライベートレジストリに接続し、それを使用して各ノードでプライベートイメージをプルするように設定できます。
+
+起動時に、`RKE2`は`/etc/rancher/rke2/`に`registries.yaml`ファイルが存在するかどうかを確認し、ファイルで定義されているレジストリを使用するように`containerd`に指示します。プライベートレジストリを使用する場合は、レジストリを使用する各ノードでルートユーザーとしてこのファイルを作成してください。
+
+プライベートレジストリを追加するには、次の内容でファイル`/etc/rancher/rke2/registries.yaml`を作成します。
+
+[,yaml]
+----
+mirrors:
+  docker.io:
+    endpoint:
+      - "https://registry.example.com:5000"
+configs:
+  "registry.example.com:5000":
+    auth:
+      username: xxxxxx # this is the registry username
+      password: xxxxxx # this is the registry password
+    tls:
+      cert_file:            # path to the cert file used to authenticate to the registry
+      key_file:             # path to the key file for the certificate used to authenticate to the registry
+      ca_file:              # path to the ca file used to verify the registry's certificate
+      insecure_skip_verify: # may be set to true to skip verifying the registry's certificate
+----
+
+または認証なしの場合:
+
+[,yaml]
+----
+mirrors:
+  docker.io:
+    endpoint:
+      - "https://registry.example.com:5000"
+configs:
+  "registry.example.com:5000":
+    tls:
+      cert_file:            # path to the cert file used to authenticate to the registry
+      key_file:             # path to the key file for the certificate used to authenticate to the registry
+      ca_file:              # path to the ca file used to verify the registry's certificate
+      insecure_skip_verify: # may be set to true to skip verifying the registry's certificate
+----
+
+レジストリの変更を有効にするには、ノードでRKE2を開始する前にこのファイルを設定するか、構成済みの各ノードでRKE2を再起動する必要があります。
+
+[NOTE]
+====
+これに関する詳細については、 https://documentation.suse.com/cloudnative/rke2/latest/en/install/containerd_registry_configuration.html#_registries_configuration_file[containerd registry configuration rke2]を確認してください。
+====
+
+[#ptp-configuration]
+== 高精度時刻同期プロトコル (PTP)
+
+[#ptp-introduction]
+=== 概要
+
+IEEE 1588標準で定義されている高精度時刻同期プロトコル (PTP) は、パケットネットワーク上で高精度の時刻を配信します。ネットワークインタフェース (NIC) がハードウェアでPTPパケットにタイムスタンプを付与すると、NTPが提供できる範囲をはるかに超えるサブマイクロ秒の精度に達します。通信事業者の環境において、PTPは5G無線アクセスネットワーク (RAN) の中核となる構成要素であり、無線ユニットが正しく送信を行うには厳密な位相と時刻の同期が必要です。SUSE Telco Cloudは、`linuxptp`パッケージを通じてPTPを実装しており、以下に説明する通信事業者向けプロファイルITU-T G.8275.1およびITU-T G.8275.2を対象としています。
+
+PTPドメインは、少数のクロック役割で構成されます。
+
+* *グランドマスター (GM)*: ドメインの主要な時刻源です。通常、GNSS受信機によって駆動されるプライマリリファレンスタイムクロック (PRTC) に同期し、下流のノードに時刻を送信します。GMの精度が、ドメイン全体の品質上限を決定します。
+* *オーディナリークロック (OC)*: 単一のPTPポートを持つエンドノードです。通信事業者のデプロイメントでは、タイムレシーバーとして機能し、上流のグランドマスターまたはバウンダリークロックからローカルクロックを調整します。無線ワークロードを実行するコンピュートノードは、典型的なOCです。
+* *バウンダリークロック (BC)*: 1つのポートで時刻を受信し (タイムレシーバー)、残りのポートで他のノードに向けて時刻を再生成する (タイムトランスミッター) マルチポートノードです。パス上にバウンダリークロックを挿入することで、各OCとリファレンス間のチェーンが短縮され、ネットワークでホップごとに蓄積される誤差が制限されます。
+
+トポロジーを設計する際、オーディナリークロックとバウンダリークロックの区別が重要になります。
+
+* *オーディナリークロック (OC)*は、*単一*のPTPポートを持ち、ドメインの端に配置されます。
+自身のクロックを制御するためにのみ時刻を消費し、他のノードに時刻を転送することはありません。
+* *バウンダリークロック (BC)*は、*複数*のPTPポートを持ちます。Time Receiverポートで時刻を消費し、Time Transmitterポートでそれを*再生成*することで、アップストリームのタイミングチェーンを終端し、ダウンストリームで新しいタイミングチェーンを開始します。この再生成により、長いノードチェーン全体で誤差が蓄積されるのを防ぎます。
+
+以下のハードウェアおよびシグナリング要素がこれらの役割をサポートします。
+
+* *PTP Hardware Clock (PHC)*：PTPが実際に同期を行う、NICに組み込まれたクロックです。オペレーティングシステムのクロックをPHCに合わせることは、専用のデーモンによって処理される別のステップです。
+* *Synchronous Ethernet (SyncE)*：物理層の周波数同期です。PTPはパケット内で位相と時刻を伝送しますが、SyncEはイーサネット信号から直接安定した周波数を復元します。SyncEは*オプションの拡張機能*です。PTP単体でもすでに位相と時刻を提供しており、SyncEは、ノードがより強力な周波数安定性を必要とする場合や、PTP時刻ソースが一時的に失われた場合に備えてより長いホールドオーバーが必要な場合に追加されます。
+* *Digital Phase-Locked Loop (DPLL)*：基準信号に同期し、それをフィルタリングして安定したクリーンなクロックを出力するハードウェアタイミングブロックです。これは、利用可能な入力からPHCを制御し、複数のNICを持つプラットフォームでは、異なるNICクロックを調整する役割を果たします。
+
+各ノードにおいて、これらの機能は`linuxptp`デーモンによって実行されます。`ptp4l`はPTPプロトコルを実行してPHCを制御し、`phc2sys`はシステムクロックをPHCに合わせます。グランドマスターでは、`ts2phc`がさらにGNSS基準からPHCを制御します。それらの役割とインストールについては<<ptp-prerequisites>>で説明されています。
+
+ハードウェアクロック自体は、LinuxカーネルのDPLLサブシステムとネットワークドライバによって処理されます。タイミング制御の度合い、およびマルチNICノード内でのタイミングの分散方法は、管理可能なDPLLがどこに配置されているかによって異なります。
+
+* *NIC with an integrated DPLL*：DPLLはNICに組み込まれており、Linux DPLLサブシステムを通じて構成されます。選択されたリファレンスにロックし、PHCを制御することで、周波数とホールドオーバーを完全に管理します。
+* *統合DPLLのないNIC*：NICは構成可能なDPLLを備えておらず、`ptp4l`はPHCを直接制御します。サブシステムはロックステータスを（読み取り専用で）報告するにとどまり、高度な周波数処理は外部のタイミングソースに依存します。
+* *複数のNIC間で共有されるオンボードDPLL*：DPLLは単一のNICに組み込まれているのではなく、NICの外部にあるプラットフォーム上に配置されています。これは、共通のリファレンスから複数のNICのPHCを制御して同期を維持するため、ノード内のすべてのNICが同じ時刻を共有します。この構成は、外部ケーブルに頼らずに内部でタイミングを配信するマルチNICプラットフォームで使用されます。
+
+.管理可能なDPLLを統合したNICを持つノード上のPTPソフトウェア
+image::product-atip-ptp-node-with-dpll.png[管理可能なDPLLを統合したNICを持つノード,scaledwidth=100%]
+
+.管理可能なDPLLを持たないNICを持つノード上のPTPソフトウェア
+image::product-atip-ptp-node-without-dpll.png[管理可能なDPLLを持たないNICを持つノード,scaledwidth=100%]
+
+.NIC間で共有されるオンボードDPLLを備えたノード上のPTPソフトウェア
+image::product-atip-ptp-node-onboard-dpll.png[NIC間で共有されるオンボードDPLLを備えたノード,scaledwidth=100%]
+
+通信事業者ネットワークは2つのITU-Tプロファイルを標準としており、これらは主に、使用されるトランスポートと、基盤となるネットワークのどれだけがPTP対応である必要があるかという点で異なります。
+
+* *ITU-T G.8275.1*（フルタイミングサポート）：マルチキャストを使用してイーサネット（レイヤー2）上で直接実行されます。パス上のすべてのノードはPTPに対応し、<em>バウンダリークロック</em>として機能する必要があり、これにより最高の精度が得られます。特に明記されていない限り、このガイドのシナリオではこのプロファイルを使用します。
+* *ITU-T G.8275.2*（部分的なタイミングサポート）：ユニキャストを使用してIP（レイヤー3）上で実行されます。
+中間ノードはPTPをサポートする必要がないため、タイミングはタイミング非対応のネットワークセグメントを通過できますが、その代償として精度が低下します。
+
+以下の図は、PTPのみの場合と、オプションの周波数拡張としてSyncEを追加した場合の時刻配信を示しています。どちらの場合も、グランドマスターはPRTC/GNSSソースからリファレンスを取得し、バウンダリクロックはエンドポイントに向けてタイミングを再生成します。
+
+.PTPのみによる時刻配信
+image::product-atip-ptp-overview.png[グランドマスターによるPTP専用配信, Boundary Clock and Ordinary Clocks,scaledwidth=100%]
+
+.PTPおよびSyncEによる時刻と周波数の配信（オプションの拡張機能）
+image::product-atip-ptp-synce-overview.png[グランドマスターによるPTPおよびSyncE配信, Boundary Clock and Ordinary Clocks,scaledwidth=100%]
+
+[#ptp-scenarios]
+本ガイドでは、以下のシナリオについて説明します。各シナリオには、そのCluster API（CAPI）自動化へのリンクが含まれています。
+
+* <<ptp-scenario-oc,シナリオ1a - オーディナリークロック（PTP専用）>>
+* <<ptp-scenario-oc-synce,シナリオ1b - オーディナリークロック（ハイブリッドモード：PTP & SyncE)>>
+* <<ptp-scenario-bc-single-nic,シナリオ2a - バウンダリクロック（PTP専用）マルチポートシングルNIC（オーディナリークロックサーバーへの伝搬を含む）>>
+* <<ptp-scenario-bc-synce-single-nic,シナリオ2b - バウンダリクロック（ハイブリッドモード：PTPおよびSyncE）マルチポートシングルNIC（オーディナリークロックサーバーへの伝搬を含む）>>
+* <<ptp-scenario-bc-multi-nic-dpll,シナリオ3a - バウンダリクロック（PTP専用）マルチNIC（内部タイミングモジュール（DPLL GNR-Dベース）付き）>>
+* <<ptp-scenario-bc-synce-multi-nic-dpll,シナリオ3b - バウンダリクロック（ハイブリッドモード：PTPおよびSyncE）マルチNIC（内部タイミングモジュール（DPLL GNR-Dベース）付き）>>
+
+[NOTE]
+====
+<<ptp-scenario-oc,シナリオ1a>>のみが、ITU-T G.8275.1およびITU-T G.8275.2の両方の通信事業者固有のプロファイルの構成を示しています。残りのシナリオは、簡潔にするためITU-T G.8275.1のケースのみに焦点を当てています。展開は同一であり、2つのプロファイル間で変更されるのは`ptp4l`設定ファイルのみです。
+====
+
+[#ptp-prerequisites]
+=== 前提条件
+
+本ガイドでは通信事業者固有のプロファイルのみを扱うため、ハードウェアタイムスタンプおよびNIC内のPTPハードウェアクロック（PHC）が前提となります。通信事業者グレードのNICはハードウェアでPTPをサポートしています。特定のインターフェースの機能は、`ethtool -T`で確認できます。
+
+[,console]
+----
+# ethtool -T eno16495np0
+Time stamping parameters for eno16495np0:
+Capabilities:
+        hardware-transmit
+        software-transmit
+        hardware-receive
+        software-receive
+        software-system-clock
+        hardware-raw-clock
+PTP Hardware Clock: 0
+Hardware Transmit Timestamp Modes:
+        off
+        on
+Hardware Receive Filter Modes:
+        none
+        all
+----
+
+`hardware-transmit`、`hardware-receive`、`hardware-raw-clock`の機能と、0以上の`PTP Hardware Clock`インデックスを確認してください（`-1`という値は、インターフェースにPHCがないことを意味します）。`eno16495np0`を、PTPに使用する予定のインターフェースに置き換えてください。
+
+PTPは、`linuxptp`パッケージによって提供されます。これには、`systemd`によって管理される長時間実行デーモンとして実行される3つのユーザスペースプログラム（`ptp4l`、`phc2sys`、`ts2phc`）が含まれています（それぞれ専用のサービス：`ptp4l.service`、`phc2sys.service`、`ts2phc.service`）。これらは集合的にプロトコルを実行し、クロックを同期させ続けます。
+
+* `ptp4l`: PTPデーモン。これは、構成されたインターフェース上でIEEE 1588プロトコルを実行し、Best Master Clock Algorithm (BMCA) を適用して各ポートの役割を決定し、NICのPHCを調整します。単一の `ptp4l` インスタンスは複数のポートを管理でき、これによってノードがバウンダリクロックとして機能できるようになります。
+* `phc2sys`: 2つのクロックを同期させます。これは通常、システム（オペレーティングシステム）クロックを `ptp4l` が同期し続けるPHCに合わせるために使用され、システム時刻もPTPに従うようにします。
+* `ts2phc`: 「PHCへのタイムスタンプ」。これは、GNSS受信機によって配信されるPPSなどの外部時刻信号からPHCを調整します。これは、グランドマスターで使用され、同じノード内の複数のPHCを同期させるために使用されます。
+
+ダウンストリームクラスターにPTPをインストールする推奨される方法は、Edge Image Builder (EIB) 定義ファイルの `packageList` に `linuxptp` パッケージを追加し、プロビジョニング中に自動的にデプロイされるようにすることです。パッケージのインストールに関する詳細については、xref:../quickstart/eib.adoc#eib-configuring-rpm-packages[EIB documentation] を参照してください。
+
+[,yaml,subs="attributes"]
+----
+apiVersion: {version-eib-api-latest}
+image:
+  imageType: RAW
+  arch: x86_64
+  baseImage: {micro-base-rt-image-raw}
+  outputImageName: eibimage-slmicrort-telco.raw
+operatingSystem:
+  systemd:
+    enable:
+      - ptp4l
+      - phc2sys
+  packages:
+    packageList:
+      - linuxptp
+    sccRegistrationCode: $SCC_REGISTRATION_CODE
+----
+
+[NOTE]
+====
+`linuxptp`パッケージは、デフォルトでは `ptp4l`、`phc2sys`、または `ts2phc` を有効にしません。
+設定ファイルをデプロイした後、マニフェストの `systemd` セクションを使用して、必要なノードデーモンを有効にします（以下のシナリオを参照してください）。
+====
+
+最後に、使用するPTPプロファイルによって、ノード間のネットワークスイッチをPTP対応デバイスとして構成する必要があるかどうかが決まります。
+
+* *ITU-T G.8275.1 (full timing support)*: マルチキャストを使用してイーサネット（レイヤー2）上で直接実行されます。パス上のすべてのノードはPTP対応であり、バウンダリクロックとして機能する必要があります。これにより最高の精度が得られます。したがって、介在するスイッチはPTP用に構成する必要があります。特に明記されていない限り、このガイドのシナリオではこのプロファイルを使用します。
+* *ITU-T G.8275.2 (partial timing support)*: ユニキャストを使用してIP（レイヤー3）上で実行されます。
+中間ノードはPTPをサポートする必要がないため、タイミングはタイミング非対応のネットワーク
+セグメントを通過でき、スイッチにPTP設定は不要ですが、その代償として精度が低下します。
+
+[#ptp-scenario-oc]
+=== シナリオ1a - オーディナリークロック（PTPのみ）
+
+*説明*
+
+これは最も単純なPTPデプロイメントです。単一のクラスタノードがアップストリームソースから時刻を取得し、ローカルクロックを調整しますが、別のノードに時刻を転送することはありません。このノードは、タイムレシーバーの役割を持つ単一のPTPポートを備えたオーディナリークロック（OC）として動作します。
+
+OCノードでは、使用するプロファイルに関係なく、タイミングはすべて`linuxptp`デーモンによって処理されます。ノードは単一のNICを使用し、`ptp4l`が直接PHCを調整するため、DPLL設定や`ts2phc`は不要です。
+
+* `ptp4l`は受信インターフェース上でPTPプロトコルを実行します。ベストマスタークロックアルゴリズム（BMCA）がアップストリームノードをマスターとして選択し、ローカルポートが`SLAVE`状態に遷移し、`ptp4l`がNICのPTPハードウェアクロック（PHC）を調整します。
+`clientOnly 1`を設定すると、ノードはタイムレシーバーの役割に制限されるため、マスターとして選択されることはありません。
+* `phc2sys`はシステムクロック(`CLOCK_REALTIME`)を`ptp4l`が同期を維持するPHCに合わせるため、オペレーティングシステムの時刻もPTPに従います。
+
+このシナリオはどちらかの通信事業者向けプロファイルで実装可能です。これらはトランスポート
+や介在するネットワークが提供すべき内容が異なり、以下に2つの独立したモデルとして文書化されています。
+
+* *<<ptp-scenario-oc-model1,モデル1 — ITU-T G.8275.1>>*（レイヤー2マルチキャスト）：マスターとOC間のすべてのホップがPTP対応である場合に使用します。これは最高の精度を提供し、通信事業者向けデプロイメントのデフォルトです。
+* *<<ptp-scenario-oc-model2,モデル2 — ITU-T G.8275.2>>*（レイヤー3ユニキャスト）：OCがPTP非対応のネットワークを介してマスターに到達する必要がある場合に使用しますが、精度が低下します。
+
+[IMPORTANT]
+====
+オーディナリークロックは、一度に1つのPTPプロファイルのみを実行します。これら2つのモデルは相互排他的です。特定のノードには、どちらか一方のみを設定してください。選択したプロファイルの設定ファイルのみを作成し、`/etc/sysconfig/ptp4l`ではそのファイルのみを参照してください。`/etc/ptp4l-G.8275.1.conf`と`/etc/ptp4l-G.8275.2.conf`の両方を作成しないでください。また、`OPTIONS=`行に両方のファイルを渡さないでください。
+====
+
+[[ptp-scenario-oc-model1]]
+*モデル1 — ITU-T G.8275.1（レイヤー2マルチキャスト）*
+
+G.8275.1はイーサネット上で直接実行され、そのメッセージを転送不可能なマルチキャストMAC `01:80:C2:00:00:0E`に送信します。標準的なブリッジはこれを転送しないため、パス上のすべてのデバイスがPTPを終端および再生成する必要があります。コンポーネントは以下の通りです。
+
+* *Grandmaster (GM)*: PTPドメイン（G.8275.1の場合はドメイン `24`）のアップストリームリファレンスで、通常はGNSS/PRTCソースにロックされています。
+* *PTP-aware switch*: Boundary Clockとして機能します。GMに向かうポートはTime Receiverであり、OCに向かうポートはTime Transmitterです。両方のポートでPTPを有効にする必要があります。
+* *Ordinary Clock (OC)*: クラスターノードであり、単一のPTPポートで時刻を受信します。
+
+.Ordinary Clock (OC) — G.8275.1 (レイヤー2マルチキャスト)
+image::product-atip-ptp-scenario-oc.png[シナリオ1a - G.8275.1を使用したオーディナリークロック（PTPのみ）,scaledwidth=100%]
+
+ノードを以下のように設定します。
+
+. PTPに使用するインターフェースのPHCインデックス `<N>`（ここでは `eno8403np1`）を特定します。出力されたフィールド `PTP Hardware Clock`（`Hardware timestamp provider index`と表示される場合もあります）の値は、`/dev/ptp<N>`デバイスを示し、`ptp4l`がこれを調整し、`phc2sys`がソースとして読み取るものです。
++
+[,console]
+----
+# ethtool -T eno8403np1
+Time stamping parameters for eno8403np1:
+Capabilities:
+        hardware-transmit
+        hardware-receive
+        hardware-raw-clock
+PTP Hardware Clock: 1
+...
+----
++
+この例では、`eno8403np1`のPHCは `/dev/ptp1` です。
+
+. `ptp4l`設定ファイル`/etc/ptp4l-G.8275.1.conf`を作成します。インターフェースはセクション（`[eno8403np1]`）として宣言されるため、デーモンに`-i`フラグは不要です。
++
+[#ptp-conf-oc-g8275-1]
+.オーディナリークロック設定 — ITU-T G.8275.1
+====
+[source,]
+----
+# Telecom G.8275.1 — Ordinary Clock (Time Receiver)
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+clientOnly                      1
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l"
+uds_address                     /var/run/ptp4l
+uds_ro_address                  /var/run/ptp4lro
+
+[eno8403np1]
+----
+====
++
+`ptp_dst_mac`の値はG.8275.1で固定されています。これは、PTPを単一のリンクに限定する転送不可能なマルチキャストアドレス`01:80:C2:00:00:0E`であり、これがパス上のすべてのデバイスがPTP対応でなければならない理由です。`uds_address`は、`phc2sys`がポート状態を追跡するために使用する管理ソケットを公開します。
+
+. `ptp4l`で`/etc/sysconfig/ptp4l`がこのファイルを指すようにします。
++
+[source,]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf"
+----
+
+. `/etc/sysconfig/phc2sys`で`phc2sys`を設定し、PTPインターフェース（`/dev/ptp1`）のPHCからシステムクロックを制御します。`--uds_address`と`--domainNumber`の値は、`ptp4l`の設定と一致している必要があります。
++
+[source,]
+----
+OPTIONS="-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 24"
+----
++
+`-s /dev/ptp1`はPHCをソースクロックとして選択し、`-w`は`ptp4l`が同期するのを待ってからシステムクロックをステップし、`-m`はサーボステータスをログに出力します。
+
+. 両方のサービスを有効にして開始します。
++
+[,console]
+----
+# systemctl enable --now ptp4l phc2sys
+----
+
+. `ptp4l`がアップストリームマスターにロックされていることを確認します。ポートは`SLAVE`に移行し、報告されたオフセット（`rms`）は低く安定した値に収束します。
++
+[,console]
+----
+# journalctl -u ptp4l -f
+ptp4l[...]: "ptp4l" port 1 (eno8403np1): UNCALIBRATED to SLAVE on MASTER_CLOCK_SELECTED
+ptp4l[...]: "ptp4l" rms 1502498567 max 8499416372 freq  -3977 +/- 43609 delay  11 +/- 607
+ptp4l[...]: "ptp4l" rms   40 max   99 freq +10129 +/-   30 delay 211 +/-   3
+ptp4l[...]: "ptp4l" rms    7 max   15 freq +10125 +/-   13 delay 211 +/-   2
+ptp4l[...]: "ptp4l" rms    6 max   16 freq +10118 +/-   12 delay 213 +/-   2
+----
+
+. `phc2sys`がシステムクロックを制御していることを確認します。サーボ状態は`s0`（ロック解除）から`s1`（初期ステップ）、そして`s2`（ロック）へと進み、オフセットはゼロ付近で安定します。
++
+[,console]
+----
+# journalctl -u phc2sys -f
+phc2sys[...]: CLOCK_REALTIME phc offset 45583145631 s0 freq   -1673 delay   0
+phc2sys[...]: CLOCK_REALTIME phc offset 45583157513 s1 freq  +10207 delay   0
+phc2sys[...]: CLOCK_REALTIME phc offset          4 s2 freq  +10211 delay   0
+phc2sys[...]: CLOCK_REALTIME phc offset         13 s2 freq  +10221 delay   0
+----
++
+小さなオフセットを伴う安定した`s2`状態は、ノードがロックされ、システムクロックがPTPに従っていることを確認するものです。
+
+[[ptp-scenario-oc-model2]]
+*モデル2 — ITU-T G.8275.2（レイヤー3ユニキャスト）*
+
+G.8275.2はユニキャストを使用してIP（レイヤー3）上で実行されます。OCはマスターのIPアドレスと直接メッセージを交換するため、介在するネットワークがPTP対応である必要はなく、PTP対応スイッチも不要です。コンポーネントは以下の通りです。
+
+* *マスター（GMまたは境界クロック）*：G.8275.2ドメイン（ドメイン`44`）上でIP経由で到達可能なアップストリームマスターです。
+* *IPネットワーク*：標準的なルーティングまたはスイッチングネットワークです。PTP設定なしでユニキャストPTPパケットを転送します。
+* *オーディナリークロック（OC）*：クラスターノードであり、単一のPTPポートからマスターへユニキャストリクエストを送信します。
+
+.オーディナリークロック（OC） — G.8275.2（レイヤー3ユニキャスト）
+image::product-atip-ptp-scenario-oc-g8275-2.png[シナリオ1a - G.8275.2を使用したオーディナリークロック（PTPのみ）,scaledwidth=100%]
+
+ノードを以下のように設定します。
+
+. モデル1（`ethtool -T eno8403np1`）と同様にPTPインターフェースのPHCを特定します。この例では、`eno8403np1`のPHCは`/dev/ptp1`です。
+
+. `ptp4l`設定ファイル`/etc/ptp4l-G.8275.2.conf`を作成します。マスターには`ptp_dst_mac`経由のIPで到達するため、`unicast_master_table`は存在しません。
+`$MASTER_IP_ADDRESS`をアップストリームマスターのIPアドレスに置き換えます。
++
+[#ptp-conf-oc-g8275-2]
+.オーディナリークロック設定 — ITU-T G.8275.2
+====
+[source,]
+----
+# Telecom G.8275.2 — Ordinary Clock (Time Receiver)
+[global]
+domainNumber                    44
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             0
+logSyncInterval                 -5
+logMinDelayReqInterval          -4
+announceReceiptTimeout          2
+clientOnly                      1
+network_transport               UDPv4
+hybrid_e2e                      1
+inhibit_multicast_service       1
+unicast_listen                  1
+unicast_req_duration            60
+message_tag                     "ptp4l"
+uds_address                     /var/run/ptp4l
+uds_ro_address                  /var/run/ptp4lro
+
+[unicast_master_table]
+table_id                        1
+logQueryInterval                2
+UDPv4                           $MASTER_IP_ADDRESS
+
+[eno8403np1]
+unicast_master_table            1
+----
+====
+
+. `/etc/sysconfig/ptp4l`で`ptp4l`をこのファイルを指すように設定します。
++
+[source,]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.2.conf"
+----
+
+. G.8275.2ドメイン番号(`44`)を使用して`/etc/sysconfig/phc2sys`の`phc2sys`を設定します。ソースPHCと`--uds_address`は変更されません。
++
+[source,]
+----
+OPTIONS="-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 44"
+----
+
+. 両方のサービスを有効にして開始します。
++
+[,console]
+----
+# systemctl enable --now ptp4l phc2sys
+----
+
+. モデル1と同様に同期を確認します。`ptp4l`はポートを`SLAVE`(`journalctl -u ptp4l`)に移動し、`phc2sys`は`s2`（ロック）状態に達し、オフセットはゼロに近い(`journalctl -u phc2sys`)です。
+
+*CAPI自動化*
+
+自動プロビジョニングワークフローを使用してこのシナリオを展開するには、<<add-telco-ptp,完全に自動化されたダイレクトネットワークプロビジョニング>>で説明されている汎用Cluster APIテンプレートを使用し、そのプレースホルダーを以下に示すこのシナリオの値で上書きします。
+
+.モデル1 — ITU-T G.8275.1
+[cols="1,2"]
+|===
+| Placeholder | 値
+
+| `$\{PTP4L_CONF_PATH\}`
+| `/etc/ptp4l-G.8275.1.conf`
+
+| `$\{PTP4L_CONF_CONTENTS\}`
+| <<ptp-conf-oc-g8275-1,上記のG.8275.1設定>>からコンテンツをコピーします。
+
+| `$\{PTP4L_OPTIONS\}`
+| `-f /etc/ptp4l-G.8275.1.conf`
+
+| `$\{PHC2SYS_OPTIONS\}`
+| `-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 24`
+|===
+
+.モデル2 — ITU-T G.8275.2
+[cols="1,2"]
+|===
+| Placeholder | 値
+
+| `$\{PTP4L_CONF_PATH\}`
+| `/etc/ptp4l-G.8275.2.conf`
+
+| `$\{PTP4L_CONF_CONTENTS\}`
+| <<ptp-conf-oc-g8275-2,上記のG.8275.2設定>>からコンテンツをコピーします。
+
+| `$\{PTP4L_OPTIONS\}`
+| `-f /etc/ptp4l-G.8275.2.conf`
+
+| `$\{PHC2SYS_OPTIONS\}`
+| `-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 44`
+|===
+
+[#ptp-scenario-oc-synce]
+=== シナリオ1b - オーディナリクロック (ハイブリッドモード:PTPおよびSyncE)
+
+このシナリオはまだサポートされていません。将来の{product}リリースで含まれる予定です。
+
+[#ptp-scenario-bc-single-nic]
+=== シナリオ2a - バウンダリクロック (PTPのみ)、マルチポートシングルNICを使用し、オーディナリクロックサーバーへの伝搬を含む
+
+*説明*
+
+このシナリオでは、ITU-T G.8275.1 (PTPのみ、レイヤー2) を介して、ダウンストリームのオーディナリクロック(OC) に向けてPTPを再生成するバウンダリクロック(BC)を用いてタイミングチェーンを拡張します。BCは単一のマルチポートNICを使用します。1つの`ptp4l`インスタンスが同じNIC上の複数のポートを管理するため、`ts2phc`もDPLLルーティングも必要ありません (マルチNICシナリオとは異なります)。
+
+このシナリオには、以下のコンポーネントが含まれます。
+
+* *グランドマスター (GM)*: PTPドメイン (ドメイン`24`) のリファレンスであり、通常はGNSS/PRTCソースにロックされています (ここで使用するテストベンチにはGNSSがないため、後述する`gm.ClockClass`の劣化が生じます)。アップストリームセグメントに時刻を送信します。
+* *PTP対応スイッチ*: タイミングパス上でバウンダリクロック (T-BC) として機能します。PTPを伝送するすべてのポートには`ptp enable`が設定されています。
+* *バウンダリクロック (BCサーバー)*: 2つのPTPセグメントをブリッジする、単一NIC上のマルチポートノードです。その`eno8403np1`ポートはタイムレシーバー (SLAVE) として*アップストリーム*セグメントに向き、NICのPHCを制御します。`eno8503np2` (および`eno8603np3`) はタイムトランスミッターとして*ダウンストリーム*セグメントに向き、PTPを再生成します。BCはアップストリームのタイミングチェーンを終端し、ダウンストリーム側で新しいタイミングチェーンを開始します。
+* *オーディナリークロック（OCサーバー）*：*ダウンストリーム*セグメント上にあるシングルポートノード（`ens6f0np0`）であり、その唯一のPTPマスターはBCです。BCが再生成した時点からローカルクロックを調整します。
+
+タイミングは、各ノードの`linuxptp`デーモンによって処理されます。
+
+* *BCサーバー*では、単一の`ptp4l`インスタンスがすべてのポートを管理します。BMCAは`eno8403np1`上でGMをマスターとして選択し、それが`SLAVE`に移行してPHCを調整します。`eno8503np2`と`eno8603np3`は`serverOnly 1`に強制されるため、タイムトランスミッターとしてのみ機能します。
+すべてのポートが同じNIC PHCを共有しているため、受信した時刻は送信ポートですぐに利用可能です。ポートが複数構成されている場合はバウンダリクロックが自動的に暗示されるため、`clock_type`や`ts2phc`の設定は不要です。
+* *OCサーバー*では、`ptp4l`が`clientOnly 1`上の`ens6f0np0`で実行されるため、ポートは常にタイムレシーバーとしてのみ機能します。`phc2sys`はシステムクロックをPHCに合わせます。
+* OCサーバーにおいて、`clientOnly 1`はそれがマスターになることを決して許さないための保証となります。`localPriority`属性（G.8275.x BMCAにおいて、clockClass、clockAccuracy、variance、priority2が等しい場合のタイブレーカーとしてのみ使用され、値が小さい方が優先される）は、この順序付けを強化します。BCサーバーはデフォルトの`128`を維持し、OCサーバーは優先度の低い`250`を使用します。
+
+BCは、GMと`eno8403np1`ポート間の*アップストリーム*セグメントと、`eno8503np2`ポートとOC間の*ダウンストリーム*セグメントという、2つの独立したPTPセグメントをブリッジします。これらは、例えばスイッチの異なるVLAN上や別々のネットワーク上で、分離された状態に保たれます。BCはダウンストリームセグメントにおける唯一のマスターであるため、OCはBCから同期し、GMから直接同期することはありません。
+
+<<ptp-scenario-oc,シナリオ1a>>と同様に、このシナリオでは転送不可能なマルチキャストMAC`01:80:C2:00:00:0E`を使用します。標準的なブリッジはこれを転送しないため、すべてのPTP対応デバイスがPTPを終端および再生成します。タイミングパスのすべてのノードで同じアドレスを設定する必要があります。
+
+*図*
+
+.バウンダリクロック（PTPのみ）、シングルNIC、オーディナリークロックへの伝搬あり
+image::product-atip-ptp-scenario-bc-single-nic.svg[シナリオ2a - バウンダリクロック（PTPのみ）、マルチポートシングルNIC、オーディナリークロックサーバーへの伝搬を含む,scaledwidth=100%]
+
+*設定*
+
+タイミングパス上のすべてのスイッチポート（GM、BC、OCに向かうポート）でPTPを有効にする必要があります。2つのクラスターノードは、次のように構成されます。
+
+*バウンダリクロック（BCサーバー）*
+
+. PTP NICのPHC (`ethtool -T eno8403np1`) を特定します。単一のNICでは、すべてのポートが同じPHCを共有します。この例では、`/dev/ptp1`です。
+
+. `/etc/ptp4l-G.8275.1.conf`を作成します。受信ポート`[eno8403np1]`にはロールフラグがないため、BMCAはそれをTime Receiverとして選択します。`[eno8503np2]`と`[eno8603np3]`は、Time Transmitterとして機能するように`serverOnly 1`に設定されます。複数のポートを宣言すると、Boundary Clockであることを意味します。
++
+[#ptp-conf-bc-single-nic-bc]
+.バウンダリクロックの設定
+====
+[source,]
+----
+# Telecom G.8275.1 — Boundary Clock (multi-port, single NIC)
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l"
+uds_address                     /var/run/ptp4l
+uds_ro_address                  /var/run/ptp4lro
+
+[eno8403np1]
+
+[eno8503np2]
+serverOnly                      1
+
+[eno8603np3]
+serverOnly                      1
+----
+====
+
+. `ptp4l`で`/etc/sysconfig/ptp4l`をこのファイルを指すように設定します。
++
+[source,]
+----
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf"
+----
+
+. オプションとして、共有NIC PHCをソースとして使用し、`/etc/sysconfig/phc2sys`内の`phc2sys`とシステムクロックを同期させます。
++
+[source,]
+----
+OPTIONS="-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 24"
+----
+
+. サービスを有効にして開始し、`eno8403np1`がGMにロックされていることを確認します。受信ポートは`SLAVE`に移行し、オフセット (`rms`) は低い値に収束します。
++
+[,console]
+----
+# systemctl enable --now ptp4l phc2sys
+# journalctl -u ptp4l -f
+ptp4l[...]: "ptp4l" selected best master clock d0460c.ffff.05c130
+ptp4l[...]: "ptp4l" port 1 (eno8403np1): UNCALIBRATED to SLAVE on MASTER_CLOCK_SELECTED
+ptp4l[...]: "ptp4l" rms    8 max   24 freq +10092 +/-  18 delay   211 +/-   2
+ptp4l[...]: "ptp4l" rms    4 max   11 freq +10069 +/-   7 delay   210 +/-   2
+ptp4l[...]: "ptp4l" rms    3 max    9 freq +10070 +/-   6 delay   213 +/-   3
+----
+
+*Ordinary Clock (OCサーバー)*
+
+. PTPインターフェースのPHC (`ethtool -T ens6f0np0`) を特定します。この例では、`/dev/ptp1`です。
+
+. 単一ポートと`clientOnly 1`を持つ`/etc/ptp4l-G.8275.1.conf`を作成します。これにより、ノードは常にTime Receiverとしてのみ機能します。より高い`localPriority` (`250`) により、BMCAにおいてBCの下位に維持されます。
++
+[#ptp-conf-bc-single-nic-oc]
+.Ordinary Clockの設定
+====
+[source,]
+----
+# Telecom G.8275.1 — Ordinary Clock (Time Receiver)
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     250
+G.8275.defaultDS.localPriority  250
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+clientOnly                      1
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l"
+uds_address                     /var/run/ptp4l
+uds_ro_address                  /var/run/ptp4lro
+
+[ens6f0np0]
+----
+====
+
+. BCの場合と同様に`/etc/sysconfig/ptp4l`と`/etc/sysconfig/phc2sys`を設定し (`phc2sys`ソースは`ens6f0np0`のPHC)、サービスを有効にして開始します。
++
+[source,]
+----
+# /etc/sysconfig/ptp4l
+OPTIONS="-f /etc/ptp4l-G.8275.1.conf"
+
+# /etc/sysconfig/phc2sys
+OPTIONS="-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 24"
+----
+
+. `ens6f0np0`がBCから再生成された時刻にロックされていることを確認します。ポートは`SLAVE`に移行し、オフセット (`rms`) は安定します。
++
+[,console]
+----
+# journalctl -u ptp4l -f
+ptp4l[...]: "ptp4l" selected best master clock d0460c.ffff.05c130
+ptp4l[...]: "ptp4l" port 1 (ens6f0np0): UNCALIBRATED to SLAVE on MASTER_CLOCK_SELECTED
+ptp4l[...]: "ptp4l" rms   15 max   34 freq +11699 +/-  25 delay   468 +/-   5
+ptp4l[...]: "ptp4l" rms   13 max   30 freq +11701 +/-  23 delay   468 +/-   4
+ptp4l[...]: "ptp4l" rms   14 max   30 freq +11697 +/-  24 delay   467 +/-   4
+----
++
+OCは、直近のマスターであるアップストリームの境界クロックから時刻を取得します。
+ただし、`selected best master clock`行はBoundary Clockの識別子ではなく、*Grandmaster*の識別子 (`d0460c.ffff.05c130`、GM) を報告します。Boundary ClockはGrandmasterの識別子を変更せずに転送し、自身のポートを親としてアドバタイズするため、チェーンはGrandmasterまで追跡可能です。両方の識別子を明示的に確認するには、OCで親データセットを照会します (出力例):
++
+[,console]
+----
+# pmc -f /etc/ptp4l-G.8275.1.conf -u -b 0 'GET PARENT_DATA_SET'
+sending: GET PARENT_DATA_SET
+    507c6f.fffe.4ae178-0 seq 0 RESPONSE MANAGEMENT PARENT_DATA_SET
+        parentPortIdentity                    000000.fffe.001101-2
+        parentStats                           0
+        observedParentOffsetScaledLogVariance 0xffff
+        observedParentClockPhaseChangeRate    0x7fffffff
+        grandmasterPriority1                  128
+        gm.ClockClass                         165
+        gm.ClockAccuracy                      0xfe
+        gm.OffsetScaledLogVariance            0xffff
+        grandmasterPriority2                  120
+        grandmasterIdentity                   d0460c.ffff.05c130
+----
++
+2つの識別子は異なりますが、これはまさに境界クロック・デプロイメントが示すべきものです。
++
+* `parentPortIdentity` (`000000.fffe.001101-2`) — *直接のマスター*：境界クロックの送信ポートであり、OCが実際に時刻を受信するクロックです。
+* `grandmasterIdentity` (`d0460c.ffff.05c130`) — *タイミングツリーのルート*：グランドマスターであり、境界クロックを介して変更されずに転送されます。
++
+`gm.ClockClass`、`gm.ClockAccuracy`、および`grandmasterPriority`の値は、BMCAによって使用されるグランドマスターのアドバタイズされた品質を示しています。もし2つの識別子が等しい場合、OCはパス上に境界クロックが存在せず、グランドマスターから直接同期することになります。
+
+*CAPI自動化*
+
+自動プロビジョニングワークフローを使用してこのシナリオを展開するには、各ノードで<<add-telco-ptp,完全に自動化されたダイレクトネットワークプロビジョニング>>に記載されている汎用Cluster APIテンプレートを使用し、そのプレースホルダーを以下の値で上書きしてください。
+
+.境界クロック（BCサーバー）
+[cols="1,2"]
+|===
+| Placeholder | 値
+
+| `$\{PTP4L_CONF_PATH\}`
+| `/etc/ptp4l-G.8275.1.conf`
+
+| `$\{PTP4L_CONF_CONTENTS\}`
+| <<ptp-conf-bc-single-nic-bc,上記の境界クロック設定>>から内容をコピーしてください。
+
+| `$\{PTP4L_OPTIONS\}`
+| `-f /etc/ptp4l-G.8275.1.conf`
+
+| `$\{PHC2SYS_OPTIONS\}`
+| `-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 24`
+|===
+
+.Ordinary Clock（OCサーバー）
+[cols="1,2"]
+|===
+| Placeholder | 値
+
+| `$\{PTP4L_CONF_PATH\}`
+| `/etc/ptp4l-G.8275.1.conf`
+
+| `$\{PTP4L_CONF_CONTENTS\}`
+| <<ptp-conf-bc-single-nic-oc,上記のOrdinary Clock設定>>から内容をコピーしてください。
+
+| `$\{PTP4L_OPTIONS\}`
+| `-f /etc/ptp4l-G.8275.1.conf`
+
+| `$\{PHC2SYS_OPTIONS\}`
+| `-s /dev/ptp1 -w -m --uds_address /var/run/ptp4l --domainNumber 24`
+|===
+
+
+[#ptp-scenario-bc-synce-single-nic]
+=== シナリオ2b - 境界クロック（ハイブリッドモード：PTPおよびSyncE）マルチポートシングルNIC構成（Ordinary Clockサーバーへの伝搬を含む）
+
+このシナリオはまだサポートされていません。将来の{product}リリースで含まれる予定です。
+
+[#ptp-scenario-bc-multi-nic-dpll]
+=== シナリオ3a - 境界クロック（PTPのみ）マルチNIC構成（内部タイミングモジュール付き、DPLL GNR-Dベース）
+
+*説明*
+
+{product}は、最新のIntel Granite Rapids-Dベースの設計（GNR-D）を含む、さまざまなプラットフォームで高精度なタイミングをサポートしています。これらのサーバーには通常、組み込みの高速イーサネットコントローラーと、追加ポート用のイーサネットコントローラーを備えた1つ以上の追加カード（AIC）が含まれています。以前のプラットフォーム世代とは異なり、システム全体および異なるNIC間でタイミング信号を内部的にルーティングできる専用のDPLLも装備されており、すべてのNIC PHCを同期させるための外部ケーブル接続は不要になりました。
+したがって、全体的な展開は簡素化されますが、起動時のDPLLや内部信号設定など、特定の手順とソフトウェアコンポーネントが必要になります。
+
+このシナリオは、<<ptp-scenario-bc-single-nic,シナリオ2a>>を拡張したもので、ITU-T G.8275.1（PTPのみ、レイヤー2）に完全に準拠した、複数のNIC上に構築される境界クロック（BC）を対象としています。統合コントローラーの1つのポートがグランドマスターからPTPを受信し、追加カードがダウンストリームでPTPを再生成します。シングルNICの場合とは異なり、各NICは独自のPHCを備えています。オンボードのDPLLと`ts2phc`がそれらを調整し、PHCごとに1つの`ptp4l`インスタンスが実行されます。
+
+[IMPORTANT]
+====
+この {product} リリースでは、このシナリオは「デフォルト」（つまり「PREEMPT_RT」ではない）カーネルフレーバーでのみサポートされています。
+「RT」カーネルフレーバーのサポートは、今後のリリースで追加される予定です。
+====
+
+.前提条件
+* _Intel 800シリーズネットワークデバイス_用の最新のカーネルドライバーを、 https://www.intel.com/content/www/us/en/download/19630/intel-network-adapter-driver-for-800-series-devices-under-linux.html[IntelのWebサイト]からダウンロードしてインストールしてください。
+* 「ice_RPM_Files」を含むzipファイルを選択し、アーカイブを解凍して`ice-kmp-default-*sles16sp0.x86_64.rpm`をインストールしてください。このRPMには、例えば `ice-kmp-default-2.4.5_k6.12.0_160000.5-1.sles16sp0.x86_64.rpm` が含まれています。
++
+[,console]
+----
+# transactional-update pkg install ice-kmp-default-2.4.5_k6.12.0_160000.5-1.sles16sp0.x86_64.rpm
+----
++
+変更を永続的かつ有効にするために、サーバーを再起動してください。
+
+[NOTE]
+====
+* 例を通してDell PowerEdge XR8720tシステムをリファレンスシステムとして使用しますが、カーネルインターフェイスとポート構成は、別のGNR-Dサーバーでは異なる場合があります。デバイス名は適宜調整してください。
+* Telcoデプロイメントが想定されており、以下のセクション全体でTelcoプロファイルG.8275.1が使用されます。
+====
+
+このシナリオには、以下のコンポーネントが含まれます。
+
+* *Grandmaster (GM)*: アップストリームセグメント上の、PTPドメイン（ドメイン `24`）のリファレンス。
+* *PTP対応スイッチ*: タイミングパス上でバウンダリクロック (T-BC) として機能します。PTPを伝送するすべてのポートには`ptp enable`が設定されています。アップストリームセグメントとダウンストリームセグメントは、スイッチの異なるVLAN上で分離されています（各セグメントに専用のVLANを使用）。
+* *Boundary Clock (BC server)*: GNR-Dノード。その統合コントローラーは `eno8403np1` 上のGMからPTPを受信し、統合PHC (`/dev/ptp1`) を制御します。オンボードDPLLはそのタイミングをアドインカードに分配し、`ts2phc` はそれらのPHC (`/dev/ptp2`、`/dev/ptp3`) を `/dev/ptp1` に同期させ続けます。各アドインカードはPTPをダウンストリーム側で再生成し（例えば `eno16495np0` 上で）、タイムトランスミッターとして機能します。
+* *Ordinary Clock (OC server)*: ダウンストリームセグメント上のシングルポートノード (`ens6f0np0`) で、その唯一のPTPマスターはBCです。
+
+*BC server* のタイミングは、PHCが物理的に分離されているため、連携して動作する複数の `linuxptp` デーモンによって処理されます。
+
+* 統合コントローラー (`/dev/ptp1`) 上の `ptp4l` インスタンスが `eno8403np1` でPTPプロトコルを実行します。BMCAがGMをマスターとして選択し、ポートは`SLAVE`に移行し、`ptp4l`が`/dev/ptp1`を同期させます。
+* オンボードDPLLは、統合PHCがSDPピンを介してそれを駆動し、DPLLが今度はアドインカードのクロックを駆動するように配線されています。これは、以前のプラットフォームで使用されていた外部1PPSケーブル配線の内部的な代替手段です。
+* `ts2phc`は、DPLLが分配する信号から、アドインカードのPHCを`/dev/ptp1`に同期させ続けます。
+* アドインカードごとの個別の`ptp4l`インスタンス（`/dev/ptp2`、`/dev/ptp3`）が、そのポート上でPTPを再生成し、すべて`serverOnly 1`（タイムトランスミッター）に強制されます。
+* バウンダリクロックは、時刻に加えて、グランドマスターの補助属性（クロッククラス、精度など）を転送する必要があります。これは単一の`ptp4l`インスタンス内でのみ自動的に行われるため、統合インスタンスからアドインインスタンスへそれらの値を転送するために`pmc`が使用されます（ステップ5を参照）。`pmc`（PTP管理クライアント）は、管理ソケットを介して実行中の`ptp4l`インスタンスのランタイム状態を照会および更新する`linuxptp`ツールです。
+
+[NOTE]
+====
+統合コントローラーでは、そのポートのうち*1つ*のみがPHCを管理する管理ポートです。`/sys/class/ptp/ptp1/device/net/`を調べてそれを見つけます（例: `eno8703np0`）。これはDPLL信号の設定に使用されるポートであり、必ずしもPTP（`eno8403np1`）を伝送するポートではありません。
+====
+
+[NOTE]
+====
+ここで説明する設定は完全に静的なものです。GMが利用できなくなった場合、ダウンストリームの同期はホストのホールドオーバー機能のみに依存します。別の時刻参照ソースへの自動切り替えは実行されません。
+====
+
+*図*
+
+.バウンダリクロック（PTPのみ）、オンボードDPLLを備えたマルチNIC GNR-Dノード、オーディナリークロックへの伝搬あり
+image::product-atip-ptp-scenario-bc-multi-nic-dpll.svg[シナリオ3a - バウンダリクロック（PTPのみ）、内部タイミングモジュール（DPLL GNR-Dベース）を備えたマルチNIC,scaledwidth=100%]
+
+*設定*
+
+タイミングパス上のすべてのスイッチポートでPTPを有効にする必要があります。BCサーバーは、以下の順序で起動されます。各ランタイムステップは`systemd`ユニットにもマッピングされるため、設定が再起動後も保持され、Cluster API（<<add-telco-ptp-gnrd,GNR-D CAPI自動化>>を参照）を使用して自動化できます。OCサーバーは、<<ptp-scenario-bc-single-nic,シナリオ2a>>とまったく同じように設定されます。
+
+. PTPデバイスと統合コントローラーを特定します。
+
+.. PTPクロックと、それぞれがバインドされているPCIデバイスを一覧表示します。
++
+[,console]
+----
+# ls -l /sys/class/ptp/
+lrwxrwxrwx 1 root root 0 ... ptp1 -> ../../devices/pci0000:12/0000:12:04.0/0000:13:00.0/ptp/ptp1
+lrwxrwxrwx 1 root root 0 ... ptp2 -> ../../devices/pci0000:6b/0000:6b:02.0/0000:6c:00.0/ptp/ptp2
+lrwxrwxrwx 1 root root 0 ... ptp3 -> ../../devices/pci0000:6b/0000:6b:06.0/0000:6e:00.0/ptp/ptp3
+----
+
+.. `lspci`を実行して各デバイスタイプを特定し、統合コントローラーとアドインカードを区別できるようにします。
++
+[,console]
+----
+# lspci -s 0000:13:00.0
+13:00.0 Ethernet controller: Intel Corporation Ethernet Connection E825-C for SFP (rev 04)
+# lspci -s 0000:6c:00.0
+6c:00.0 Ethernet controller: Intel Corporation Ethernet Controller E830-CC for SFP
+# lspci -s 0000:6e:00.0
+6e:00.0 Ethernet controller: Intel Corporation Ethernet Controller E830-CC for SFP
+----
++
+このリファレンスサーバーには、_Intel E825-C_統合コントローラー（`/dev/ptp1`）と、2枚の_E830-CC_アドインカード（`/dev/ptp2`、`/dev/ptp3`）が搭載されています。
+
+.. PHCを管理する統合コントローラーの管理ポートを特定します。
++
+[,console]
+----
+# ls /sys/class/ptp/ptp1/device/net/
+eno8703np0
+# ethtool -i eno8703np0
+driver: ice
+version: 2.4.5
+[...]
+----
+
+. 内部タイミング信号（DPLL）を設定します。
++
+統合PHCをDPLLに接続し、前述の管理ポート（`eno8703np0`）と正しい`ptpN`インデックスを使用して、DPLLがアドインカードに信号を供給できるようにします。
++
+[#gnrd-startup-setup]
+.`01-gnrd-startup-setup.sh`
+====
+[source,bash]
+----
+#!/bin/bash
+
+# The admin port that manages the PHC is under /sys/class/ptp/ptp1/device/net/ (e.g. eno8703np0).
+# Only one port of the integrated E825-C NIC exposes it.
+
+# Let the DPLL drive the Ethernet clock on the integrated controller
+echo 4 1 > /sys/class/net/eno8703np0/device/tspll_cfg
+
+# Feed the DPLL from the integrated PHC through the SDP pins:
+# SDP0 -> 1 pulse per second (1PPS, 1 Hz): enable the pin, then set a 1 s period
+echo 2 2 > /sys/class/ptp/ptp1/pins/SDP0
+echo 2 0 0 1 0 > /sys/class/ptp/ptp1/period
+
+# SDP2 -> 1000 pulses per second (1kPPS, 1 kHz): enable the pin, then set a 1 ms period
+echo 2 1 > /sys/class/ptp/ptp1/pins/SDP2
+echo 1 0 0 0 1000000 > /sys/class/ptp/ptp1/period
+
+# Propagate the pulses from the DPLL to the add-in cards (SDP1 on each add-in PHC)
+echo 1 1 > /sys/class/ptp/ptp2/pins/SDP1
+echo 1 1 > /sys/class/ptp/ptp3/pins/SDP1
+----
+====
++
+これらの設定は再起動時に失われるため、`ts2phc`および`ptp4l`の前に順序付けられたoneshot型の`systemd`ユニットから起動時にスクリプトを実行してください。
++
+[source,ini]
+----
+# /etc/systemd/system/gnrd-ptp-dpll-setup.service
+[Unit]
+Description=GNR-D PTP DPLL and internal signal setup
+Before=ts2phc.service ptp4l@nac.service ptp4l@aic1.service ptp4l@aic2.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/01-gnrd-startup-setup.sh
+
+[Install]
+WantedBy=multi-user.target
+----
+
+. アドインカードのPHCを`ts2phc`に合わせます。
++
+`ts2phc`（「PHCへのタイムスタンプ」）は、アドインカードのPHCを基準クロックに合わせます。ここでは、基準は統合NICのPHC（`/dev/ptp1`、GMによってその`ptp4l`インスタンスを通じてすでに調整済み）であり、コマンドラインで`-s /dev/ptp1`とともに渡されます。オンボードのDPLLは、その基準から導出された1PPSを各アドインカードの`SDP1`ピンに供給します。`ts2phc`はそれらの入力パルス（EXTTS）をタイムスタンプし、それに応じて各アドインPHCをステップさせるため、ノード内のすべてのPHCが最終的に同じ時間を共有することになります。
++
+[NOTE]
+====
+アドインPHCの調整には、異なるレベルでの2つの補完的な設定が必要です。
+
+* *ハードウェア*: オンボードのDPLLが1PPSパルスを供給できるように、各アドインPHCの`SDP1`入力ピンを有効にする必要があります。これは、前のステップ（`echo 1 1 > /sys/class/ptp/ptpN/pins/SDP1`）のDPLLセットアップスクリプトで行われます。
+* *ソフトウェア*: `ts2phc`に対して、その入力をタイムスタンプし、PHCをステップさせるよう指示する必要があります。これは、以下の構成（`ts2phc.channel`、`ts2phc.pin_index`、`ts2phc.extts_polarity`）で行われます。
+
+ピンを有効にしないとパルスはPHCに到達せず、`ts2phc`構成を行わないとパルスは適用されません。両方が必要です。
+====
++
+設定ファイルを作成します。
++
+[#gnrd-ts2phc-config]
+.`/etc/ts2phc-cf-all.cfg` — `ts2phc`設定ファイル
+====
+[source,]
+----
+[global]
+use_syslog              0
+verbose                 1
+logging_level           7
+ts2phc.pulsewidth       100000000
+
+[eno16495np0]
+ts2phc.channel          1
+ts2phc.extts_polarity   rising
+ts2phc.pin_index        1
+
+[eno16595np0]
+ts2phc.channel          1
+ts2phc.extts_polarity   rising
+ts2phc.pin_index        1
+----
+====
++
+各アドインカードは、その最初のポート（`[eno16495np0]`、`[eno16595np0]`）にちなんで名付けられたセクションを通じて構成され、これにより調整対象のPHCが識別されます。パラメータは、DPLLパルスをそのカードにマッピングします。
++
+* `ts2phc.pin_index`および`ts2phc.channel`: DPLLが1PPSを供給するピンとチャネル（このセットアップでは`SDP1`、したがって`pin_index 1`）。
+* `ts2phc.extts_polarity`: タイムスタンプするパルスエッジ（`rising`）。
+* `ts2phc.pulsewidth`: 期待される入力パルス幅（ナノ秒単位、ここでは100 ms）。
++
+手動で`ts2phc -f /etc/ts2phc-cf-all.cfg -s /dev/ptp1 -m`を実行するか、または`systemd`に`/etc/sysconfig/ts2phc`を通じて管理させるようにしてください。
++
+[source,]
+----
+# /etc/sysconfig/ts2phc
+OPTIONS="-f /etc/ts2phc-cf-all.cfg -s /dev/ptp1 -m"
+----
+
+. PHCごとに`ptp4l`インスタンスを1つ実行してください。
++
+統合コントローラーはBMCA駆動のインスタンス（レシーバー）を実行し、各アドインカードはすべてのポートが`serverOnly 1`に強制されたインスタンスを実行します。各インスタンスは、異なる制御ソケットと読み取り専用ソケットを使用する必要があります。3つの設定ファイルを作成してください：
++
+[#gnrd-ptp4l-config-nac]
+.`/etc/ptp4l-nac.conf` — 統合コントローラー (`/dev/ptp1`)
+====
+[source,]
+----
+# Telecom G.8275.1 — integrated controller (receiver)
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     128
+G.8275.defaultDS.localPriority  128
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l-nac"
+uds_address                     /var/run/ptp4l-nac
+uds_ro_address                  /var/run/ptp4lro-nac
+
+[eno8403np1]
+----
+====
++
+統合インスタンスは、GMからPTPを受信するポートである`eno8403np1`のみを宣言し、それに対して`serverOnly`や`clientOnly`を設定しません。役割の割り当てはBMCAに依存します。`eno8403np1`でGMに到達可能な場合、BMCAはそれをタイムレシーバー（`SLAVE`）として選択し、`/dev/ptp1`を制御します。統合コントローラーの他のポートは宣言されません。なぜなら、このノードではダウンストリームの再生成は統合コントローラーではなくアドインカードによって実行されるからです。対照的に、アドインカードは常にタイムトランスミッターである必要があるため、`serverOnly 1`を強制します。これらはPTPを受信して時刻を取得するのではなく、DPLLと`ts2phc`から時刻を取得するため、レシーバーとして選出されてはなりません。より厳密な制御が必要な場合は、インターフェースの下に`serverOnly`または`clientOnly`フラグを明示的に追加してください。
++
+`G.8275.portDS.localPriority`および`G.8275.defaultDS.localPriority`の値（統合インスタンスでは`128`、アドインカードでは`250`）は、G.8275.x BMCAのタイブレーカーとして機能します。これらは`clockClass`、`clockAccuracy`、分散、`priority2`の後にのみ比較され、値が小さい方が優先されます。統合インスタンスでデフォルトの`128`を維持すると、アドインインスタンス（`250`）よりも優先順位が高くなります。これにより、ノード内のタイムトランスミッター/タイムレシーバーの順序が決定論的に保たれ、`ptp4l`によって報告されるポート状態に反映されるように、BMCAがどのポートを選択するかが決まります。
++
+[#gnrd-ptp4l-config-aics]
+.`/etc/ptp4l-aic1.conf` — アドインカード 1 (`/dev/ptp2`)
+====
+[source,]
+----
+# Telecom G.8275.1 — add-in card (Time Transmitter)
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     250
+G.8275.defaultDS.localPriority  250
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l-aic1"
+uds_address                     /var/run/ptp4l-aic1
+uds_ro_address                  /var/run/ptp4lro-aic1
+
+[eno16495np0]
+serverOnly                      1
+----
+====
++
+[#gnrd-ptp4l-config-aic2]
+.`/etc/ptp4l-aic2.conf` — アドインカード 2 (`/dev/ptp3`)
+====
+[source,]
+----
+# Telecom G.8275.1 — add-in card (Time Transmitter)
+[global]
+domainNumber                    24
+priority2                       255
+dataset_comparison              G.8275.x
+G.8275.portDS.localPriority     250
+G.8275.defaultDS.localPriority  250
+maxStepsRemoved                 255
+logAnnounceInterval             -3
+logSyncInterval                 -4
+logMinDelayReqInterval          -4
+announceReceiptTimeout          3
+ptp_dst_mac                     01:80:C2:00:00:0E
+network_transport               L2
+summary_interval                3
+message_tag                     "ptp4l-aic2"
+uds_address                     /var/run/ptp4l-aic2
+uds_ro_address                  /var/run/ptp4lro-aic2
+
+[eno16595np0]
+serverOnly                      1
+----
+====
++
+[NOTE]
+====
+<<ptp-scenario-bc-single-nic,シナリオ 2a>>と同様に、タイミングパス上のすべてのノードは、ダウンストリームOCを含め、同じ転送不可のG.8275.1マルチキャストMAC `01:80:C2:00:00:0E`を使用します。
+====
++
+テンプレート化された`systemd`ユニットで`/etc/ptp4l-<instance>.conf`を読み取り、インスタンスを管理してください：
++
+[source,ini]
+----
+# /etc/systemd/system/ptp4l@.service
+[Unit]
+Description=PTP Boundary Clock instance %i
+After=gnrd-ptp-dpll-setup.service
+Requires=gnrd-ptp-dpll-setup.service
+
+[Service]
+ExecStart=/usr/sbin/ptp4l -f /etc/ptp4l-%i.conf
+
+[Install]
+WantedBy=multi-user.target
+----
++
+3つのインスタンスを有効にして開始してください：
++
+[,console]
+----
+# systemctl enable --now ptp4l@nac ptp4l@aic1 ptp4l@aic2
+----
+
+. グランドマスターのパラメータを`ptp4l`インスタンス間で転送してください。
++
+境界クロックは、時刻だけでなく、グランドマスターの補助パラメータ（クロッククラス、精度、UTCオフセットなど）も転送しなければなりません。これは*同じ*`ptp4l`インスタンスのポート間で自動的に行われますが、異なるPHCを管理する個別のインスタンス間では行われません。値は、各インスタンスのUDSソケット(`SET GRANDMASTER_SETTINGS_NP`)を介して、ランタイムで`pmc`を使って適用されます。
++
+[IMPORTANT]
+====
+`pmc`で適用された値は実行中の`ptp4l`プロセス内にのみ保持されます。これらは*書き込まれず*、`.conf`ファイルには保存されず、再起動しても保持され*ません*。`ptp4l`インスタンスが再起動されると、ファイルデフォルト値に戻るため、値を再度転送する必要があります。手動で一度実行するのではなく、転送を自動化してください（下記参照）。
+====
++
+統合コントローラーがGMにロックされたら、グランドマスターの値をクエリします。以下のヘルパーは、クエリするインスタンスの設定ファイルを引数として受け取ります。
++
+[#gnrd-get-pmc-values]
+.`get_pmc_values.sh` — `ptp4l`インスタンスからグランドマスターの値をクエリする
+====
+[source,bash]
+----
+#!/bin/bash
+# Retrieve Grandmaster information via pmc for the given ptp4l config file
+set -euo pipefail
+
+echo "PARENT_DATA_SET (Grandmaster clock values):"
+pmc -f "$1" -u -b 0 'GET PARENT_DATA_SET' | grep gm
+
+echo "TIME_PROPERTIES_DATA_SET:"
+pmc -f "$1" -u -b 0 'GET TIME_PROPERTIES_DATA_SET'
+----
+====
++
+次に、それらの値をアドインインスタンスに転送します。以下のスクリプトは、統合インスタンスから値を読み取り、各アドインインスタンスに適用します。「Input variables」セクションを編集して設定ファイル名と一致させ、システムがGMに同期されたら実行してください。
++
+[#gnrd-pmc-forward]
+.`04-ptp-forward-GM.sh` — グランドマスターの値をアドインインスタンスに転送する
+====
+[source,bash]
+----
+#!/bin/bash
+
+set -euo pipefail
+
+################## Input variables ##################
+VERBOSE=1
+
+CONFIG_FILE_NAC=/etc/ptp4l-nac.conf
+CONFIG_FILES_AICS=(/etc/ptp4l-aic1.conf /etc/ptp4l-aic2.conf)
+
+#####################################################
+
+
+# Check the system is synchronized to a GM
+GM_PRESENT=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET TIME_STATUS_NP' | awk '/gmPresent/ {print $2}')
+
+if [ -z "$GM_PRESENT" ]; then
+    echo "Failed to get GM value from ptp4l instance for NAC, exiting..."
+    exit 1
+elif [ "${GM_PRESENT}" != "true" ]; then
+    echo "No GM present, exiting..."
+    exit 1
+fi
+
+# Get the "upstream" Grandmaster values
+PDS_GM_VALUES=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET PARENT_DATA_SET' | awk 'BEGIN {ORS=" "} /gm./ {print $2}')
+TPDS_GM_VALUES=$(pmc -f ${CONFIG_FILE_NAC} -u -b 0 'GET TIME_PROPERTIES_DATA_SET' | awk 'BEGIN {ORS=" "} NR>2 {print $2}')
+
+if [ -z "$PDS_GM_VALUES" ]; then
+    echo "No PARENT_DATA_SET values retrieved, exiting ..."
+    exit 2
+elif [ -z "$TPDS_GM_VALUES" ]; then
+    echo "No TIME_PROPERTIES_DATA_SET values retrieved, exiting ..."
+    exit 2
+fi
+
+# Unpack from PARENT_DATA_SET
+read CLOCK_CLASS CLOCK_ACCURACY VARIANCE <<< $PDS_GM_VALUES
+
+# Unpack from TIME_PROPERTIES_DATA_SET
+read UTC_OFFSET LEAP_61 LEAP_59 UTC_OFFSET_VALID PTP_TIMESCALE T_TRACEABLE F_TRACEABLE T_SOURCE <<< $TPDS_GM_VALUES
+
+if [ "$VERBOSE" -eq 1 ]; then
+    echo "Read from PARENT_DATA_SET: clockClass=${CLOCK_CLASS} clockAccuracy=${CLOCK_ACCURACY} offsetScaledLogVariance=${VARIANCE}"
+    echo "Read from TIME_PROPERTIES_DATA_SET: currentUtcOffset=${UTC_OFFSET} leap61=${LEAP_61} leap59=${LEAP_59}" \
+         "currentUtcOffsetValid=${UTC_OFFSET_VALID} ptpTimescale=${PTP_TIMESCALE} timeTraceable=${T_TRACEABLE}" \
+         "frequencyTraceable=${F_TRACEABLE} timeSource=${T_SOURCE}"
+fi
+
+
+# Forward these values to the "downstream" Time Receivers, updating the ptp4l instances
+for FILE in "${CONFIG_FILES_AICS[@]}"; do
+    if [ "$VERBOSE" -eq 1 ]; then
+        echo "Updating GRANDMASTER_SETTINGS_NP (${FILE})"
+    fi
+
+    pmc -f ${FILE} -u -b 0 'SET GRANDMASTER_SETTINGS_NP
+       clockClass              '${CLOCK_CLASS}'
+       clockAccuracy           '${CLOCK_ACCURACY}'
+       offsetScaledLogVariance '${VARIANCE}'
+       currentUtcOffset        '${UTC_OFFSET}'
+       leap61                  '${LEAP_61}'
+       leap59                  '${LEAP_59}'
+       currentUtcOffsetValid   '${UTC_OFFSET_VALID}'
+       ptpTimescale            '${PTP_TIMESCALE}'
+       timeTraceable           '${T_TRACEABLE}'
+       frequencyTraceable      '${F_TRACEABLE}'
+       timeSource              '${T_SOURCE}'' &> /dev/null
+
+    if [ $? -ne 0 ]; then
+        echo "Failed to update ptp4l instance using config file \"${FILE}\", exiting ..."
+        exit 1
+    fi
+done
+----
+====
++
+値は永続的ではないため、このスクリプトを`systemd`タイマーから実行し、定期的に、またインスタンスの再起動後に値が更新されるようにしてください。
++
+[source,ini]
+----
+# /etc/systemd/system/ptp-forward-gm.service
+[Unit]
+Description=Forward Grandmaster parameters to the add-in ptp4l instances
+Wants=ptp4l@nac.service ptp4l@aic1.service ptp4l@aic2.service
+After=ptp4l@nac.service ptp4l@aic1.service ptp4l@aic2.service
+
+[Service]
+Type=oneshot
+SELinuxContext=system_u:system_r:unconfined_t:s0
+ExecStart=/usr/local/bin/04-ptp-forward-GM.sh
+----
++
+[source,ini]
+----
+# /etc/systemd/system/ptp-forward-gm.timer
+[Unit]
+Description=Refresh forwarded Grandmaster parameters
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+----
++
+その効果は、BC上のアドイン`ptp4l`インスタンスにクエリを実行することで確認できます。転送前は、ノードはファイルデフォルト値をアドバタイズしますが、転送開始後は、グランドマスターの実際の値（その後、ダウンストリームのOCに伝播されます）をアドバタイズします。例えば、`gm.ClockClass`の変更点：
++
+[,console]
+----
+# ./get_pmc_values.sh /etc/ptp4l-aic1.conf     # before forwarding
+        gm.ClockClass                         165
+        gm.ClockAccuracy                      0xfe
+        gm.OffsetScaledLogVariance            0xffff
+# ./get_pmc_values.sh /etc/ptp4l-aic1.conf     # after forwarding
+        gm.ClockClass                         8
+        gm.ClockAccuracy                      0xfe
+        gm.OffsetScaledLogVariance            0xffff
+----
+
+. オプションとして、統合PHCをソース(`/etc/sysconfig/phc2sys`)として使用し、`phc2sys`でPTPからシステムクロックを導出します。
++
+[source,]
+----
+OPTIONS="-f /etc/ptp4l-nac.conf -s /dev/ptp1 -c CLOCK_REALTIME -w"
+----
+
+*CAPI自動化*
+
+自動プロビジョニングワークフローでこのシナリオをデプロイするには、<<add-telco-ptp-gnrd,完全に自動化されたダイレクトネットワークプロビジョニング — GNR-Dシナリオ>>で説明されているGNR-D固有のCluster APIテンプレートを使用してください。標準的なシナリオとは異なり、複数の`ptp4l`インスタンス、`ts2phc`サービス、DPLL起動時セットアップ、およびグランドマスター転送タイマーをデプロイするため、上記に記載された追加の設定ファイルと`systemd`ユニットが必要です。
+そのプレースホルダーを以下の値で上書きしてください。
+
+.GNR-Dバウンダリクロック
+[cols="1,2"]
+|===
+| Placeholder | 値
+
+| `$\{GNRD_DPLL_SETUP_CONTENTS\}`
+| <<gnrd-startup-setup,`01-gnrd-startup-setup.sh`>>からコンテンツをコピーしてください。
+
+| `$\{GNRD_FORWARD_GM_CONTENTS\}`
+| <<gnrd-pmc-forward,`04-ptp-forward-GM.sh`>>からコンテンツをコピーしてください。
+
+| `$\{TS2PHC_CONF_CONTENTS\}`
+| <<gnrd-ts2phc-config,`/etc/ts2phc-cf-all.cfg`>>からコンテンツをコピーしてください。
+
+| `$\{TS2PHC_OPTIONS\}`
+| `-f /etc/ts2phc-cf-all.cfg -s /dev/ptp1 -m`
+
+| `$\{PTP4L_NAC_CONTENTS\}`
+| <<gnrd-ptp4l-config-nac,`/etc/ptp4l-nac.conf`>>からコンテンツをコピーしてください。
+
+| `$\{PTP4L_AIC1_CONTENTS\}`
+| <<gnrd-ptp4l-config-aics,`/etc/ptp4l-aic1.conf`>>からコンテンツをコピーしてください。
+
+| `$\{PTP4L_AIC2_CONTENTS\}`
+| <<gnrd-ptp4l-config-aic2,`/etc/ptp4l-aic2.conf`>>からコンテンツをコピーしてください。
+|===
+
+[#ptp-scenario-bc-synce-multi-nic-dpll]
+=== シナリオ 3b - バウンダリクロック (ハイブリッドモード:PTP & SyncE) 内部タイミングモジュール付きマルチNIC (DPLL GNR-Dベース)
+
+このシナリオはまだサポートされていません。将来の{product}リリースで含まれる予定です。
+
+[#sctp]
+== SCTP - ストリーム制御伝送プロトコル
+https://en.wikipedia.org/wiki/Stream_Control_Transmission_Protocol[ストリーム制御伝送プロトコル - Wikipedia]より
+
+[quote]
+____
+ストリーム制御伝送プロトコル（SCTP）は、インターネットプロトコルスイートのトランスポート層におけるコンピュータネットワーク通信プロトコルです。
+もともとは電気通信における信号システム7（SS7）のメッセージ転送を目的としていましたが、このプロトコルは、伝送制御プロトコル（TCP）のような輻輳制御を備えた信頼性の高い順序通りのメッセージ転送を保証しつつ、ユーザーデータグラムプロトコル（UDP）のメッセージ指向機能を提供します。
+UDPやTCPとは異なり、このプロトコルはマルチホーミングと冗長パスをサポートしており、回復力と信頼性を向上させます。
+
+SCTPは、インターネット技術標準化委員会（IETF）によってRFC 9260で標準化されています。SCTPの参照実装はFreeBSDバージョン7の一部としてリリースされ、それ以来、他のプラットフォームにも広く移植されています。
+____
+
+3GPP 4G（LTE）仕様において、SCTP（ストリーム制御伝送プロトコル）は、無線アクセスネットワーク（RAN）ドメインとの信号接続を含む、Evolved Packet Core（EPC）全体での制御プレーン信号メッセージの基盤となるレイヤー4トランスポートとして機能します。3GPP 5G仕様では、Diameter-over-SCTPベースのすべての信号インターフェースをHTTP/2に置き換えるサービスベースアーキテクチャ（SBA）の導入により、コアネットワーク内でのSCTPの必要性が排除されました。しかし、5G RANドメイン内では依然として必要とされています：
+
+* 「分離された」gNodeBインスタンスを構成するネットワーク要素間の信号インターフェース（DUとCU-CP間のF1-Cインターフェース、およびCU-CPとCU-UP間のE1インターフェース）において。
+
+* 信号目的でgNodeBインスタンスを接続するXn-Cインターフェースにおいて。
+
+* 信号目的でgNodeBインスタンス（RANドメイン）とAMFインスタンス（コアネットワークドメイン）を接続するために使用されるN2（別名NG-C）参照ポイントにおいて。
+
+次に、それを利用するSCTP対応のTelcoワークロードをホストするダウンストリームクラスターノードで、`sctp` Linux カーネルモジュール（`lksctp`）を有効にする必要があります。
+
+* Linuxノードで`sctp`カーネルモジュールを手動でロードするには、次の手順を実行します。
+
+[,shell]
+----
+$ sudo modprobe sctp
+----
+
+* ノードの起動時に毎回`sctp`カーネルモジュールを自動的にロードするには、`/etc/modules-load.d/`ディレクトリに`sctp.conf`というファイル名のファイルを作成し、その中に単に`sctp`という文字列（ https://www.freedesktop.org/software/systemd/man/latest/modules-load.d.html[systemd-modules-load.service]ユニットが起動時にロードすべきカーネルモジュールの名前）を記述します。
+
+[,shell]
+----
+$ echo "sctp" > /etc/modules-load.d/sctp.conf
+$ reboot
+----
+
+ノードの起動時に毎回`sctp`カーネルモジュールを確実にロードするための最も簡単で最適な方法は、ダウンストリームノードのプロビジョニングに使用されるEdge Image Builder (EIB) で構築された raw イメージにその`/etc/modules-load.d/sctp.conf`ファイルを追加することです。その方法の詳細については、xref:../quickstart/eib.adoc#adding-operating-system-files[EIB documentation]を参照してください。

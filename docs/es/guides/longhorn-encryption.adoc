@@ -1,0 +1,487 @@
+[#guides-longhorn-encryption]
+= Cifrado de volúmenes de Longhorn
+:revdate: 2026-07-03
+:revnumber: 3,7
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Longhorn es un sistema de almacenamiento en bloques distribuido para Kubernetes que proporciona almacenamiento persistente con capacidades de replicación y alta disponibilidad. Esta guía demuestra cómo configurar Longhorn con cifrado LUKS/AES-256 para garantizar la protección de los datos en reposo.
+
+== Introducción
+
+La seguridad de los datos es un requisito fundamental para las aplicaciones modernas nativas de nube, especialmente en entornos que manejan información confidencial. El cifrado de volúmenes proporciona una capa de seguridad fundamental que protege los datos almacenados en soportes físicos contra el acceso no autorizado, incluso en escenarios en los que la seguridad física se ha visto comprometida.
+
+Longhorn implementa el cifrado a nivel de volumen utilizando tecnologías criptográficas estándar del sector:
+
+* **LUKS (Linux Unified Key Setup)**: Una especificación para el cifrado de dispositivos de bloques que proporciona un formato en disco estándar independiente de la plataforma
+* **AES-256**: Estándar de cifrado avanzado con claves de 256 bits, que proporciona una protección criptográfica robusta
+
+== Por qué implementar el cifrado de volúmenes
+
+El cifrado de volúmenes aborda varios requisitos de seguridad y cumplimiento:
+
+* **Protección de datos en reposo**: Los datos cifrados en soportes de almacenamiento físico permanecen protegidos contra el acceso no autorizado, incluso si los discos se extraen físicamente o son robados.
+* **Garantizar la conformidad con las normas**: Las regulaciones de la industria, como el RGPD, HIPAA y PCI-DSS, exigen el cifrado de los datos confidenciales, lo que hace que el cifrado de volúmenes sea esencial para el cumplimiento.
+* **Defensa en profundidad**: El cifrado proporciona una capa de seguridad adicional que complementa el RBAC de Kubernetes y las políticas de red.
+* **Eliminación segura de datos**: Los volúmenes cifrados pueden retirarse de forma segura simplemente destruyendo las claves de cifrado, lo que garantiza que los datos queden permanentemente inaccesibles.
+
+[NOTE]
+====
+El cifrado se aplica de forma transparente a nivel de volumen. Las aplicaciones interactúan con volúmenes cifrados a través de reclamaciones de volúmenes persistentes de Kubernetes estándar sin necesidad de realizar modificaciones en el código.
+====
+
+== Vista general de la arquitectura
+
+El cifrado de Longhorn se integra con la Container Storage Interface (CSI) de Kubernetes para proporcionar un cifrado de volúmenes transparente. El proceso de cifrado se produce durante el aprovisionamiento del volumen y se gestiona a través de los siguientes componentes:
+
+* **Secrets de Kubernetes**: Las claves de cifrado se almacenan de forma segura como recursos Secret de Kubernetes
+* **Parámetros de StorageClass**: La configuración del cifrado se especifica a través de parámetros específicos de CSI
+* **Device Mapper de LUKS**: Cada volumen cifrado está respaldado por un destino de device-mapper cifrado con LUKS
+* **CSI Driver**: El controlador CSI de Longhorn gestiona la recuperación de la clave de cifrado y el montaje del volumen
+
+El flujo de trabajo de cifrado funciona de la siguiente manera:
+
+. Cuando una PersistentVolumeClaim (PVC) solicita almacenamiento a una StorageClass cifrada, el controlador CSI de Longhorn recupera la clave de cifrado del Secret designado
+. Se crea un destino de device-mapper cifrado con LUKS utilizando la clave de cifrado
+. Todos los datos escritos en el volumen se cifran antes de confirmarse en el almacenamiento subyacente
+. Cuando se monta el volumen, el controlador CSI prepara el volumen desbloqueando el dispositivo LUKS mediante la clave de cifrado almacenada
+
+== Requisitos previos
+
+Antes de implementar el cifrado de volúmenes de Longhorn, asegúrese de que se cumplen los siguientes requisitos previos:
+
+* Un clúster de Kubernetes funcional con SUSE Storage {version-longhorn} instalado
+* El motor de datos V2 habilitado y preparado tal como se describe en <<guides-suse-storage-v2-data-engine>>
+* Acceso administrativo al clúster con los permisos RBAC adecuados
+* `kubectl` herramienta shell configurada para el acceso al clúster
+* `openssl` utilidad para la generación de claves criptográficas
+
+== Implementación
+
+. **Generar la clave de cifrado**
++
+La generación de la clave de cifrado debe realizarse utilizando una generación de números aleatorios criptográficamente segura. Ejecute el siguiente comando para generar una clave de cifrado de 256 bits codificada en formato `base64`:
++
+[source,bash]
+----
+openssl rand -base64 32
+----
++
+Resultado de ejemplo:
++
+[source,text]
+----
+Kq8Xh2vN9pL3mZ1wR4tY6uI0oP5aS7dF8gH9jK1lM2n=
+----
++
+[WARNING]
+====
+**Requisitos críticos de gestión de claves**
+
+* **Nunca confirme claves de cifrado en sistemas de control de versiones**
+* La pérdida de la clave de cifrado resulta en **una pérdida de datos permanente e irreversible**
+====
+
+. **Crear el Secret de la clave de cifrado**
++
+Una vez generada, la clave de cifrado debe almacenarse como un Secret de Kubernetes en el espacio de nombres `longhorn-system`:
++
+[source,bash]
+----
+CRYPTO_KEY_VALUE="Kq8Xh2vN9pL3mZ1wR4tY6uI0oP5aS7dF8gH9jK1lM2n="
+
+kubectl create secret generic longhorn-crypto \
+  --from-literal=CRYPTO_KEY_VALUE="${CRYPTO_KEY_VALUE}" \
+  -n longhorn-system
+----
++
+Verifique la creación correcta del Secret:
++
+[source,bash]
+----
+kubectl get secret longhorn-crypto -n longhorn-system
+----
++
+[TIP]
+====
+En entornos de producción, considere utilizar soluciones externas de gestión de secretos que se integren con Kubernetes, como External Secrets Operator o sealed-secrets, para evitar almacenar datos confidenciales directamente en el etcd del clúster.
+====
+
+. **Configurar la StorageClass cifrada**
++
+.. Defina una `StorageClass` que especifique los parámetros de cifrado para el controlador CSI de Longhorn:
++
+[source,yaml]
+----
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-encrypted
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+parameters:
+  dataEngine: "v2"
+  numberOfReplicas: "3"
+  staleReplicaTimeout: "2880"
+  fromBackup: ""
+  fsType: "ext4"
+  dataLocality: "disabled"
+  # Encryption configuration
+  encrypted: "true"
+  csi.storage.k8s.io/provisioner-secret-name: "longhorn-crypto"
+  csi.storage.k8s.io/provisioner-secret-namespace: "longhorn-system"
+  csi.storage.k8s.io/node-publish-secret-name: "longhorn-crypto"
+  csi.storage.k8s.io/node-publish-secret-namespace: "longhorn-system"
+  csi.storage.k8s.io/node-stage-secret-name: "longhorn-crypto"
+  csi.storage.k8s.io/node-stage-secret-namespace: "longhorn-system"
+----
++
+Los parámetros específicos de cifrado configuran las referencias a los secretos CSI:
++
+* `encrypted: "true"` - Habilita el cifrado LUKS para todos los volúmenes aprovisionados desde esta StorageClass
+* `csi.storage.k8s.io/provisioner-secret-name` - Especifica el Secret que contiene la clave de cifrado utilizada durante el aprovisionamiento del volumen
+* `csi.storage.k8s.io/node-publish-secret-name` - Identifica el Secret utilizado al montar volúmenes en pods
+* `csi.storage.k8s.io/node-stage-secret-name` - Hace referencia al Secret utilizado durante las operaciones de preparación de volúmenes
++
+.. Aplique la definición de StorageClass:
++
+[source,bash]
+----
+kubectl apply -f longhorn-encrypted-storageclass.yaml
+----
++
+.. Verifique la creación y configuración de StorageClass:
++
+[source,bash]
+----
+kubectl get storageclass longhorn-encrypted
+kubectl get storageclass longhorn-encrypted -o yaml
+----
+
+. **Despliegue una carga de trabajo de prueba**
++
+Para validar la implementación del cifrado, despliegue un pod de prueba que escriba datos en un volumen cifrado.
++
+.. Cree el manifiesto siguiente (`test-encryption.yaml`):
++
+[source,yaml]
+----
+# Test Longhorn Encryption
+# Deploys a simple pod that writes data to an encrypted volume
+
+---
+# PVC using the encrypted StorageClass
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-encrypted-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn-encrypted
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# Pod that writes sensitive data to the volume
+apiVersion: v1
+kind: Pod
+metadata:
+  name: encryption-test-pod
+  namespace: default
+  labels:
+    app: encryption-test
+spec:
+  containers:
+  - name: writer
+    image: busybox
+    command:
+      - sh
+      - -c
+      - |
+        echo "=== Writing sensitive data to encrypted volume ==="
+        echo "SECRET DATA: Credit Card 4111-1111-1111-1111" > /data/secret.txt
+        echo "SECRET DATA: Password MySuperSecret123!" >> /data/secret.txt
+        echo "SECRET DATA: API Key sk-1234567890abcdef" >> /data/secret.txt
+        date >> /data/secret.txt
+        echo "=== Data written successfully ==="
+        echo "Content of /data/secret.txt:"
+        cat /data/secret.txt
+        echo "=== Sleeping forever (use 'kubectl exec' to verify) ==="
+        sleep infinity
+    volumeMounts:
+    - name: encrypted-storage
+      mountPath: /data
+  volumes:
+  - name: encrypted-storage
+    persistentVolumeClaim:
+      claimName: test-encrypted-pvc
+----
++
+Este manifiesto define:
++
+* Un `PersistentVolumeClaim` que solicita 1Gi de almacenamiento de la StorageClass `longhorn-encrypted`
+* Un pod que escribe datos de prueba en el volumen cifrado y permanece en ejecución para su verificación
++
+.. Despliegue la carga de trabajo de prueba:
++
+[source,bash]
+----
+kubectl apply -f test-encryption.yaml
+----
++
+.. Supervise el inicio del pod:
++
+[source,bash]
+----
+kubectl get pod encryption-test-pod -w
+----
+
+. **Verifique la funcionalidad del volumen**
++
+Una vez que el pod alcance el estado `Running`, verifique que las operaciones de datos se completen correctamente:
++
+.. Vea los registros del pod:
++
+[source,bash]
+----
+kubectl logs encryption-test-pod
+----
+
+.. Ejecute un shell dentro del pod:
++
+[source,bash]
+----
+kubectl exec -it encryption-test-pod -- sh
+----
+
+.. Dentro del pod, verifique el contenido:
++
+[source,bash]
+----
+cat /data/secret.txt
+ls -lh /data/
+----
++
+Salida esperada:
++
+[source,text]
+----
+SECRET DATA: Credit Card 4111-1111-1111-1111
+SECRET DATA: Password MySuperSecret123!
+SECRET DATA: API Key sk-1234567890abcdef
+Thu Jul 03 10:30:45 UTC 2026
+----
++
+[NOTE]
+====
+Las operaciones de datos exitosas confirman la funcionalidad de aprovisionamiento y montaje del volumen. Sin embargo, esta verificación por sí sola no valida el cifrado. Los pasos siguientes proporcionan una verificación criptográfica.
+====
+
+. **Verificación criptográfica**
++
+Para verificar de forma concluyente que el cifrado está activo, se requiere una inspección directa del dispositivo de almacenamiento subyacente.
++
+.. **Identificar la ubicación del volumen**
++
+Determine qué nodo aloja la réplica del volumen:
++
+[source,bash]
+----
+# Get the PVC details
+kubectl get pvc test-encrypted-pvc
+
+# Get the associated PersistentVolume
+kubectl get pv | grep test-encrypted
+
+# View Longhorn volume details
+kubectl get volumes -n longhorn-system | grep test-encrypted
+----
+
+.. **Acceder al nodo y localizar los archivos del volumen**
++
+Acceda mediante SSH al nodo que aloja el volumen (identificado a partir de la salida anterior):
++
+[source,bash]
+----
+# Connect to the node
+ssh root@<node-ip>
+
+# Locate the volume image file
+find /var/lib/longhorn -name "*.img*" -type f | grep -i test
+----
++
+Ruta de volumen típica:
++
+[source,text]
+----
+/var/lib/longhorn/replicas/pvc-abc12345-r-6789/volume-head-001.img
+----
+
+.. **Intentar la extracción de datos en texto plano**
++
+Ejecute el siguiente comando para buscar datos sin cifrar:
++
+[source,bash]
+----
+# Attempt to find plaintext strings in the volume file
+strings /var/lib/longhorn/replicas/pvc-*/volume-head-*.img | grep -i "credit card"
+----
++
+**Resultados de la verificación:**
++
+* **Cifrado activo**: No se han encontrado cadenas de texto plano (los datos están cifrados)
+* **Cifrado inactivo**: Se han detectado cadenas de texto plano (los datos no están cifrados)
+
+.. **Inspección hexadecimal**
++
+Examine el contenido de bytes sin procesar del volumen:
++
+[source,bash]
+----
+# Navigate to the replica directory
+cd /var/lib/longhorn/replicas/pvc-XXXXX-r-YYYY/
+
+# Display raw volume content
+hexdump -C volume-head-*.img | head -100
+----
++
+**Salida de volumen cifrado (bytes aleatorios):**
++
+[source,text]
+----
+00000000  a3 7f 2c d9 8b 4e f1 2a  9c 5d 8e 6b 4f 1d 3c 7a  |..,..N.*.[.kO.<z|
+00000010  d2 9f 4a 8c 3b e7 6d 1e  5f 0c b8 a4 7d 2f 9e 6c  |..J.;.m._...}/.l|
+----
++
+**Salida de volumen sin cifrar (ASCII legible):**
++
+[source,text]
+----
+00000000  53 45 43 52 45 54 20 44  41 54 41 3a 20 43 72 65  |SECRET DATA: Cre|
+00000010  64 69 74 20 43 61 72 64  20 34 31 31 31 2d 31 31  |dit Card 4111-11|
+----
+
+. **Verificación del dispositivo LUKS**
++
+Longhorn implementa el cifrado utilizando el subsistema LUKS de Linux. Verifique los destinos del asignador de dispositivos LUKS:
++
+[source,bash]
+----
+# List block devices with encryption type
+lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT | grep -i crypt
+
+# List device mapper crypt targets
+dmsetup ls --target crypt
+----
++
+La presencia de tipos de sistema de archivos `crypto_LUKS` o destinos de cifrado de asignador de dispositivos confirma el cifrado LUKS activo.
+
+. **Verificación de persistencia de datos**
++
+Verifique que los volúmenes cifrados mantengan la integridad de los datos a lo largo del ciclo de vida del pod:
++
+[source,bash]
+----
+# Delete the pod (volume persists)
+kubectl delete pod encryption-test-pod
+
+# Recreate the pod
+kubectl apply -f test-encryption.yaml
+
+# Wait for Running state
+kubectl get pod encryption-test-pod -w
+
+# Verify data persistence
+kubectl exec -it encryption-test-pod -- cat /data/secret.txt
+----
++
+Los datos deben permanecer intactos, lo que demuestra una persistencia de volumen adecuada.
+
+== Resumen de verificación de cifrado
+
+La siguiente tabla resume los indicadores de verificación de cifrado:
+
+|===
+|Método de verificación | Cifrado | No cifrado
+
+|Salida de `strings`
+|No se ha encontrado texto plano
+|Cadenas de texto plano visibles
+
+|Salida de `hexdump`
+|Datos binarios aleatorios
+|Texto ASCII legible
+
+|Salida de `lsblk`
+|Tipo `crypto_LUKS` presente
+|Ningún tipo `crypto_LUKS`
+
+|`dmsetup ls --target crypt`
+|Enumera dispositivos cifrados
+|No hay dispositivos cifrados enumerados
+|===
+
+== Limpieza del entorno de prueba
+
+Eliminar recursos de prueba:
+
+[source,bash]
+----
+# Delete the test pod
+kubectl delete -f test-encryption.yaml
+
+# Delete the PVC and volume
+kubectl delete pvc test-encrypted-pvc
+----
+
+== Integración de CAPI
+
+Al desplegar clústeres mediante Cluster API (CAPI) con Metal^3^, la configuración de cifrado puede integrarse en los manifiestos de aprovisionamiento del clúster, lo que permite el almacenamiento cifrado desde el arranque inicial del clúster.
+
+Una implementación de referencia completa está disponible en el https://github.com/suse-edge/telco-cloud-examples/tree/main/telco-examples/downstream-clusters/longhorn/longhorn-with-encryption[repositorio SUSE Edge telco-cloud-examples].
+
+Esta implementación de referencia incluye:
+
+* Definiciones de **BareMetalHost** para el despliegue del plano de control multinodo
+* **Manifiestos de clúster CAPI** con configuración de cifrado Longhorn integrada
+* **Aprovisionamiento automático de secretos** durante la inicialización del clúster
+* **StorageClass cifrada preconfigurada** establecida como predeterminada
+* Configuración de **MetalLB** para la gestión de VIP
+* **Endpoint Copier Operator** para la sincronización del punto final del plano de control
+
+En los despliegues basados en CAPI, la clave de cifrado se proporciona normalmente a través de variables de aprovisionamiento del clúster:
+
+[source,yaml]
+----
+# Example variable reference from CAPI manifest
+# Full manifests available in the repository
+CRYPTO_KEY_VALUE: "YOUR_GENERATED_KEY_HERE"
+----
+
+Esta variable se consume durante el aprovisionamiento del clúster para crear automáticamente el secreto `longhorn-crypto` en el espacio de nombres `longhorn-system` del clúster de sentido descendente.
+
+[CAUTION]
+====
+**Consideraciones sobre el despliegue del cifrado CAPI:**
+
+* Genere claves de cifrado usando `openssl rand -base64 32` antes del aprovisionamiento del clúster
+* Sustituya los valores simulados en los manifiestos por claves de cifrado reales
+* **Nunca envíe manifiestos que contengan claves de cifrado reales al control de versiones**
+* Implemente flujos de trabajo GitOps con soluciones de gestión de secretos
+* Mantenga las claves de cifrado en sistemas empresariales de gestión de secretos para la recuperación ante desastres
+* Utilice claves de cifrado únicas por clúster para limitar el radio de impacto en caso de compromiso de la clave.
+====
+
+

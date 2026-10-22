@@ -1,0 +1,487 @@
+[#guides-longhorn-encryption]
+= Longhorn Volume 加密
+:revdate: 2026-07-03
+:revnumber: 3.7
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+Longhorn 是一个用于 Kubernetes 的分布式块存储系统，提供具有复制和高可用性功能的持久化存储。本指南演示了如何配置带有 LUKS/AES-256 加密的 Longhorn，以确保数据在静止状态下得到保护。
+
+== 简介
+
+数据安全是现代云原生应用的关键要求，特别是在处理敏感信息的环境中。卷加密提供了一个基础安全层，即使在物理安全受到威胁的情况下，也能保护存储在物理介质上的数据免受未经授权的访问。
+
+Longhorn 使用行业标准的加密技术实现卷级加密：
+
+* **LUKS (Linux 统一密钥设置)**：一种块设备加密规范，提供了一种与平台无关的标准磁盘格式
+* **AES-256**：高级加密标准，使用 256 位密钥，提供强大的加密保护
+
+== 为什么要实施卷加密
+
+卷加密解决了多项安全和合规性要求：
+
+* **静态数据保护**：物理存储介质上的加密数据即使在磁盘被物理移除或盗窃的情况下，也能防止未经授权的访问。
+* **监管合规**：GDPR、HIPAA 和 PCI-DSS 等行业法规要求对敏感数据进行加密，这使得卷加密对于遵守法规至关重要。
+* **纵深防御**：加密提供了一个额外的安全层，是对 Kubernetes RBAC 和网络策略的补充。
+* **安全数据销毁**：加密卷可以通过简单地销毁加密密钥来安全地停用，从而确保数据永久无法访问。
+
+[NOTE]
+====
+加密在卷级别透明地应用。应用程序通过标准的 Kubernetes 持久卷声明与加密卷交互，无需修改代码。
+====
+
+== 体系结构概述
+
+Longhorn 加密与 Kubernetes 容器存储接口 (CSI) 集成，以提供透明的卷加密。加密过程在卷配置期间进行，并通过以下组件进行管理：
+
+* **Kubernetes Secret**：加密密钥作为 Kubernetes Secret 资源安全地存储
+* **StorageClass 参数**：加密配置通过 CSI 特定参数进行指定
+* **LUKS 设备映射程序**：每个加密卷都由一个 LUKS 加密设备映射程序目标提供支持
+* **CSI 驱动程序**：Longhorn CSI 驱动程序负责管理加密密钥检索和卷暂存
+
+加密工作流程如下：
+
+. 当持久卷声明 (PVC) 从加密的 StorageClass 请求存储时，Longhorn CSI 驱动程序会从指定的 Secret 中检索加密密钥
+. 使用加密密钥创建一个 LUKS 加密设备映射程序目标
+. 写入卷的所有数据在提交到底层存储之前都会被加密
+. 当卷挂载时，CSI 驱动程序通过使用存储的加密密钥解锁 LUKS 设备来暂存卷
+
+== 先决条件
+
+在实施 Longhorn 卷加密之前，请确保满足以下先决条件：
+
+* 一个已安装 SUSE Storage {version-longhorn} 的功能性 Kubernetes 集群
+* 已启用并按照 <<guides-suse-storage-v2-data-engine>> 中所述准备好的 V2 数据引擎
+* 具有适当 RBAC 权限的集群管理访问权限
+* 配置了集群访问权限的 `kubectl` 命令行工具
+* 用于加密密钥生成的 `openssl` 实用程序
+
+== 实现
+
+. **生成加密密钥**
++
+必须使用加密安全的随机数生成来执行加密密钥生成。运行以下命令以生成以 `base64` 格式编码的 256 位加密密钥：
++
+[source,bash]
+----
+openssl rand -base64 32
+----
++
+示例输出：
++
+[source,text]
+----
+Kq8Xh2vN9pL3mZ1wR4tY6uI0oP5aS7dF8gH9jK1lM2n=
+----
++
+[WARNING]
+====
+**密钥管理关键要求**
+
+* **切勿将加密密钥提交到版本控制系统**
+* 丢失加密密钥会导致 **永久且不可逆的数据丢失**
+====
+
+. **创建加密密钥 Secret**
++
+生成后，必须将加密密钥作为 Kubernetes Secret 存储在 `longhorn-system` 名称空间中：
++
+[source,bash]
+----
+CRYPTO_KEY_VALUE="Kq8Xh2vN9pL3mZ1wR4tY6uI0oP5aS7dF8gH9jK1lM2n="
+
+kubectl create secret generic longhorn-crypto \
+  --from-literal=CRYPTO_KEY_VALUE="${CRYPTO_KEY_VALUE}" \
+  -n longhorn-system
+----
++
+验证 Secret 是否创建成功：
++
+[source,bash]
+----
+kubectl get secret longhorn-crypto -n longhorn-system
+----
++
+[TIP]
+====
+在生产环境中，请考虑使用与 Kubernetes 集成的外部密钥管理解决方案（例如 External Secrets Operator 或 sealed-secrets），以避免将敏感数据直接存储在集群的 etcd 中。
+====
+
+. **配置加密的 StorageClass**
++
+.. 定义一个 `StorageClass`，用于指定 Longhorn CSI 驱动程序的加密参数：
++
+[source,yaml]
+----
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-encrypted
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+parameters:
+  dataEngine: "v2"
+  numberOfReplicas: "3"
+  staleReplicaTimeout: "2880"
+  fromBackup: ""
+  fsType: "ext4"
+  dataLocality: "disabled"
+  # Encryption configuration
+  encrypted: "true"
+  csi.storage.k8s.io/provisioner-secret-name: "longhorn-crypto"
+  csi.storage.k8s.io/provisioner-secret-namespace: "longhorn-system"
+  csi.storage.k8s.io/node-publish-secret-name: "longhorn-crypto"
+  csi.storage.k8s.io/node-publish-secret-namespace: "longhorn-system"
+  csi.storage.k8s.io/node-stage-secret-name: "longhorn-crypto"
+  csi.storage.k8s.io/node-stage-secret-namespace: "longhorn-system"
+----
++
+加密特定参数用于配置 CSI Secret 引用：
++
+* `encrypted: "true"` - 为从此 StorageClass 配置的所有卷启用 LUKS 加密
+* `csi.storage.k8s.io/provisioner-secret-name` - 指定包含卷配置期间所用加密密钥的 Secret
+* `csi.storage.k8s.io/node-publish-secret-name` - 标识将卷挂载到 Pod 时所使用的 Secret
+* `csi.storage.k8s.io/node-stage-secret-name` - 引用卷暂存操作期间使用的 Secret
++
+.. 应用 StorageClass 定义：
++
+[source,bash]
+----
+kubectl apply -f longhorn-encrypted-storageclass.yaml
+----
++
+.. 验证 StorageClass 的创建和配置：
++
+[source,bash]
+----
+kubectl get storageclass longhorn-encrypted
+kubectl get storageclass longhorn-encrypted -o yaml
+----
+
+. **部署测试工作负载**
++
+为验证加密实现，请部署一个向加密卷写入数据的测试 Pod。
++
+.. 创建以下清单 (`test-encryption.yaml`)：
++
+[source,yaml]
+----
+# Test Longhorn Encryption
+# Deploys a simple pod that writes data to an encrypted volume
+
+---
+# PVC using the encrypted StorageClass
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-encrypted-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn-encrypted
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# Pod that writes sensitive data to the volume
+apiVersion: v1
+kind: Pod
+metadata:
+  name: encryption-test-pod
+  namespace: default
+  labels:
+    app: encryption-test
+spec:
+  containers:
+  - name: writer
+    image: busybox
+    command:
+      - sh
+      - -c
+      - |
+        echo "=== Writing sensitive data to encrypted volume ==="
+        echo "SECRET DATA: Credit Card 4111-1111-1111-1111" > /data/secret.txt
+        echo "SECRET DATA: Password MySuperSecret123!" >> /data/secret.txt
+        echo "SECRET DATA: API Key sk-1234567890abcdef" >> /data/secret.txt
+        date >> /data/secret.txt
+        echo "=== Data written successfully ==="
+        echo "Content of /data/secret.txt:"
+        cat /data/secret.txt
+        echo "=== Sleeping forever (use 'kubectl exec' to verify) ==="
+        sleep infinity
+    volumeMounts:
+    - name: encrypted-storage
+      mountPath: /data
+  volumes:
+  - name: encrypted-storage
+    persistentVolumeClaim:
+      claimName: test-encrypted-pvc
+----
++
+此清单定义了：
++
+* 一个 `PersistentVolumeClaim` 从 `longhorn-encrypted` StorageClass 请求 1Gi 存储的
+* 一个向加密卷写入测试数据并保持运行以供验证的 Pod
++
+.. 部署测试工作负载：
++
+[source,bash]
+----
+kubectl apply -f test-encryption.yaml
+----
++
+.. 监控 Pod 启动：
++
+[source,bash]
+----
+kubectl get pod encryption-test-pod -w
+----
+
+. **验证卷功能**
++
+一旦 Pod 达到 `Running` 状态，请验证数据操作是否成功完成：
++
+.. 查看 Pod 日志：
++
+[source,bash]
+----
+kubectl logs encryption-test-pod
+----
+
+.. 在 Pod 内运行 shell：
++
+[source,bash]
+----
+kubectl exec -it encryption-test-pod -- sh
+----
+
+.. 在 Pod 内，验证内容：
++
+[source,bash]
+----
+cat /data/secret.txt
+ls -lh /data/
+----
++
+预期输出：
++
+[source,text]
+----
+SECRET DATA: Credit Card 4111-1111-1111-1111
+SECRET DATA: Password MySuperSecret123!
+SECRET DATA: API Key sk-1234567890abcdef
+Thu Jul 03 10:30:45 UTC 2026
+----
++
+[NOTE]
+====
+成功的数据操作确认了卷的配置和挂载功能。然而，仅凭此验证无法验证加密。以下步骤提供加密验证。
+====
+
+. **加密验证**
++
+若要确切验证加密是否处于活动状态，需要直接检查底层存储设备。
++
+.. **确定卷位置**
++
+确定哪个节点托管了卷副本：
++
+[source,bash]
+----
+# Get the PVC details
+kubectl get pvc test-encrypted-pvc
+
+# Get the associated PersistentVolume
+kubectl get pv | grep test-encrypted
+
+# View Longhorn volume details
+kubectl get volumes -n longhorn-system | grep test-encrypted
+----
+
+.. **访问节点并定位卷文件**
++
+通过 SSH 连接到托管该卷的节点（从之前的输出中识别）：
++
+[source,bash]
+----
+# Connect to the node
+ssh root@<node-ip>
+
+# Locate the volume image file
+find /var/lib/longhorn -name "*.img*" -type f | grep -i test
+----
++
+典型卷路径：
++
+[source,text]
+----
+/var/lib/longhorn/replicas/pvc-abc12345-r-6789/volume-head-001.img
+----
+
+.. **尝试提取明文数据**
++
+运行以下命令以搜索未加密的数据：
++
+[source,bash]
+----
+# Attempt to find plaintext strings in the volume file
+strings /var/lib/longhorn/replicas/pvc-*/volume-head-*.img | grep -i "credit card"
+----
++
+**校验结果：**
++
+* **加密处于活动状态**：未找到明文字符串（数据已加密）
+* **加密处于非活动状态**：检测到明文字符串（数据未加密）
+
+.. **十六进制检查**
++
+检查卷的原始字节内容：
++
+[source,bash]
+----
+# Navigate to the replica directory
+cd /var/lib/longhorn/replicas/pvc-XXXXX-r-YYYY/
+
+# Display raw volume content
+hexdump -C volume-head-*.img | head -100
+----
++
+**加密卷输出（随机字节）：**
++
+[source,text]
+----
+00000000  a3 7f 2c d9 8b 4e f1 2a  9c 5d 8e 6b 4f 1d 3c 7a  |..,..N.*.[.kO.<z|
+00000010  d2 9f 4a 8c 3b e7 6d 1e  5f 0c b8 a4 7d 2f 9e 6c  |..J.;.m._...}/.l|
+----
++
+**未加密卷输出（可读 ASCII）：**
++
+[source,text]
+----
+00000000  53 45 43 52 45 54 20 44  41 54 41 3a 20 43 72 65  |SECRET DATA: Cre|
+00000010  64 69 74 20 43 61 72 64  20 34 31 31 31 2d 31 31  |dit Card 4111-11|
+----
+
+. **LUKS 设备校验**
++
+Longhorn 使用 Linux LUKS 子系统实现加密。校验 LUKS 设备映射器目标：
++
+[source,bash]
+----
+# List block devices with encryption type
+lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT | grep -i crypt
+
+# List device mapper crypt targets
+dmsetup ls --target crypt
+----
++
+`crypto_LUKS` 文件系统类型或设备映射器加密目标的存在确认了 LUKS 加密处于活动状态。
+
+. **数据持久性验证**
++
+验证加密卷在 Pod 生命周期事件中保持数据完整性：
++
+[source,bash]
+----
+# Delete the pod (volume persists)
+kubectl delete pod encryption-test-pod
+
+# Recreate the pod
+kubectl apply -f test-encryption.yaml
+
+# Wait for Running state
+kubectl get pod encryption-test-pod -w
+
+# Verify data persistence
+kubectl exec -it encryption-test-pod -- cat /data/secret.txt
+----
++
+数据应保持完整，以证明正确的卷持久性。
+
+== 加密验证摘要
+
+下表总结了加密验证指标：
+
+|===
+|验证方法 | 在 | 未加密
+
+|`strings` 输出
+|未找到明文
+|可见明文字符串
+
+|`hexdump` 输出
+|随机二进制数据
+|可读的 ASCII 文本
+
+|`lsblk` 输出
+|`crypto_LUKS` 存在 类型
+|无 `crypto_LUKS` 类型
+
+|`dmsetup ls --target crypt`
+|列出加密设备
+|未列出加密设备
+|===
+
+== 测试环境清理
+
+移除测试资源：
+
+[source,bash]
+----
+# Delete the test pod
+kubectl delete -f test-encryption.yaml
+
+# Delete the PVC and volume
+kubectl delete pvc test-encrypted-pvc
+----
+
+== CAPI 集成
+
+当使用 Cluster API (CAPI) 和 Metal^3^ 部署集群时，加密配置可以嵌入到集群配置清单中，从而在初始集群启动时启用加密存储。
+
+完整的参考实现可在 https://github.com/suse-edge/telco-cloud-examples/tree/main/telco-examples/downstream-clusters/longhorn/longhorn-with-encryption[SUSE Edge telco-cloud-examples 储存库] 中找到。
+
+此参考实现包括：
+
+* 用于多节点控制平面部署的 **BareMetalHost** 定义
+* 集成了 Longhorn 加密配置的 **CAPI 集群清单**
+* 集群初始化期间的 **自动 Secret 分配**
+* 设置为默认的 **预配置加密 StorageClass**
+* 用于 VIP 管理的 **MetalLB** 配置
+* 用于控制平面端点同步的 **Endpoint Copier Operator**
+
+在基于 CAPI 的部署中，加密密钥通常通过集群配置变量提供：
+
+[source,yaml]
+----
+# Example variable reference from CAPI manifest
+# Full manifests available in the repository
+CRYPTO_KEY_VALUE: "YOUR_GENERATED_KEY_HERE"
+----
+
+此变量在集群配置期间被使用，以自动在下游集群的 `longhorn-system` 名称空间中创建 `longhorn-crypto` Secret。
+
+[CAUTION]
+====
+**CAPI 加密部署注意事项：**
+
+* 在集群配置前使用 `openssl rand -base64 32` 生成加密密钥
+* 将清单中的占位值替换为实际的加密密钥
+* **切勿将包含真实加密密钥的清单提交到版本控制系统**
+* 实施带有 Secret 管理解决方案的 GitOps 工作流程
+* 在企业 Secret 管理系统中维护加密密钥以进行灾难恢复
+* 为每个集群使用唯一的加密密钥，以限制密钥泄露时的影响范围
+====
+
+

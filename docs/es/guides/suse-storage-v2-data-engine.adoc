@@ -1,0 +1,242 @@
+[#guides-suse-storage-v2-data-engine]
+= V2 Data Engine de SUSE Storage
+:revdate: 2026-09-17
+:revnumber: 3,7
+:page-revdate: {revdate}
+:experimental:
+
+ifdef::env-github[]
+:imagesdir: ../images/
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+SUSE Storage {version-longhorn} incluye el Longhorn V2 Data Engine como una característica de disponibilidad general.
+A partir de {product} 3.7, se recomienda el V2 Data Engine para los volúmenes recién aprovisionados cuando el clúster cumple los requisitos previos de V2.
+
+[IMPORTANT]
+====
+El Helm chart de SUSE Storage no convierte los volúmenes V1 existentes a V2.
+El motor de datos es una propiedad de volumen inmutable.
+Los volúmenes V1 existentes siguen utilizando V1 hasta que sus datos se migran a volúmenes V2 recién aprovisionados.
+====
+
+== Requisitos previos
+
+Antes de habilitar el V2 Data Engine, revisad los {link-longhorn-v2-requirements}[requisitos de V2 en sentido ascendente].
+En particular, cada nodo que pueda alojar una réplica V2 requiere:
+
+* Un dispositivo de bloque dedicado y sin formato. Se recomiendan dispositivos NVMe para cargas de trabajo de producción.
+* Los módulos del kernel `nvme-tcp`, `vfio_pci` y `uio_pci_generic`.
+* CPU y memoria suficientes para el gestor de instancias V2. La configuración predeterminada utiliza 2 GiB de páginas enormes (huge pages) por gestor de instancias.
+* Una CPU y un kernel compatibles. Las CPU AMD64 requieren SSE4.2 y se recomienda el kernel 6.7 o posterior.
+
+Longhorn recomienda utilizar un solo motor de datos una vez completada la migración.
+Ejecutar ambos motores crea gestores de instancias independientes y, por tanto, consume CPU y memoria adicionales.
+
+== Configurar V2 para nuevos volúmenes
+
+Preparad los dispositivos de bloque necesarios antes de aprovisionar volúmenes de aplicación.
+Registrad cada dispositivo como un disco `block` en su nodo de Longhorn utilizando la interfaz de usuario de SUSE Storage o actualizando el recurso `nodes.longhorn.io` correspondiente.
+
+Para un clúster nuevo que no tenga volúmenes V1, utilizad los siguientes valores de Helm:
+
+[,yaml]
+----
+defaultSettings:
+  v1DataEngine: false
+  v2DataEngine: true
+persistence:
+  dataEngine: v2
+----
+
+Para un clúster existente con volúmenes V1, mantened ambos motores habilitados durante la migración:
+
+[,yaml]
+----
+defaultSettings:
+  v1DataEngine: true
+  v2DataEngine: true
+persistence:
+  dataEngine: v2
+----
+
+Aplicad los valores con vuestro flujo de trabajo habitual de ampliación o actualización de Helm.
+Por ejemplo:
+
+[,shell,subs="attributes"]
+----
+helm upgrade --install longhorn oci://dp.apps.rancher.io/charts/suse-storage \
+  --version {version-longhorn-chart} \
+  --namespace longhorn-system \
+  --create-namespace \
+  --reuse-values \
+  --values suse-storage-v2-values.yaml
+----
+
+En una instalación existente, confirmad que el ajuste de Longhorn en ejecución estaba habilitado.
+Si permanece deshabilitado después de la actualización de Helm, habilitadlo explícitamente:
+
+[,shell]
+----
+kubectl -n longhorn-system patch settings.longhorn.io v2-data-engine \
+  --type merge --patch '{"value":"true"}'
+----
+
+[CAUTION]
+====
+No deshabilitéis el V1 Data Engine mientras queden volúmenes V1 en el clúster.
+Al actualizar una versión existente, confirmad también que `--reuse-values` no conserva un valor `persistence.dataEngine` anterior de `v1`.
+====
+
+Cread una StorageClass V2 dedicada en lugar de cambiar una StorageClass existente in situ:
+
+[,yaml]
+----
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-v2
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  dataEngine: "v2"
+  numberOfReplicas: "3"
+  staleReplicaTimeout: "2880"
+  fsType: "ext4"
+----
+
+Para hacer que V2 sea el valor predeterminado para los PVC que no especifiquen `storageClassName`, moved la anotación predeterminada a la nueva StorageClass:
+
+[,shell]
+----
+kubectl annotate storageclass longhorn \
+  storageclass.kubernetes.io/is-default-class="false" --overwrite
+
+kubectl annotate storageclass longhorn-v2 \
+  storageclass.kubernetes.io/is-default-class="true" --overwrite
+----
+
+Este cambio solo afecta a los volúmenes recién aprovisionados.
+No cambia el motor de datos de los volúmenes existentes.
+
+Verificad los ajustes, la StorageClass, los discos y los volúmenes:
+
+[,shell]
+----
+kubectl -n longhorn-system get settings.longhorn.io \
+  v1-data-engine v2-data-engine
+
+kubectl get storageclass longhorn-v2 \
+  -o jsonpath='dataEngine={.parameters.dataEngine}{"\n"}'
+
+kubectl -n longhorn-system get nodes.longhorn.io
+
+kubectl -n longhorn-system get volumes.longhorn.io \
+  -o custom-columns='NAME:.metadata.name,ENGINE:.spec.dataEngine,STATE:.status.state,ROBUSTNESS:.status.robustness'
+----
+
+== Migrar un volumen V1 a V2
+
+SUSE Storage {version-longhorn} no admite la conversión de un volumen existente de V1 a V2 in situ.
+Planificad una ventana de mantenimiento y migrad cada carga de trabajo a un nuevo volumen V2.
+
+. Haced una copia de seguridad de la aplicación y de su volumen V1.
+. Detened o reducid cada carga de trabajo que escriba en el PVC de origen.
+. Cread un PVC de destino en el mismo espacio de nombres, utilizando la StorageClass `longhorn-v2` y una capacidad igual o superior a la del PVC de origen.
+. Copiad los datos utilizando el método admitido por la aplicación.
+. Validad los datos copiados antes de cambiar la carga de trabajo para que utilice el PVC de destino.
+. Actualizad o recread la carga de trabajo para que haga referencia al PVC V2.
+. Conservad el volumen V1 hasta que la aplicación se haya validado en V2 y, a continuación, eliminadlo de acuerdo con vuestra política de retención.
+
+Para un volumen de sistema de archivos que no esté gestionado por una base de datos u otra aplicación que requiera una migración consciente de la consistencia, un único pod de mantenimiento puede montar la fuente V1 en modo de solo lectura y el destino V2 en modo de lectura-escritura:
+
+[,yaml]
+----
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: copy-v1-to-v2
+  namespace: <application-namespace>
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: copy
+          image: registry.suse.com/bci/bci-micro:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              cp -a /source/. /destination/
+              sync
+          volumeMounts:
+            - name: source
+              mountPath: /source
+              readOnly: true
+            - name: destination
+              mountPath: /destination
+      volumes:
+        - name: source
+          persistentVolumeClaim:
+            claimName: <v1-pvc-name>
+        - name: destination
+          persistentVolumeClaim:
+            claimName: <v2-pvc-name>
+----
+
+[WARNING]
+====
+El Job de copia es solo un ejemplo genérico de sistema de archivos.
+Utilizad la copia de seguridad y restauración nativa de la aplicación o la replicación para bases de datos, volúmenes de bloques sin procesar y aplicaciones con sus propios requisitos de consistencia.
+Verificad la propiedad, los permisos, los atributos extendidos y los datos de la aplicación antes de eliminar el PVC de origen.
+====
+
+Después de migrar cada carga de trabajo, confirmad que no quedan volúmenes V1:
+
+[,shell]
+----
+kubectl -n longhorn-system get volumes.longhorn.io \
+  -o custom-columns='NAME:.metadata.name,ENGINE:.spec.dataEngine,STATE:.status.state'
+----
+
+A continuación, podéis desactivar el motor de datos V1 en los valores de Helm y actualizar la versión:
+
+[,yaml]
+----
+defaultSettings:
+  v1DataEngine: false
+  v2DataEngine: true
+persistence:
+  dataEngine: v2
+----
+
+Si el ajuste de ejecución permanece habilitado después de la actualización de Helm, desactivadlo explícitamente:
+
+[,shell]
+----
+kubectl -n longhorn-system patch settings.longhorn.io v1-data-engine \
+  --type merge --patch '{"value":"false"}'
+----
+
+Ejecutad de nuevo el comando de inventario de volúmenes y confirmad que no se ha pasado por alto ningún volumen V1 antes de eliminar cualquier almacenamiento de nodo específico de V1.
+
+== Limitaciones de uso
+
+Antes de mover una carga de trabajo a V2, revisad la {link-longhorn-v1-v2-parity}[comparativa de características de V1 y V2].
+Las siguientes limitaciones son especialmente relevantes para SUSE Storage {version-longhorn}:
+
+* Los volúmenes V1 no se pueden convertir a V2 in situ.
+* Las imágenes de respaldo V2 no son compatibles. Utilizad CDI para los flujos de trabajo de importación de imágenes de KubeVirt.
+* El motor de datos V2 no admite volúmenes estrictamente locales, reconstrucción rápida de réplicas sin conexión, contadores de revisión ni gestión de instancias huérfanas.
+* Los volúmenes V2 deben desconectarse antes de actualizar entre versiones de parche de SUSE Storage 1.12, ya que la actualización en vivo del motor V2 no es compatible.
+* El motor de datos V2 fragmentado es experimental y no tiene paridad de características con los volúmenes V2 replicados. No lo utilicéis para cargas de trabajo de producción que requieran capacidades no compatibles, como copia de seguridad y restauración, recuperación ante desastres, clonación o migración en vivo.
+* En ARM64, los volúmenes V2 respaldados por dispositivos de bloque NVMe tienen una limitación en el sentido ascendente. Revisad las {link-longhorn-important-notes}[notas importantes de Longhorn] antes de la ampliación.
