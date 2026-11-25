@@ -620,23 +620,46 @@ Wants=network-online.target
 After=network.target network-online.target rke2-server.service k3s.service
 # At least, the basic-setup.sh one needs to be present
 ConditionPathExists=/opt/mgmt/bin/basic-setup.sh
+# Allow unlimited retries if cluster dependencies take time to settle
+StartLimitIntervalSec=0
 
 [Service]
 User=root
-Type=forking
+Type=oneshot
+RemainAfterExit=yes
+# Restart in the event of a failure (in any of the invoked scripts)
+# with a 30-second delay
+Restart=on-failure
+RestartSec=30s
 # Metal3 can take A LOT to download the IPA image
 TimeoutStartSec=1800
 
-ExecStartPre=/bin/sh -c "echo 'Setting up Management components...'"
-# Scripts are executed in StartPre because Start can only run a single one
-ExecStartPre=/opt/mgmt/bin/rancher.sh
-ExecStartPre=/opt/mgmt/bin/metal3.sh
-ExecStart=/bin/sh -c "echo 'Finished setting up Management components'"
-RemainAfterExit=yes
-KillMode=process
-# Disable & delete everything
-ExecStartPost=rm -f /opt/mgmt/bin/rancher.sh
-ExecStartPost=rm -f /opt/mgmt/bin/metal3.sh
+ExecStart=/bin/sh -c '\
+  echo "Setting up Management components..."; \
+  rm -f /run/mgmt-setup.failed; \
+  if [ -f /opt/mgmt/bin/rancher.sh ]; then \
+    echo "Running rancher.sh..."; \
+    if /opt/mgmt/bin/rancher.sh; then \
+      echo "rancher.sh succeeded"; \
+      rm -f /opt/mgmt/bin/rancher.sh; \
+    else \
+      echo "rancher.sh failed"; \
+      touch /run/mgmt-setup.failed; \
+    fi; \
+  fi; \
+  if [ -f /opt/mgmt/bin/metal3.sh ]; then \
+    echo "Running metal3.sh..."; \
+    if /opt/mgmt/bin/metal3.sh; then \
+      echo "metal3.sh succeeded"; \
+      rm -f /opt/mgmt/bin/metal3.sh; \
+    else \
+      echo "metal3.sh failed"; \
+      touch /run/mgmt-setup.failed; \
+    fi; \
+  fi; \
+  [ ! -f /run/mgmt-setup.failed ] && echo "Finished setting up Management components"'
+
+# Runs only after ALL the invoked scripts have succeeded and exited 0
 ExecStartPost=rm -f /opt/mgmt/bin/basic-setup.sh
 ExecStartPost=/bin/sh -c "systemctl disable mgmt-stack-setup.service"
 ExecStartPost=rm -f /etc/systemd/system/mgmt-stack-setup.service
@@ -667,6 +690,7 @@ echo "export KUBECONFIG=/etc/rancher/rke2/rke2.yaml" >> /etc/profile.local
 mkdir -p /opt/mgmt/bin/
 for script in basic-setup.sh rancher.sh metal3.sh; do
 	cp ${script} /opt/mgmt/bin/
+  chmod +x /opt/mgmt/bin/${script}
 done
 
 # Copy the systemd unit file and enable it at boot
